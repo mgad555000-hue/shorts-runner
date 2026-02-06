@@ -1,0 +1,35 @@
+services:
+  shorts-app:
+    build: .
+    container_name: shorts-app-container
+    restart: unless-stopped
+    user: root
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./data:/app/data:rw
+      - ./shorts/out:/app/shorts/out:rw
+      - ./recipes:/app/recipes:ro
+      - ./app:/app/app:ro
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - C:/Users/w10/AppData/Roaming/gcloud:/root/.config/gcloud:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATA_ROOT=/app/data
+      - OUTPUT_ROOT=/app/shorts/out
+      - SANDBOX_IMAGE=shorts-runner-sandbox
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - MAX_CONCURRENT_RUNS=2
+      - MOCK_MODE=false
+      - CLEANUP_INTERVAL_HOURS=6
+      - CLEANUP_MAX_AGE_DAYS=7
+      - CLEANUP_KEEP_LAST_N=50
+    depends_on:
+      - sandbox-build
+
+  sandbox-build:
+    build:
+      context: .
+      dockerfile: sandbox.Dockerfile
+    image: shorts-runner-sandbox
+    command: echo "Sandbox image built"

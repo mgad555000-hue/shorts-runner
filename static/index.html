@@ -1,0 +1,1330 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shorts Runner</title>
+    <style>
+        :root {
+            --primary: #ec4899;
+            --primary-hover: #db2777;
+            --success: #10b981;
+            --success-hover: #059669;
+            --danger: #ef4444;
+            --danger-hover: #dc2626;
+            --warning: #f59e0b;
+            --info: #3b82f6;
+            --gray-50: #f9fafb;
+            --gray-100: #f3f4f6;
+            --gray-200: #e5e7eb;
+            --gray-300: #d1d5db;
+            --gray-400: #9ca3af;
+            --gray-500: #6b7280;
+            --gray-600: #4b5563;
+            --gray-700: #374151;
+            --gray-800: #1f2937;
+            --gray-900: #111827;
+            --radius: 12px;
+            --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
+            --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: var(--gray-50);
+            color: var(--gray-800);
+            direction: rtl;
+            min-height: 100vh;
+        }
+
+        /* ===== Header ===== */
+        .header {
+            background: linear-gradient(135deg, var(--gray-900) 0%, var(--gray-800) 100%);
+            color: white;
+            padding: 16px 20px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: var(--shadow-lg);
+        }
+        .header-inner {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .header h1 {
+            font-size: 20px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .header-stats {
+            display: flex;
+            gap: 16px;
+            font-size: 13px;
+            opacity: 0.85;
+        }
+        .header-stat { display: flex; align-items: center; gap: 4px; }
+        .stat-dot {
+            width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+        }
+        .stat-dot.running { background: var(--warning); animation: pulse 2s infinite; }
+        .stat-dot.completed { background: var(--success); }
+        .stat-dot.total { background: var(--info); }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        /* ===== Container ===== */
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+
+        /* ===== Tabs ===== */
+        .tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 16px;
+            background: white;
+            padding: 6px;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            overflow-x: auto;
+        }
+        .tab {
+            padding: 10px 20px;
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            border-radius: 8px;
+            transition: all 0.2s;
+            color: var(--gray-500);
+            white-space: nowrap;
+            flex: 1;
+            text-align: center;
+        }
+        .tab.active {
+            background: var(--primary);
+            color: white;
+            box-shadow: 0 2px 8px rgba(236,72,153,0.3);
+        }
+        .tab:hover:not(.active) { background: var(--gray-100); color: var(--gray-700); }
+
+        /* ===== Cards ===== */
+        .card {
+            background: white;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            padding: 20px;
+            margin-bottom: 16px;
+        }
+        .card-title {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--gray-800);
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* ===== Forms ===== */
+        .form-group { margin-bottom: 16px; }
+        .form-label {
+            display: block;
+            margin-bottom: 6px;
+            font-weight: 600;
+            font-size: 13px;
+            color: var(--gray-600);
+        }
+        select, input[type="text"], input[type="number"] {
+            width: 100%;
+            padding: 10px 12px;
+            border: 2px solid var(--gray-200);
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.2s;
+            background: white;
+        }
+        select:focus, input:focus, textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(236,72,153,0.1);
+        }
+        textarea {
+            width: 100%;
+            min-height: 300px;
+            padding: 14px;
+            border: 2px solid var(--gray-200);
+            border-radius: 8px;
+            font-family: 'Cascadia Code', 'Fira Code', 'Courier New', monospace;
+            font-size: 13px;
+            direction: ltr;
+            text-align: left;
+            line-height: 1.6;
+            resize: vertical;
+            transition: border-color 0.2s;
+        }
+
+        /* ===== Buttons ===== */
+        .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+        }
+        .btn:active { transform: scale(0.97); }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-success { background: var(--success); color: white; }
+        .btn-success:hover { background: var(--success-hover); }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-danger:hover { background: var(--danger-hover); }
+        .btn-ghost {
+            background: var(--gray-100);
+            color: var(--gray-600);
+        }
+        .btn-ghost:hover { background: var(--gray-200); }
+        .btn-sm { padding: 6px 12px; font-size: 12px; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* ===== Badges ===== */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .badge-pending { background: #fef3c7; color: #92400e; }
+        .badge-running { background: #dbeafe; color: #1e40af; animation: pulse 2s infinite; }
+        .badge-completed { background: #d1fae5; color: #065f46; }
+        .badge-failed { background: #fee2e2; color: #991b1b; }
+        .badge-cancelled { background: var(--gray-100); color: var(--gray-600); }
+
+        /* ===== List Items ===== */
+        .list-item {
+            background: white;
+            padding: 16px;
+            margin-bottom: 8px;
+            border-radius: var(--radius);
+            border: 1px solid var(--gray-200);
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+        .list-item:hover {
+            border-color: var(--primary);
+            box-shadow: 0 2px 8px rgba(236,72,153,0.1);
+        }
+        .list-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 8px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+        }
+        .list-item h3 {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--gray-800);
+        }
+        .list-item .meta {
+            font-size: 12px;
+            color: var(--gray-500);
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .meta-item { display: flex; align-items: center; gap: 4px; }
+
+        /* ===== Run Detail Panel ===== */
+        .detail-panel {
+            background: white;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-lg);
+            border: 2px solid var(--primary);
+            overflow: hidden;
+            margin-bottom: 16px;
+        }
+        .detail-header {
+            background: linear-gradient(135deg, var(--primary) 0%, #f472b6 100%);
+            color: white;
+            padding: 16px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .detail-body { padding: 20px; }
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .detail-field {
+            padding: 10px;
+            background: var(--gray-50);
+            border-radius: 8px;
+        }
+        .detail-field-label {
+            font-size: 11px;
+            color: var(--gray-500);
+            text-transform: uppercase;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        .detail-field-value {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--gray-800);
+        }
+
+        /* ===== Log Display ===== */
+        .log-display {
+            background: var(--gray-900);
+            color: #e5e7eb;
+            padding: 16px;
+            border-radius: 8px;
+            font-family: 'Cascadia Code', 'Fira Code', 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.7;
+            max-height: 400px;
+            overflow-y: auto;
+            direction: ltr;
+            text-align: left;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        /* ===== Files List ===== */
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 12px;
+            border-radius: 8px;
+            background: var(--gray-50);
+            margin-bottom: 4px;
+            font-size: 13px;
+        }
+        .file-item:hover { background: var(--gray-100); }
+        .file-name { font-weight: 600; color: var(--gray-700); }
+        .file-size { color: var(--gray-400); font-size: 12px; }
+
+        /* ===== Modal ===== */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            backdrop-filter: blur(4px);
+            overflow: auto;
+            padding: 20px;
+        }
+        .modal-overlay.active { display: flex; justify-content: center; align-items: flex-start; }
+        .modal {
+            background: white;
+            border-radius: var(--radius);
+            max-width: 800px;
+            width: 100%;
+            margin-top: 40px;
+            box-shadow: var(--shadow-lg);
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        .modal-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--gray-200);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .modal-header h2 { font-size: 18px; font-weight: 700; }
+        .modal-body { padding: 20px; }
+        .modal-footer {
+            padding: 12px 20px;
+            border-top: 1px solid var(--gray-200);
+            display: flex;
+            gap: 8px;
+            justify-content: flex-start;
+        }
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: var(--gray-400);
+            padding: 4px;
+            line-height: 1;
+        }
+        .close-btn:hover { color: var(--gray-700); }
+
+        /* ===== Alert ===== */
+        .alert {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            display: none;
+            font-size: 14px;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .alert.active { display: flex; }
+        .alert-success { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+        .alert-error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+        .alert-info { background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
+        .alert-close { background: none; border: none; cursor: pointer; font-size: 18px; opacity: 0.6; }
+
+        /* ===== Spinner ===== */
+        .spinner {
+            width: 18px; height: 18px;
+            border: 3px solid rgba(255,255,255,0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            display: inline-block;
+        }
+        .spinner-dark {
+            border: 3px solid var(--gray-200);
+            border-top-color: var(--primary);
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ===== Empty State ===== */
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--gray-400);
+        }
+        .empty-state-icon { font-size: 48px; margin-bottom: 12px; }
+        .empty-state-text { font-size: 15px; }
+
+        /* ===== Responsive ===== */
+        @media (max-width: 768px) {
+            .container { padding: 10px; }
+            .header { padding: 12px 16px; }
+            .header h1 { font-size: 16px; }
+            .header-stats { font-size: 11px; gap: 10px; }
+            .tabs { gap: 2px; padding: 4px; }
+            .tab { padding: 8px 12px; font-size: 13px; }
+            .card { padding: 14px; }
+            textarea { min-height: 200px; font-size: 12px; }
+            .detail-grid { grid-template-columns: repeat(2, 1fr); }
+            .btn { padding: 8px 14px; font-size: 13px; }
+            .modal { margin-top: 10px; }
+        }
+
+        @media (max-width: 480px) {
+            .header-stats { display: none; }
+            .tab { padding: 8px 8px; font-size: 12px; }
+            .detail-grid { grid-template-columns: 1fr 1fr; }
+            .btn-group { flex-direction: column; }
+            .btn { width: 100%; justify-content: center; }
+        }
+
+        /* ===== Checkbox ===== */
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .checkbox-label input { width: 16px; height: 16px; accent-color: var(--primary); }
+    </style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+    <div class="header-inner">
+        <h1>Shorts Runner <span id="mockIndicator" class="badge badge-pending" style="display:none; font-size:11px; margin-right:6px;">MOCK</span></h1>
+        <div class="header-stats" id="headerStats">
+            <div class="header-stat"><span class="stat-dot total"></span> <span id="statTotal">-</span> اجمالي</div>
+            <div class="header-stat"><span class="stat-dot running"></span> <span id="statRunning">-</span> جاري</div>
+            <div class="header-stat"><span class="stat-dot completed"></span> <span id="statCompleted">-</span> مكتمل</div>
+        </div>
+    </div>
+</div>
+
+<div class="container">
+    <!-- Alert -->
+    <div id="globalAlert" class="alert">
+        <span id="alertMessage"></span>
+        <button class="alert-close" onclick="hideAlert()">&times;</button>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+        <button class="tab active" data-tab="runner">تشغيل</button>
+        <button class="tab" data-tab="recipes">الوصفات</button>
+        <button class="tab" data-tab="runs">السجلات</button>
+        <button class="tab" data-tab="stats">احصائيات</button>
+    </div>
+
+    <!-- ===== Runner Tab ===== -->
+    <div id="runner" class="tab-content active">
+        <div class="card">
+            <div class="card-title">تشغيل كود Python</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;" class="run-form-grid">
+                <div class="form-group">
+                    <label class="form-label">الوصفة (اختياري)</label>
+                    <select id="recipeSelect" onchange="onRecipeSelected()">
+                        <option value="">-- كتابة كود يدوي --</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">مجلد الادخال</label>
+                    <select id="inputFolder">
+                        <option value="">جاري التحميل...</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">كود Python</label>
+                <textarea id="pythonCode" placeholder="# الصق كود Python هنا...&#10;&#10;import os&#10;from pathlib import Path&#10;&#10;INPUT_DIR = os.getenv('INPUT_DIR', '/mnt/input')&#10;OUTPUT_DIR = os.getenv('OUTPUT_DIR', '/mnt/output')&#10;&#10;# اكتب كودك هنا"></textarea>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="saveAsRecipe" onchange="toggleRecipeName()">
+                    حفظ كوصفة جديدة
+                </label>
+                <input type="text" id="recipeName" placeholder="اسم الوصفة" style="display:none; margin-top:8px;">
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-primary" id="runBtn" onclick="runCode()">تشغيل</button>
+                <button class="btn btn-ghost" onclick="clearCode()">مسح</button>
+            </div>
+        </div>
+
+        <!-- Run Detail (appears after running) -->
+        <div id="currentRunDetail" style="display:none;"></div>
+    </div>
+
+    <!-- ===== Recipes Tab ===== -->
+    <div id="recipes" class="tab-content">
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
+                <div class="card-title" style="margin:0;">الوصفات المحفوظة</div>
+                <div class="btn-group">
+                    <button class="btn btn-primary btn-sm" onclick="showRecipeModal()">+ وصفة جديدة</button>
+                    <button class="btn btn-ghost btn-sm" onclick="showFolderModal()">+ مجلد</button>
+                    <button class="btn btn-success btn-sm" onclick="createAllFolders()">انشاء كل المجلدات</button>
+                </div>
+            </div>
+            <div id="recipesList"></div>
+        </div>
+    </div>
+
+    <!-- ===== Runs Tab ===== -->
+    <div id="runs" class="tab-content">
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
+                <div class="card-title" style="margin:0;">سجل التشغيلات</div>
+                <div class="btn-group">
+                    <select id="statusFilter" onchange="loadRuns()" style="width:auto; padding:6px 12px; font-size:13px;">
+                        <option value="">كل الحالات</option>
+                        <option value="running">جاري</option>
+                        <option value="completed">مكتمل</option>
+                        <option value="failed">فشل</option>
+                        <option value="pending">انتظار</option>
+                        <option value="cancelled">ملغي</option>
+                    </select>
+                    <button class="btn btn-ghost btn-sm" onclick="loadRuns()">تحديث</button>
+                </div>
+            </div>
+            <div id="runsList"></div>
+        </div>
+    </div>
+
+    <!-- ===== Stats Tab ===== -->
+    <div id="stats" class="tab-content">
+        <div id="statsContent"></div>
+    </div>
+
+<!-- Settings Modal -->
+<div id="settingsModal" class="modal-overlay">
+    <div class="modal" style="max-width:550px;">
+        <div class="modal-header">
+            <h2>الاعدادات</h2>
+            <button class="close-btn" onclick="closeSettingsModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">الحد الاقصي للتشغيلات المتزامنة</label>
+                <input type="number" id="setMaxConcurrent" min="1" max="10" value="2">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Timeout (ثواني)</label>
+                <input type="number" id="setTimeout" min="60" max="7200" value="3600">
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="setMockMode">
+                    وضع المحاكاة (Mock Mode) - لا يتم تشغيل الكود فعليا
+                </label>
+            </div>
+            <div class="form-group">
+                <label class="form-label">حذف التشغيلات الاقدم من (ايام)</label>
+                <input type="number" id="setCleanupDays" min="1" max="365" value="7">
+            </div>
+            <div class="form-group">
+                <label class="form-label">الاحتفاظ بآخر N تشغيل على الاقل</label>
+                <input type="number" id="setKeepLastN" min="1" max="500" value="50">
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" onclick="saveSettings()">حفظ</button>
+            <button class="btn btn-ghost" onclick="closeSettingsModal()">الغاء</button>
+        </div>
+    </div>
+</div>
+
+<!-- Recipe Modal -->
+<div id="recipeModal" class="modal-overlay">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 id="recipeModalTitle">وصفة جديدة</h2>
+            <button class="close-btn" onclick="closeRecipeModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">الاسم</label>
+                <input type="text" id="modalRecipeName">
+            </div>
+            <div class="form-group">
+                <label class="form-label">الوصف</label>
+                <input type="text" id="modalRecipeDesc">
+            </div>
+            <div class="form-group">
+                <label class="form-label">مجلد الادخال</label>
+                <div style="display:flex; gap:8px;">
+                    <select id="modalRecipeFolder" style="flex:1;">
+                        <option value="">-- اختر مجلد --</option>
+                    </select>
+                    <button class="btn btn-ghost btn-sm" onclick="createFolderForRecipe()">+ مجلد</button>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">الكود</label>
+                <textarea id="modalRecipeCode" style="min-height:250px;"></textarea>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" onclick="saveRecipe()">حفظ</button>
+            <button class="btn btn-ghost" onclick="closeRecipeModal()">الغاء</button>
+        </div>
+    </div>
+</div>
+
+<!-- Folder Modal -->
+<div id="folderModal" class="modal-overlay">
+    <div class="modal" style="max-width:450px;">
+        <div class="modal-header">
+            <h2>مجلد جديد</h2>
+            <button class="close-btn" onclick="closeFolderModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">اسم المجلد</label>
+                <input type="text" id="newFolderName" placeholder="اسم المجلد">
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" onclick="createNewFolder()">انشاء</button>
+            <button class="btn btn-ghost" onclick="closeFolderModal()">الغاء</button>
+        </div>
+    </div>
+</div>
+
+<!-- Run Detail Modal -->
+<div id="runDetailModal" class="modal-overlay">
+    <div class="modal" style="max-width:900px;">
+        <div class="modal-header">
+            <h2>تفاصيل التشغيل</h2>
+            <button class="close-btn" onclick="closeRunDetailModal()">&times;</button>
+        </div>
+        <div class="modal-body" id="runDetailContent"></div>
+    </div>
+</div>
+
+<script>
+const API = '/api/utilities';
+let currentRecipeId = null;
+let allRecipes = [];
+let refreshInterval = null;
+
+// ===== Tabs =====
+document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(tab.dataset.tab).classList.add('active');
+        if (tab.dataset.tab === 'recipes') loadRecipes();
+        if (tab.dataset.tab === 'runs') loadRuns();
+        if (tab.dataset.tab === 'stats') loadStats();
+    });
+});
+
+// ===== Alert =====
+function showAlert(type, msg) {
+    const el = document.getElementById('globalAlert');
+    el.className = `alert alert-${type} active`;
+    document.getElementById('alertMessage').textContent = msg;
+    if (type !== 'error') setTimeout(hideAlert, 5000);
+}
+function hideAlert() {
+    document.getElementById('globalAlert').classList.remove('active');
+}
+
+// ===== Badge =====
+function statusBadge(status) {
+    const map = {
+        pending: ['badge-pending', 'انتظار'],
+        running: ['badge-running', 'جاري...'],
+        completed: ['badge-completed', 'مكتمل'],
+        failed: ['badge-failed', 'فشل'],
+        cancelled: ['badge-cancelled', 'ملغي']
+    };
+    const [cls, txt] = map[status] || ['badge-pending', status];
+    return `<span class="badge ${cls}">${txt}</span>`;
+}
+
+// ===== Format Time =====
+function formatTime(ms) {
+    if (!ms) return '-';
+    if (ms < 1000) return `${ms}ms`;
+    if (ms < 60000) return `${(ms/1000).toFixed(1)}s`;
+    return `${(ms/60000).toFixed(1)}m`;
+}
+
+function formatDate(d) {
+    if (!d) return '-';
+    return new Date(d).toLocaleString('ar-EG', {dateStyle:'short', timeStyle:'medium'});
+}
+
+function formatSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes/1024).toFixed(1) + ' KB';
+    return (bytes/1048576).toFixed(1) + ' MB';
+}
+
+// ===== Load Header Stats =====
+async function loadHeaderStats() {
+    try {
+        const res = await fetch(`${API}/stats`);
+        const data = await res.json();
+        document.getElementById('statTotal').textContent = data.total_runs || 0;
+        document.getElementById('statRunning').textContent = data.running_runs || 0;
+        document.getElementById('statCompleted').textContent = data.completed_runs || 0;
+        // Mock mode indicator
+        const mockEl = document.getElementById('mockIndicator');
+        if (mockEl) mockEl.style.display = data.mock_mode ? 'inline-flex' : 'none';
+    } catch(e) {}
+}
+
+// ===== Load Folders =====
+async function loadFolders() {
+    try {
+        const res = await fetch(`${API}/paths`);
+        const data = await res.json();
+        const folders = data.available_folders || [];
+
+        [document.getElementById('inputFolder'), document.getElementById('modalRecipeFolder')].forEach(sel => {
+            const val = sel.value;
+            sel.innerHTML = '<option value="">-- اختر مجلد --</option>';
+            folders.forEach(f => {
+                const opt = document.createElement('option');
+                opt.value = f; opt.textContent = f;
+                sel.appendChild(opt);
+            });
+            if (val) sel.value = val;
+        });
+    } catch(e) { console.error('Load folders error:', e); }
+}
+
+// ===== Load Recipes (for select + list) =====
+async function loadRecipes() {
+    try {
+        const res = await fetch(`${API}/recipes`);
+        allRecipes = await res.json();
+
+        // Update recipe select in Runner tab
+        const sel = document.getElementById('recipeSelect');
+        const val = sel.value;
+        sel.innerHTML = '<option value="">-- كتابة كود يدوي --</option>';
+        allRecipes.forEach(r => {
+            const opt = document.createElement('option');
+            opt.value = r.id; opt.textContent = r.name;
+            sel.appendChild(opt);
+        });
+        if (val) sel.value = val;
+
+        // Update Recipes list
+        const list = document.getElementById('recipesList');
+        if (!list) return;
+
+        if (allRecipes.length === 0) {
+            list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">لا توجد وصفات محفوظة</div></div>';
+            return;
+        }
+
+        list.innerHTML = allRecipes.map(r => `
+            <div class="list-item" onclick="loadRecipeToRunner(${r.id})">
+                <div class="list-item-header">
+                    <h3>${esc(r.name)}</h3>
+                    <div class="btn-group" onclick="event.stopPropagation()">
+                        <button class="btn btn-ghost btn-sm" onclick="editRecipe(${r.id})">تعديل</button>
+                        ${!r.input_folder ? `<button class="btn btn-success btn-sm" onclick="createRecipeFolder(${r.id})">+ مجلد</button>` : ''}
+                        <button class="btn btn-danger btn-sm" onclick="deleteRecipe(${r.id})">حذف</button>
+                    </div>
+                </div>
+                <div class="meta">
+                    <span class="meta-item">${formatDate(r.created_at)}</span>
+                    ${r.input_folder ? `<span class="meta-item"><strong>${esc(r.input_folder)}</strong></span>` : '<span class="meta-item" style="color:var(--danger)">لا يوجد مجلد</span>'}
+                    ${r.description ? `<span class="meta-item">${esc(r.description)}</span>` : ''}
+                </div>
+            </div>
+        `).join('');
+    } catch(e) { console.error('Load recipes error:', e); }
+}
+
+function onRecipeSelected() {
+    const id = document.getElementById('recipeSelect').value;
+    if (!id) return;
+    const recipe = allRecipes.find(r => r.id == id);
+    if (recipe) {
+        document.getElementById('pythonCode').value = recipe.code;
+        if (recipe.input_folder) {
+            document.getElementById('inputFolder').value = recipe.input_folder;
+        }
+    }
+}
+
+function loadRecipeToRunner(id) {
+    const recipe = allRecipes.find(r => r.id == id);
+    if (!recipe) return;
+    document.getElementById('pythonCode').value = recipe.code;
+    document.getElementById('recipeSelect').value = id;
+    if (recipe.input_folder) {
+        document.getElementById('inputFolder').value = recipe.input_folder;
+    }
+    // Switch to runner tab
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    document.querySelector('[data-tab="runner"]').classList.add('active');
+    document.getElementById('runner').classList.add('active');
+}
+
+// ===== Run Code =====
+async function runCode() {
+    const code = document.getElementById('pythonCode').value.trim();
+    const inputFolder = document.getElementById('inputFolder').value;
+    const recipeId = document.getElementById('recipeSelect').value;
+
+    if (!code) return showAlert('error', 'يرجى ادخال كود Python');
+    if (!inputFolder) return showAlert('error', 'يرجى اختيار مجلد الادخال');
+
+    const btn = document.getElementById('runBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> جاري التشغيل...';
+
+    try {
+        const body = { code, input_folder: inputFolder };
+        if (recipeId) body.recipe_id = parseInt(recipeId);
+
+        const res = await fetch(`${API}/runs`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body)
+        });
+
+        if (!res.ok) {
+            const data = await res.json();
+            throw new Error(data.detail || 'فشل الطلب');
+        }
+
+        const run = await res.json();
+        showAlert('success', `تم بدء التشغيل! Run: ${run.run_id.substring(0,8)}...`);
+
+        // Save as recipe if checked
+        if (document.getElementById('saveAsRecipe').checked) {
+            const name = document.getElementById('recipeName').value.trim();
+            if (name) {
+                await fetch(`${API}/recipes`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name, code, description: ''})
+                });
+            }
+        }
+
+        // Show run detail panel
+        showRunDetailInline(run.run_id);
+        loadHeaderStats();
+
+    } catch(e) {
+        showAlert('error', e.message);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'تشغيل';
+    }
+}
+
+// ===== Inline Run Detail (in Runner tab) =====
+async function showRunDetailInline(runId) {
+    const container = document.getElementById('currentRunDetail');
+    container.style.display = 'block';
+    container.innerHTML = '<div style="text-align:center;padding:20px;"><span class="spinner spinner-dark"></span> جاري التحميل...</div>';
+
+    // Start auto-refresh
+    if (refreshInterval) clearInterval(refreshInterval);
+    refreshInterval = setInterval(() => refreshRunDetail(runId), 3000);
+    await refreshRunDetail(runId);
+}
+
+async function refreshRunDetail(runId) {
+    try {
+        const [runRes, logRes, filesRes] = await Promise.all([
+            fetch(`${API}/runs/${runId}`).then(r => r.json()),
+            fetch(`${API}/runs/${runId}/log`).then(r => r.json()).catch(() => ({log:''})),
+            fetch(`${API}/runs/${runId}/files`).then(r => r.json()).catch(() => ({files:[]}))
+        ]);
+
+        const run = runRes;
+        const log = logRes.log || '';
+        const files = filesRes.files || [];
+
+        // Stop refreshing if terminal state
+        if (['completed', 'failed', 'cancelled'].includes(run.status)) {
+            if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; }
+            loadHeaderStats();
+        }
+
+        document.getElementById('currentRunDetail').innerHTML = renderRunDetail(run, log, files);
+    } catch(e) {
+        console.error('Refresh run detail error:', e);
+    }
+}
+
+function renderRunDetail(run, log, files) {
+    return `
+        <div class="detail-panel">
+            <div class="detail-header">
+                <div>
+                    <strong>${run.recipe_name || 'تشغيل يدوي'}</strong>
+                    <span style="opacity:0.7; font-size:12px; margin-right:8px;">${run.run_id.substring(0,8)}...</span>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    ${statusBadge(run.status)}
+                    ${run.status === 'running' || run.status === 'pending' ?
+                        `<button class="btn btn-danger btn-sm" onclick="cancelRun('${run.run_id}')">الغاء</button>` : ''}
+                    ${['completed','failed'].includes(run.status) ?
+                        `<button class="btn btn-success btn-sm" onclick="downloadZip('${run.run_id}')">تنزيل ZIP</button>` : ''}
+                </div>
+            </div>
+            <div class="detail-body">
+                <div class="detail-grid">
+                    <div class="detail-field">
+                        <div class="detail-field-label">المجلد</div>
+                        <div class="detail-field-value">${esc(run.input_folder)}</div>
+                    </div>
+                    <div class="detail-field">
+                        <div class="detail-field-label">البداية</div>
+                        <div class="detail-field-value">${formatDate(run.started_at)}</div>
+                    </div>
+                    <div class="detail-field">
+                        <div class="detail-field-label">الانتهاء</div>
+                        <div class="detail-field-value">${formatDate(run.completed_at)}</div>
+                    </div>
+                    <div class="detail-field">
+                        <div class="detail-field-label">مدة التنفيذ</div>
+                        <div class="detail-field-value">${formatTime(run.execution_time_ms)}</div>
+                    </div>
+                </div>
+
+                ${run.error_message ? `<div style="background:#fee2e2; color:#991b1b; padding:10px; border-radius:8px; margin-bottom:12px; font-size:13px;">${esc(run.error_message)}</div>` : ''}
+
+                ${log ? `<div style="margin-bottom:12px;">
+                    <div class="form-label">السجل</div>
+                    <div class="log-display">${esc(log)}</div>
+                </div>` : ''}
+
+                ${files.length > 0 ? `<div>
+                    <div class="form-label">الملفات (${files.length})</div>
+                    ${files.map(f => `
+                        <div class="file-item">
+                            <a href="${f.path}" target="_blank" class="file-name">${esc(f.name)}</a>
+                            <span class="file-size">${formatSize(f.size)}</span>
+                        </div>
+                    `).join('')}
+                </div>` : ''}
+            </div>
+        </div>
+    `;
+}
+
+// ===== Load Runs =====
+async function loadRuns() {
+    try {
+        const status = document.getElementById('statusFilter').value;
+        let url = `${API}/runs?limit=50`;
+        if (status) url += `&status=${status}`;
+
+        const res = await fetch(url);
+        const runs = await res.json();
+        const list = document.getElementById('runsList');
+
+        if (runs.length === 0) {
+            list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📭</div><div class="empty-state-text">لا توجد تشغيلات</div></div>';
+            return;
+        }
+
+        list.innerHTML = runs.map(run => `
+            <div class="list-item" onclick="showRunDetailModal('${run.run_id}')">
+                <div class="list-item-header">
+                    <h3>${run.recipe_name || 'تشغيل يدوي'} <span style="color:var(--gray-400); font-size:12px;">${run.run_id.substring(0,8)}</span></h3>
+                    <div style="display:flex; gap:6px; align-items:center;">
+                        ${statusBadge(run.status)}
+                        ${run.execution_time_ms ? `<span style="font-size:12px; color:var(--gray-400);">${formatTime(run.execution_time_ms)}</span>` : ''}
+                    </div>
+                </div>
+                <div class="meta">
+                    <span class="meta-item">${esc(run.input_folder)}</span>
+                    <span class="meta-item">${formatDate(run.created_at)}</span>
+                </div>
+                ${run.error_message ? `<div style="color:var(--danger); font-size:12px; margin-top:6px;">${esc(run.error_message.substring(0,120))}...</div>` : ''}
+            </div>
+        `).join('');
+    } catch(e) { console.error('Load runs error:', e); }
+}
+
+// ===== Run Detail Modal =====
+async function showRunDetailModal(runId) {
+    const modal = document.getElementById('runDetailModal');
+    const content = document.getElementById('runDetailContent');
+    modal.classList.add('active');
+    content.innerHTML = '<div style="text-align:center;padding:30px;"><span class="spinner spinner-dark"></span></div>';
+
+    try {
+        const [runRes, logRes, filesRes] = await Promise.all([
+            fetch(`${API}/runs/${runId}`).then(r => r.json()),
+            fetch(`${API}/runs/${runId}/log`).then(r => r.json()).catch(() => ({log:''})),
+            fetch(`${API}/runs/${runId}/files`).then(r => r.json()).catch(() => ({files:[]}))
+        ]);
+        content.innerHTML = renderRunDetail(runRes, logRes.log || '', filesRes.files || []);
+    } catch(e) {
+        content.innerHTML = `<div class="alert alert-error active">${e.message}</div>`;
+    }
+}
+function closeRunDetailModal() { document.getElementById('runDetailModal').classList.remove('active'); }
+
+// ===== Cancel Run =====
+async function cancelRun(runId) {
+    if (!confirm('هل تريد الغاء التشغيل؟')) return;
+    try {
+        const res = await fetch(`${API}/runs/${runId}/cancel`, { method: 'POST' });
+        const data = await res.json();
+        showAlert(data.success ? 'success' : 'error', data.message);
+        loadHeaderStats();
+    } catch(e) { showAlert('error', e.message); }
+}
+
+// ===== Download ZIP =====
+function downloadZip(runId) {
+    window.open(`${API}/runs/${runId}/download`, '_blank');
+}
+
+// ===== Delete Run =====
+async function deleteRun(runId) {
+    if (!confirm('هل تريد حذف هذا التشغيل؟')) return;
+    try {
+        await fetch(`${API}/runs/${runId}`, { method: 'DELETE' });
+        showAlert('success', 'تم الحذف');
+        loadRuns();
+        loadHeaderStats();
+    } catch(e) { showAlert('error', e.message); }
+}
+
+// ===== Recipe CRUD =====
+function showRecipeModal(recipe) {
+    currentRecipeId = recipe ? recipe.id : null;
+    document.getElementById('recipeModalTitle').textContent = recipe ? 'تعديل الوصفة' : 'وصفة جديدة';
+    document.getElementById('modalRecipeName').value = recipe ? recipe.name : '';
+    document.getElementById('modalRecipeDesc').value = recipe ? (recipe.description || '') : '';
+    document.getElementById('modalRecipeCode').value = recipe ? recipe.code : '';
+    loadFolders().then(() => {
+        if (recipe && recipe.input_folder) {
+            document.getElementById('modalRecipeFolder').value = recipe.input_folder;
+        }
+    });
+    document.getElementById('recipeModal').classList.add('active');
+}
+function closeRecipeModal() { document.getElementById('recipeModal').classList.remove('active'); }
+
+async function editRecipe(id) {
+    try {
+        const res = await fetch(`${API}/recipes/${id}`);
+        const recipe = await res.json();
+        showRecipeModal(recipe);
+    } catch(e) { showAlert('error', e.message); }
+}
+
+async function saveRecipe() {
+    const name = document.getElementById('modalRecipeName').value.trim();
+    const desc = document.getElementById('modalRecipeDesc').value.trim();
+    const code = document.getElementById('modalRecipeCode').value.trim();
+    const input_folder = document.getElementById('modalRecipeFolder').value;
+
+    if (!name || !code) return showAlert('error', 'الاسم والكود مطلوبان');
+
+    try {
+        const url = currentRecipeId ? `${API}/recipes/${currentRecipeId}` : `${API}/recipes`;
+        const method = currentRecipeId ? 'PUT' : 'POST';
+        const res = await fetch(url, {
+            method, headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ name, description: desc, code, input_folder: input_folder || null })
+        });
+        if (!res.ok) { const d = await res.json(); throw new Error(d.detail || 'خطأ'); }
+        closeRecipeModal();
+        showAlert('success', 'تم الحفظ بنجاح');
+        loadRecipes();
+    } catch(e) { showAlert('error', e.message); }
+}
+
+async function deleteRecipe(id) {
+    if (!confirm('هل تريد حذف الوصفة؟')) return;
+    try {
+        await fetch(`${API}/recipes/${id}`, { method: 'DELETE' });
+        showAlert('success', 'تم حذف الوصفة');
+        loadRecipes();
+    } catch(e) { showAlert('error', e.message); }
+}
+
+async function createRecipeFolder(id) {
+    try {
+        const res = await fetch(`${API}/recipes/${id}/create-folder`, { method: 'POST' });
+        const result = await res.json();
+        if (res.ok) { showAlert('success', `تم انشاء المجلد: ${result.folder}`); loadRecipes(); loadFolders(); }
+        else showAlert('error', result.detail);
+    } catch(e) { showAlert('error', e.message); }
+}
+
+async function createAllFolders() {
+    if (!confirm('انشاء مجلدات لكل الوصفات؟')) return;
+    try {
+        const res = await fetch(`${API}/create-all-recipe-folders`, { method: 'POST' });
+        const result = await res.json();
+        showAlert('success', `تم انشاء ${result.summary.created} مجلد، تم تخطي ${result.summary.skipped}`);
+        loadRecipes(); loadFolders();
+    } catch(e) { showAlert('error', e.message); }
+}
+
+// ===== Folder =====
+function showFolderModal() { document.getElementById('newFolderName').value = ''; document.getElementById('folderModal').classList.add('active'); }
+function closeFolderModal() { document.getElementById('folderModal').classList.remove('active'); }
+
+async function createNewFolder() {
+    const name = document.getElementById('newFolderName').value.trim();
+    if (!name) return showAlert('error', 'ادخل اسم المجلد');
+    try {
+        const res = await fetch(`${API}/folders?folder_name=${encodeURIComponent(name)}`, { method: 'POST' });
+        const result = await res.json();
+        if (res.ok) { showAlert('success', result.message); closeFolderModal(); loadFolders(); }
+        else showAlert('error', result.detail);
+    } catch(e) { showAlert('error', e.message); }
+}
+
+async function createFolderForRecipe() {
+    const name = document.getElementById('modalRecipeName').value.trim();
+    if (!name) return showAlert('error', 'ادخل اسم الوصفة اولا');
+    const folderName = name.replace(/[^a-zA-Z0-9\u0600-\u06FF\s\-_.]/g, '').replace(/\s+/g, '_');
+    try {
+        const res = await fetch(`${API}/folders?folder_name=${encodeURIComponent(folderName)}`, { method: 'POST' });
+        const result = await res.json();
+        if (res.ok) {
+            await loadFolders();
+            document.getElementById('modalRecipeFolder').value = result.folder;
+        } else showAlert('error', result.detail);
+    } catch(e) { showAlert('error', e.message); }
+}
+
+// ===== Settings =====
+function closeSettingsModal() { document.getElementById('settingsModal').classList.remove('active'); }
+
+async function openSettingsModal() {
+    try {
+        const res = await fetch(`${API}/settings`);
+        const s = await res.json();
+        document.getElementById('setMaxConcurrent').value = s.max_concurrent_runs || 2;
+        document.getElementById('setTimeout').value = s.timeout_seconds || 3600;
+        document.getElementById('setMockMode').checked = s.mock_mode || false;
+        document.getElementById('setCleanupDays').value = s.cleanup_max_age_days || 7;
+        document.getElementById('setKeepLastN').value = s.cleanup_keep_last_n || 50;
+        document.getElementById('settingsModal').classList.add('active');
+    } catch(e) { showAlert('error', e.message); }
+}
+
+async function saveSettings() {
+    try {
+        const body = {
+            max_concurrent_runs: parseInt(document.getElementById('setMaxConcurrent').value),
+            timeout_seconds: parseInt(document.getElementById('setTimeout').value),
+            mock_mode: document.getElementById('setMockMode').checked,
+            cleanup_max_age_days: parseInt(document.getElementById('setCleanupDays').value),
+            cleanup_keep_last_n: parseInt(document.getElementById('setKeepLastN').value)
+        };
+        const res = await fetch(`${API}/settings`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body)
+        });
+        if (!res.ok) { const d = await res.json(); throw new Error(d.detail || 'خطأ'); }
+        closeSettingsModal();
+        showAlert('success', 'تم حفظ الاعدادات');
+        loadStats();
+        loadHeaderStats();
+    } catch(e) { showAlert('error', e.message); }
+}
+
+// ===== Stats =====
+async function loadStats() {
+    try {
+        const res = await fetch(`${API}/stats`);
+        const s = await res.json();
+        document.getElementById('statsContent').innerHTML = `
+            ${s.mock_mode ? '<div class="alert alert-info active" style="margin-bottom:12px;">وضع المحاكاة (Mock Mode) مفعل - لا يتم تشغيل الكود فعليا</div>' : ''}
+            <div class="card">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
+                    <div class="card-title" style="margin:0;">احصائيات النظام</div>
+                    <button class="btn btn-ghost btn-sm" onclick="openSettingsModal()">الاعدادات</button>
+                </div>
+                <div class="detail-grid">
+                    <div class="detail-field">
+                        <div class="detail-field-label">اجمالي التشغيلات</div>
+                        <div class="detail-field-value" style="font-size:24px;">${s.total_runs}</div>
+                    </div>
+                    <div class="detail-field" style="background:#d1fae5;">
+                        <div class="detail-field-label">مكتمل</div>
+                        <div class="detail-field-value" style="font-size:24px; color:#065f46;">${s.completed_runs}</div>
+                    </div>
+                    <div class="detail-field" style="background:#fee2e2;">
+                        <div class="detail-field-label">فشل</div>
+                        <div class="detail-field-value" style="font-size:24px; color:#991b1b;">${s.failed_runs}</div>
+                    </div>
+                    <div class="detail-field" style="background:#dbeafe;">
+                        <div class="detail-field-label">جاري</div>
+                        <div class="detail-field-value" style="font-size:24px; color:#1e40af;">${s.running_runs}</div>
+                    </div>
+                </div>
+                <div class="detail-grid" style="margin-top:8px;">
+                    <div class="detail-field">
+                        <div class="detail-field-label">مساحة التخزين</div>
+                        <div class="detail-field-value">${s.total_size_mb} MB</div>
+                    </div>
+                    <div class="detail-field">
+                        <div class="detail-field-label">عدد الملفات</div>
+                        <div class="detail-field-value">${s.total_files}</div>
+                    </div>
+                    <div class="detail-field">
+                        <div class="detail-field-label">الحد الاقصي للتوازي</div>
+                        <div class="detail-field-value">${s.max_concurrent_runs}</div>
+                    </div>
+                    <div class="detail-field">
+                        <div class="detail-field-label">التنظيف التلقائي</div>
+                        <div class="detail-field-value">كل ${s.cleanup_settings?.interval_hours || '-'}h</div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-title">تنظيف يدوي</div>
+                <p style="color:var(--gray-500); font-size:14px; margin-bottom:12px;">حذف التشغيلات القديمة وتحرير المساحة</p>
+                <div class="btn-group">
+                    <button class="btn btn-danger" onclick="manualCleanup()">تنظيف الان</button>
+                </div>
+            </div>
+        `;
+    } catch(e) { console.error('Load stats error:', e); }
+}
+
+async function manualCleanup() {
+    if (!confirm('سيتم حذف التشغيلات القديمة. متابعة؟')) return;
+    try {
+        const res = await fetch(`${API}/cleanup`, { method: 'POST' });
+        const data = await res.json();
+        showAlert('success', `تم حذف ${data.deleted_runs} تشغيل، تحرير ${data.freed_space_mb.toFixed(2)} MB`);
+        loadStats();
+        loadHeaderStats();
+    } catch(e) { showAlert('error', e.message); }
+}
+
+// ===== Helpers =====
+function toggleRecipeName() {
+    document.getElementById('recipeName').style.display =
+        document.getElementById('saveAsRecipe').checked ? 'block' : 'none';
+}
+function clearCode() {
+    document.getElementById('pythonCode').value = '';
+    document.getElementById('recipeSelect').value = '';
+}
+
+function esc(str) {
+    if (!str) return '';
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+}
+
+// Close modals on backdrop click
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+    overlay.addEventListener('click', e => {
+        if (e.target === overlay) overlay.classList.remove('active');
+    });
+});
+
+// ===== Init =====
+loadFolders();
+loadRecipes();
+loadHeaderStats();
+setInterval(loadHeaderStats, 15000);
+
+// Responsive: make run form single column on mobile
+if (window.innerWidth <= 768) {
+    const grid = document.querySelector('.run-form-grid');
+    if (grid) grid.style.gridTemplateColumns = '1fr';
+}
+</script>
+</body>
+</html>

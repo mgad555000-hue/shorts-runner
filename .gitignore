@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+
+# Environment & secrets
+.env
+*.pem
+*.key
+credentials.json
+
+# Data & output
+data/
+shorts/
+*.db
+
+# Docker
+docker-compose.override.yml
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Cursor
+.cursor/
+
+# Test files
+test_*.py
+debug_*.py
