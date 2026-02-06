@@ -1,6 +1,7 @@
 """
 Shorts Runner - FastAPI Backend
 تطبيق تشغيل وصفات الفيديوهات القصيرة
+نظام القنوات: كل قناة مجلد منفصل، كل وصفة ليها input/output جوه القناة
 """
 import sys
 if sys.stdout:
@@ -21,6 +22,7 @@ import asyncio
 import zipfile
 import io
 import time
+import json
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -41,11 +43,54 @@ MAX_CONCURRENT_RUNS = int(os.getenv("MAX_CONCURRENT_RUNS", "2"))
 MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() in ("true", "1", "yes")
 
 DATA_ROOT = os.getenv("DATA_ROOT", "./data")
+CHANNELS_ROOT = os.path.join(DATA_ROOT, "channels")
 OUTPUT_ROOT = os.getenv("OUTPUT_ROOT", "./shorts/out")
 
 Path(DATA_ROOT).mkdir(parents=True, exist_ok=True)
+Path(CHANNELS_ROOT).mkdir(parents=True, exist_ok=True)
 Path(OUTPUT_ROOT).mkdir(parents=True, exist_ok=True)
 
+
+# ========== نظام القنوات ==========
+
+def get_channels() -> List[str]:
+    """قراءة القنوات المتاحة من المجلدات"""
+    if not os.path.exists(CHANNELS_ROOT):
+        return []
+    channels = []
+    try:
+        for entry in os.scandir(CHANNELS_ROOT):
+            if entry.is_dir(follow_symlinks=False):
+                channels.append(entry.name)
+    except Exception:
+        pass
+    return sorted(channels)
+
+
+def get_channel_path(channel: str) -> Path:
+    """مسار مجلد القناة"""
+    return Path(CHANNELS_ROOT) / channel
+
+
+def get_recipe_input_path(channel: str, recipe_name: str) -> Path:
+    """مسار مجلد الإدخال لوصفة معينة في قناة معينة"""
+    safe_recipe = sanitize_folder_name(recipe_name).replace(' ', '_')
+    return get_channel_path(channel) / safe_recipe / "input"
+
+
+def get_recipe_output_path(channel: str, recipe_name: str) -> Path:
+    """مسار مجلد الإخراج لوصفة معينة في قناة معينة"""
+    safe_recipe = sanitize_folder_name(recipe_name).replace(' ', '_')
+    return get_channel_path(channel) / safe_recipe / "output"
+
+
+def ensure_channel_recipe_folders(channel: str, recipe_name: str):
+    """إنشاء مجلدات input/output لوصفة في قناة"""
+    get_recipe_input_path(channel, recipe_name).mkdir(parents=True, exist_ok=True)
+    get_recipe_output_path(channel, recipe_name).mkdir(parents=True, exist_ok=True)
+
+
+# ========== التنظيف التلقائي ==========
 
 async def cleanup_old_runs():
     while True:
@@ -62,6 +107,7 @@ async def lifespan(app: FastAPI):
     init_db()
     cleanup_task = asyncio.create_task(cleanup_old_runs())
     print(f"[Shorts Runner] Started on port 8001")
+    print(f"[Shorts Runner] Channels root: {CHANNELS_ROOT}")
     yield
     cleanup_task.cancel()
     try:
@@ -117,7 +163,6 @@ def is_mock_mode() -> bool:
 
 
 def mock_execute(run_id: str, code: str, input_folder: str):
-    import json
     output_dir = Path(OUTPUT_ROOT) / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "script.py").write_text(code, encoding="utf-8")
@@ -227,119 +272,207 @@ def get_storage_stats() -> dict:
             "newest_run": newest_run.created_at.isoformat() if newest_run else None,
             "max_concurrent_runs": get_dynamic_settings()["max_concurrent_runs"],
             "mock_mode": is_mock_mode(),
+            "channels_count": len(get_channels()),
             "cleanup_settings": {"interval_hours": CLEANUP_INTERVAL_HOURS, "max_age_days": get_dynamic_settings()["cleanup_max_age_days"], "keep_last_n": get_dynamic_settings()["cleanup_keep_last_n"]}
         }
     finally:
         db.close()
 
 
-# ========== API ==========
+# ========== API - القنوات ==========
+
+@app.get("/api/channels")
+async def list_channels():
+    """قائمة القنوات المتاحة"""
+    channels = get_channels()
+    result = []
+    for ch in channels:
+        ch_path = get_channel_path(ch)
+        # عد المجلدات الفرعية (الوصفات)
+        tasks = []
+        try:
+            for entry in os.scandir(ch_path):
+                if entry.is_dir() and entry.name not in ('videos', 'videos_list'):
+                    tasks.append(entry.name)
+        except Exception:
+            pass
+        result.append({"name": ch, "tasks_count": len(tasks)})
+    return {"channels": result}
+
+
+@app.post("/api/channels")
+async def create_channel(name: str):
+    """إنشاء قناة جديدة"""
+    safe_name = sanitize_folder_name(name)
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="اسم القناة غير صالح")
+    ch_path = get_channel_path(safe_name)
+    if ch_path.exists():
+        return {"message": "القناة موجودة بالفعل", "channel": safe_name, "created": False}
+    ch_path.mkdir(parents=True, exist_ok=True)
+    # إنشاء مجلد الفيديوهات
+    (ch_path / "videos").mkdir(exist_ok=True)
+    return {"message": "تم إنشاء القناة", "channel": safe_name, "created": True}
+
+
+@app.get("/api/channels/{channel}/tasks")
+async def list_channel_tasks(channel: str):
+    """قائمة مجلدات المهام في قناة"""
+    ch_path = get_channel_path(channel)
+    if not ch_path.exists():
+        raise HTTPException(status_code=404, detail="القناة غير موجودة")
+    tasks = []
+    try:
+        for entry in os.scandir(ch_path):
+            if entry.is_dir() and entry.name not in ('videos',):
+                has_input = (Path(entry.path) / "input").exists()
+                has_output = (Path(entry.path) / "output").exists()
+                tasks.append({"name": entry.name, "has_input": has_input, "has_output": has_output})
+    except Exception:
+        pass
+    return {"channel": channel, "tasks": sorted(tasks, key=lambda x: x["name"])}
+
+
+# ========== API - المسارات (متوافق مع الواجهة القديمة) ==========
 
 @app.get("/api/utilities/paths", response_model=PathResponse)
 async def get_paths():
-    data_root_path = Path(DATA_ROOT)
-    folders = []
-    if data_root_path.exists():
-        try:
-            with os.scandir(data_root_path) as it:
-                for entry in it:
-                    if entry.is_dir(follow_symlinks=False) or entry.is_symlink():
-                        folders.append(entry.name)
-        except Exception as e:
-            print(f"Error scanning DATA_ROOT: {e}")
-    return PathResponse(available_folders=sorted(folders), data_root=DATA_ROOT)
+    """القنوات المتاحة كمجلدات"""
+    channels = get_channels()
+    return PathResponse(available_folders=channels, data_root=CHANNELS_ROOT)
 
 
 @app.post("/api/utilities/folders")
 async def create_folder(folder_name: str):
+    """إنشاء قناة جديدة"""
     safe_name = sanitize_folder_name(folder_name)
     if not safe_name:
-        raise HTTPException(status_code=400, detail="اسم المجلد غير صالح")
-    folder_path = Path(DATA_ROOT) / safe_name
-    if folder_path.exists():
-        return {"message": "المجلد موجود بالفعل", "folder": safe_name, "created": False}
-    try:
-        folder_path.mkdir(parents=True, exist_ok=True)
-        return {"message": "تم إنشاء المجلد بنجاح", "folder": safe_name, "created": True}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=400, detail="اسم غير صالح")
+    ch_path = get_channel_path(safe_name)
+    if ch_path.exists():
+        return {"message": "القناة موجودة بالفعل", "folder": safe_name, "created": False}
+    ch_path.mkdir(parents=True, exist_ok=True)
+    (ch_path / "videos").mkdir(exist_ok=True)
+    return {"message": "تم إنشاء القناة", "folder": safe_name, "created": True}
 
+
+# ========== API - Recipes ==========
 
 @app.post("/api/utilities/recipes/{recipe_id}/create-folder")
-async def create_recipe_folder(recipe_id: int, db: Session = Depends(get_db)):
+async def create_recipe_folders_for_all_channels(recipe_id: int, db: Session = Depends(get_db)):
+    """إنشاء مجلدات الوصفة في كل القنوات"""
     recipe = db.query(Recipe).filter(Recipe.id == recipe_id).first()
     if not recipe:
         raise HTTPException(status_code=404, detail="الوصفة غير موجودة")
-    safe_name = sanitize_folder_name(recipe.name).replace(' ', '_')
-    if not safe_name:
-        safe_name = f"recipe_{recipe_id}"
-    folder_path = Path(DATA_ROOT) / safe_name
-    try:
-        folder_path.mkdir(parents=True, exist_ok=True)
-        recipe.input_folder = safe_name
-        db.commit()
-        return {"message": "تم إنشاء المجلد", "folder": safe_name, "recipe_id": recipe_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    channels = get_channels()
+    created = []
+    for ch in channels:
+        ensure_channel_recipe_folders(ch, recipe.name)
+        created.append(ch)
+    recipe.input_folder = sanitize_folder_name(recipe.name).replace(' ', '_')
+    db.commit()
+    return {"message": f"تم إنشاء المجلدات في {len(created)} قناة", "channels": created}
 
 
 @app.post("/api/utilities/create-all-recipe-folders")
 async def create_all_recipe_folders(db: Session = Depends(get_db)):
+    """إنشاء مجلدات كل الوصفات في كل القنوات"""
     recipes = db.query(Recipe).all()
-    created, skipped, errors = [], [], []
+    channels = get_channels()
+    count = 0
     for recipe in recipes:
-        if recipe.input_folder:
-            if (Path(DATA_ROOT) / recipe.input_folder).exists():
-                skipped.append({"id": recipe.id, "name": recipe.name})
-                continue
-        safe_name = sanitize_folder_name(recipe.name).replace(' ', '_') or f"recipe_{recipe.id}"
-        try:
-            (Path(DATA_ROOT) / safe_name).mkdir(parents=True, exist_ok=True)
-            recipe.input_folder = safe_name
-            created.append({"id": recipe.id, "name": recipe.name, "folder": safe_name})
-        except Exception as e:
-            errors.append({"id": recipe.id, "error": str(e)})
+        for ch in channels:
+            ensure_channel_recipe_folders(ch, recipe.name)
+            count += 1
+        recipe.input_folder = sanitize_folder_name(recipe.name).replace(' ', '_')
     db.commit()
-    return {"created": created, "skipped": skipped, "errors": errors, "summary": {"total": len(recipes), "created": len(created), "skipped": len(skipped), "errors": len(errors)}}
+    return {"message": f"تم إنشاء {count} مجلد", "summary": {"recipes": len(recipes), "channels": len(channels), "folders_created": count}}
 
+
+# ========== API - Runs ==========
 
 @app.post("/api/utilities/runs", response_model=RunResponse)
 async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     validate_path(run_data.input_folder)
     check_concurrency(db)
+
     run_id = str(uuid.uuid4())
     output_relpath = f"shorts/out/{run_id}"
     recipe_name = None
     code_to_run = run_data.code or ""
+
     if run_data.recipe_id:
         recipe = db.query(Recipe).filter(Recipe.id == run_data.recipe_id).first()
         if recipe:
             recipe_name = recipe.name
             if not code_to_run.strip():
                 code_to_run = recipe.code or ""
-    db_run = Run(run_id=run_id, recipe_id=run_data.recipe_id, recipe_name=recipe_name, input_folder=run_data.input_folder, status="pending", output_relpath=output_relpath)
+
+            # ربط input/output بالقناة والوصفة
+            channel = run_data.input_folder  # اسم القناة
+            recipe_folder = sanitize_folder_name(recipe.name).replace(' ', '_')
+            input_path = get_recipe_input_path(channel, recipe.name)
+            output_path = get_recipe_output_path(channel, recipe.name)
+            input_path.mkdir(parents=True, exist_ok=True)
+            output_path.mkdir(parents=True, exist_ok=True)
+
+            # الوصفة هتستقبل المسارات من البيئة
+            # INPUT_DIR = channels/<channel>/<recipe>/input
+            # OUTPUT_DIR = channels/<channel>/<recipe>/output
+            # CHANNEL_NAME = <channel>
+            # CHANNEL_ROOT = channels/<channel>
+
+    db_run = Run(
+        run_id=run_id, recipe_id=run_data.recipe_id, recipe_name=recipe_name,
+        input_folder=run_data.input_folder, status="pending", output_relpath=output_relpath
+    )
     db.add(db_run)
     db.commit()
     db.refresh(db_run)
-    background_tasks.add_task(execute_run, run_id=run_id, code=code_to_run, input_folder=run_data.input_folder)
+
+    # تمرير اسم القناة واسم الوصفة مع التشغيل
+    background_tasks.add_task(
+        execute_run,
+        run_id=run_id, code=code_to_run,
+        input_folder=run_data.input_folder,
+        recipe_name=recipe_name
+    )
     return RunResponse.model_validate(db_run)
 
 
-def execute_run(run_id: str, code: str, input_folder: str):
+def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = None):
     db = SessionLocal()
     try:
         db_run = db.query(Run).filter(Run.run_id == run_id).first()
         if not db_run or db_run.status == "cancelled":
             return
+
         start_time = time.time()
         db_run.status = "running"
         db_run.started_at = datetime.utcnow()
         db.commit()
+
+        # تحديد المسارات بناءً على القناة والوصفة
+        channel = input_folder
+        actual_input = str(get_recipe_input_path(channel, recipe_name)) if recipe_name else str(Path(CHANNELS_ROOT) / channel)
+        actual_output_recipe = str(get_recipe_output_path(channel, recipe_name)) if recipe_name else None
+        channel_root = str(get_channel_path(channel))
+
         if is_mock_mode():
-            success, output_path, error_msg = mock_execute(run_id, code, input_folder)
+            success, output_path, error_msg = mock_execute(run_id, code, actual_input)
         else:
-            success, output_path, error_msg = create_sandbox_container(run_id, code, input_folder)
+            # تمرير متغيرات بيئة إضافية للقناة
+            os.environ["CHANNEL_NAME"] = channel
+            os.environ["CHANNEL_ROOT"] = channel_root
+            if actual_output_recipe:
+                os.environ["RECIPE_OUTPUT_DIR"] = actual_output_recipe
+
+            success, output_path, error_msg = create_sandbox_container(
+                run_id=run_id, code=code, input_folder=actual_input
+            )
+
         execution_time_ms = int((time.time() - start_time) * 1000)
+
         if success and output_path:
             output_dir = Path(output_path)
             if output_dir.exists():
@@ -350,6 +483,7 @@ def execute_run(run_id: str, code: str, input_folder: str):
                         shutil.rmtree(output_dir)
                     except Exception:
                         pass
+
         db_run = db.query(Run).filter(Run.run_id == run_id).first()
         if db_run and db_run.status != "cancelled":
             db_run.status = "completed" if success else "failed"
@@ -476,6 +610,9 @@ async def create_recipe(recipe: RecipeCreate, db: Session = Depends(get_db)):
     db.add(db_recipe)
     db.commit()
     db.refresh(db_recipe)
+    # إنشاء مجلدات في كل القنوات
+    for ch in get_channels():
+        ensure_channel_recipe_folders(ch, db_recipe.name)
     return RecipeResponse.model_validate(db_recipe)
 
 
