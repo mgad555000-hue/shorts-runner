@@ -389,6 +389,23 @@ async def create_all_recipe_folders(db: Session = Depends(get_db)):
     return {"message": f"تم إنشاء {count} مجلد", "summary": {"recipes": len(recipes), "channels": len(channels), "folders_created": count}}
 
 
+# ========== API - مسارات المجلدات ==========
+
+@app.get("/api/channels/{channel}/recipe-path/{recipe_name}")
+async def get_recipe_paths(channel: str, recipe_name: str):
+    """الحصول على مسارات input/output لوصفة في قناة"""
+    input_path = get_recipe_input_path(channel, recipe_name)
+    output_path = get_recipe_output_path(channel, recipe_name)
+    input_path.mkdir(parents=True, exist_ok=True)
+    output_path.mkdir(parents=True, exist_ok=True)
+    return {
+        "channel": channel,
+        "recipe": recipe_name,
+        "input_path": str(input_path),
+        "output_path": str(output_path),
+    }
+
+
 # ========== API - Runs ==========
 
 @app.post("/api/utilities/runs", response_model=RunResponse)
@@ -430,17 +447,18 @@ async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, db:
     db.commit()
     db.refresh(db_run)
 
-    # تمرير اسم القناة واسم الوصفة مع التشغيل
+    # تمرير اسم القناة واسم الوصفة واسم الموديل مع التشغيل
     background_tasks.add_task(
         execute_run,
         run_id=run_id, code=code_to_run,
         input_folder=run_data.input_folder,
-        recipe_name=recipe_name
+        recipe_name=recipe_name,
+        model_name=run_data.model_name or "gemini-2.5-flash"
     )
     return RunResponse.model_validate(db_run)
 
 
-def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = None):
+def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = None, model_name: str = "gemini-2.5-flash"):
     db = SessionLocal()
     try:
         db_run = db.query(Run).filter(Run.run_id == run_id).first()
@@ -458,15 +476,16 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
         actual_output_recipe = str(get_recipe_output_path(channel, recipe_name)) if recipe_name else None
         channel_root = str(get_channel_path(channel))
 
+        # تمرير متغيرات بيئة (القناة + الموديل)
+        os.environ["CHANNEL_NAME"] = channel
+        os.environ["CHANNEL_ROOT"] = channel_root
+        os.environ["MODEL_NAME"] = model_name
+        if actual_output_recipe:
+            os.environ["RECIPE_OUTPUT_DIR"] = actual_output_recipe
+
         if is_mock_mode():
             success, output_path, error_msg = mock_execute(run_id, code, actual_input)
         else:
-            # تمرير متغيرات بيئة إضافية للقناة
-            os.environ["CHANNEL_NAME"] = channel
-            os.environ["CHANNEL_ROOT"] = channel_root
-            if actual_output_recipe:
-                os.environ["RECIPE_OUTPUT_DIR"] = actual_output_recipe
-
             success, output_path, error_msg = create_sandbox_container(
                 run_id=run_id, code=code, input_folder=actual_input
             )

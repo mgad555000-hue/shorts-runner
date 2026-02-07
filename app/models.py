@@ -37,6 +37,7 @@ class RunCreate(BaseModel):
     code: str = ""
     input_folder: str
     recipe_id: Optional[int] = None
+    model_name: Optional[str] = "gemini-2.5-flash"
 
 
 class RunResponse(BaseModel):

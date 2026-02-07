@@ -497,7 +497,7 @@
     <div id="runner" class="tab-content active">
         <div class="card">
             <div class="card-title">تشغيل كود Python</div>
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;" class="run-form-grid">
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;" class="run-form-grid">
                 <div class="form-group">
                     <label class="form-label">الوصفة (اختياري)</label>
                     <select id="recipeSelect" onchange="onRecipeSelected()">
@@ -508,6 +508,33 @@
                     <label class="form-label">القناة</label>
                     <select id="inputFolder">
                         <option value="">جاري التحميل...</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">الموديل</label>
+                    <select id="modelSelect">
+                        <optgroup label="Gemini">
+                            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                            <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                            <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
+                        </optgroup>
+                        <optgroup label="OpenAI">
+                            <option value="gpt-4.1-nano">GPT-4.1 Nano</option>
+                            <option value="gpt-4.1-mini">GPT-4.1 Mini</option>
+                            <option value="gpt-4o-mini">GPT-4o Mini</option>
+                            <option value="gpt-5-nano">GPT-5 Nano</option>
+                            <option value="gpt-5-mini">GPT-5 Mini</option>
+                            <option value="gpt-5">GPT-5</option>
+                            <option value="gpt-5.1">GPT-5.1</option>
+                            <option value="gpt-5.2">GPT-5.2</option>
+                        </optgroup>
+                        <optgroup label="Claude">
+                            <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
+                            <option value="claude-opus-4-20250514">Claude Opus 4</option>
+                        </optgroup>
+                        <optgroup label="GLM">
+                            <option value="glm-4-plus">GLM-4 Plus</option>
+                        </optgroup>
                     </select>
                 </div>
             </div>
@@ -524,6 +551,7 @@
             </div>
             <div class="btn-group">
                 <button class="btn btn-primary" id="runBtn" onclick="runCode()">تشغيل</button>
+                <button class="btn btn-ghost" onclick="openInputFolder()">فتح مجلد المدخلات</button>
                 <button class="btn btn-ghost" onclick="clearCode()">مسح</button>
             </div>
         </div>
@@ -852,6 +880,7 @@ async function runCode() {
     const code = document.getElementById('pythonCode').value.trim();
     const inputFolder = document.getElementById('inputFolder').value;
     const recipeId = document.getElementById('recipeSelect').value;
+    const modelName = document.getElementById('modelSelect').value;
 
     if (!code) return showAlert('error', 'يرجى ادخال كود Python');
     if (!inputFolder) return showAlert('error', 'يرجى اختيار القناة');
@@ -861,7 +890,7 @@ async function runCode() {
     btn.innerHTML = '<span class="spinner"></span> جاري التشغيل...';
 
     try {
-        const body = { code, input_folder: inputFolder };
+        const body = { code, input_folder: inputFolder, model_name: modelName };
         if (recipeId) body.recipe_id = parseInt(recipeId);
 
         const res = await fetch(`${API}/runs`, {
@@ -951,7 +980,8 @@ function renderRunDetail(run, log, files) {
                     ${run.status === 'running' || run.status === 'pending' ?
                         `<button class="btn btn-danger btn-sm" onclick="cancelRun('${run.run_id}')">الغاء</button>` : ''}
                     ${['completed','failed'].includes(run.status) ?
-                        `<button class="btn btn-success btn-sm" onclick="downloadZip('${run.run_id}')">تنزيل ZIP</button>` : ''}
+                        `<button class="btn btn-success btn-sm" onclick="downloadZip('${run.run_id}')">تنزيل ZIP</button>
+                         <button class="btn btn-ghost btn-sm" onclick="openOutputFolder('${run.input_folder}','${run.recipe_name || ''}')">مجلد المخرجات</button>` : ''}
                 </div>
             </div>
             <div class="detail-body">
@@ -1297,6 +1327,28 @@ function toggleRecipeName() {
 function clearCode() {
     document.getElementById('pythonCode').value = '';
     document.getElementById('recipeSelect').value = '';
+}
+
+async function openInputFolder() {
+    const channel = document.getElementById('inputFolder').value;
+    const recipeId = document.getElementById('recipeSelect').value;
+    if (!channel) return showAlert('error', 'اختر القناة اولا');
+    if (!recipeId) return showAlert('error', 'اختر الوصفة اولا');
+    const recipe = allRecipes.find(r => r.id == recipeId);
+    if (!recipe) return;
+    try {
+        const res = await fetch(`${API.replace('utilities','channels')}/${channel}/recipe-path/${encodeURIComponent(recipe.name)}`);
+        const data = await res.json();
+        showAlert('success', 'مجلد المدخلات: ' + data.input_path);
+    } catch(e) { showAlert('error', e.message); }
+}
+
+async function openOutputFolder(channel, recipeName) {
+    try {
+        const res = await fetch(`${API.replace('utilities','channels')}/${channel}/recipe-path/${encodeURIComponent(recipeName)}`);
+        const data = await res.json();
+        showAlert('success', 'مجلد المخرجات: ' + data.output_path);
+    } catch(e) { showAlert('error', e.message); }
 }
 
 function esc(str) {

@@ -119,6 +119,7 @@ def create_sandbox_container(run_id: str, code: str, input_folder: str) -> Tuple
                         "INPUT_DIR": "/mnt/input",
                         "OUTPUT_DIR": "/mnt/output",
                         "PYTHONUNBUFFERED": "1",
+                        "MODEL_NAME": os.getenv("MODEL_NAME", ""),
                         # تمرير مفاتيح API (قراءة .env من المشروع عند كل تشغيلة)
                         "GEMINI_API_KEY": _get_api_env().get("GEMINI_API_KEY", ""),
                         "CLAUDE_API_KEY": _get_api_env().get("CLAUDE_API_KEY", ""),
@@ -219,6 +220,8 @@ def create_sandbox_container(run_id: str, code: str, input_folder: str) -> Tuple
                     "INPUT_DIR": str(abs_input_dir),
                     "OUTPUT_DIR": str(abs_output_dir),
                     "PYTHONUNBUFFERED": "1",
+                    # تمرير اسم الموديل المختار من الواجهة
+                    "MODEL_NAME": os.getenv("MODEL_NAME", ""),
                     # تمرير مفاتيح API (قراءة .env من المشروع عند كل تشغيلة)
                     "GEMINI_API_KEY": api_env.get("GEMINI_API_KEY", ""),
                     "CLAUDE_API_KEY": api_env.get("CLAUDE_API_KEY", ""),
