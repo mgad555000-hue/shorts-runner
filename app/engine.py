@@ -355,10 +355,169 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
     provider = detect_provider(model)
     api_key = _get_api_key_for_provider(provider)
 
-    log(f"→ توليد نص | الموديل: {model} | المزود: {provider} | طول البرومبت: {len(prompt)}")
+    log(f"-> generate | model: {model} | provider: {provider} | prompt: {len(prompt)} chars")
 
-    # سيتم تنفيذ الكود الفعلي في المرحلة 2
-    raise EngineError("دالة generate لم تُنفذ بعد - المرحلة 2", code="NOT_IMPLEMENTED")
+    try:
+        if provider == "gemini":
+            text = _retry_call(
+                lambda: _generate_gemini(prompt, model, api_key, system_prompt, temperature, max_tokens),
+                max_retries=3, base_delay=3.0, description=f"Gemini {model}"
+            )
+        elif provider == "openai":
+            text = _retry_call(
+                lambda: _generate_openai(prompt, model, api_key, system_prompt, temperature, max_tokens),
+                max_retries=3, base_delay=3.0, description=f"OpenAI {model}"
+            )
+        elif provider == "claude":
+            text = _retry_call(
+                lambda: _generate_claude(prompt, model, api_key, system_prompt, temperature, max_tokens),
+                max_retries=3, base_delay=3.0, description=f"Claude {model}"
+            )
+        elif provider == "glm":
+            text = _retry_call(
+                lambda: _generate_glm(prompt, model, api_key, system_prompt, temperature, max_tokens),
+                max_retries=3, base_delay=3.0, description=f"GLM {model}"
+            )
+        else:
+            raise EngineError(f"مزود غير مدعوم: {provider}", code="UNSUPPORTED_PROVIDER")
+
+        # فحص النتيجة
+        text = _check_response_text(text, model)
+
+        duration = int((time.time() - start_time) * 1000)
+        log(f"<- generate OK | {len(text)} chars | {duration}ms")
+
+        return EngineResult(
+            success=True, data=text, model=model, provider=provider,
+            duration_ms=duration
+        )
+
+    except EngineError:
+        raise
+    except Exception as e:
+        duration = int((time.time() - start_time) * 1000)
+        raise EngineError(
+            f"خطأ غير متوقع من {provider}/{model}: {str(e)[:500]}",
+            code="UNEXPECTED_ERROR"
+        )
+
+
+# ========== دوال الربط الفعلية (منسوخة من الكود المجرب) ==========
+
+def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+    """ربط Gemini عبر google.genai SDK الجديدة"""
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=api_key)
+
+    config = types.GenerateContentConfig(
+        temperature=temperature,
+        top_p=0.95,
+        max_output_tokens=max_tokens,
+    )
+    if system_prompt:
+        config.system_instruction = system_prompt
+
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=config,
+    )
+
+    if not response or not response.text:
+        raise ValueError("Gemini returned empty response")
+
+    return response.text
+
+
+def _generate_openai(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+    """ربط OpenAI عبر openai SDK"""
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    # GPT-5 و reasoning models يستخدموا max_completion_tokens بدل max_tokens
+    is_new_model = model.startswith("gpt-5") or model.startswith("o1") or model.startswith("o3") or model.startswith("o4")
+    token_param = {"max_completion_tokens": max_tokens} if is_new_model else {"max_tokens": max_tokens}
+
+    # بعض الموديلات (gpt-5-nano, o-series) مش بتقبل temperature غير 1
+    call_params = {
+        "model": model,
+        "messages": messages,
+        **token_param,
+    }
+    # نحط temperature بس لو الموديل بيدعمه
+    is_no_temp = model.startswith("gpt-5-nano") or model.startswith("o1") or model.startswith("o3") or model.startswith("o4")
+    if not is_no_temp:
+        call_params["temperature"] = temperature
+
+    response = client.chat.completions.create(**call_params)
+
+    if not response.choices or not response.choices[0].message.content:
+        raise ValueError("OpenAI returned empty response")
+
+    return response.choices[0].message.content
+
+
+def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+    """ربط Claude عبر anthropic SDK"""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    kwargs = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if system_prompt:
+        kwargs["system"] = system_prompt
+
+    message = client.messages.create(**kwargs)
+
+    if not message.content or not message.content[0].text:
+        raise ValueError("Claude returned empty response")
+
+    return message.content[0].text
+
+
+def _generate_glm(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+    """ربط GLM عبر REST API"""
+    import httpx
+
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    response = httpx.post(
+        "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        },
+        timeout=180.0,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    if not data.get("choices") or not data["choices"][0].get("message", {}).get("content"):
+        raise ValueError("GLM returned empty response")
+
+    return data["choices"][0]["message"]["content"]
 
 
 def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = 8192, save_path: str = None) -> EngineResult:
