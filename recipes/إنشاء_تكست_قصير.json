@@ -1,0 +1,39 @@
+{
+  "name": "إنشاء تكست قصير",
+  "steps": [
+    {
+      "id": "instructions",
+      "action": "read_input",
+      "file": "instructions.txt",
+      "label": "قراءة التعليمات"
+    },
+    {
+      "id": "topics",
+      "action": "read_input",
+      "file": "topics.json",
+      "label": "قراءة العناوين"
+    },
+    {
+      "id": "prompt",
+      "action": "template",
+      "text": "{instructions}\n\n---\n\nقائمة العناوين المطلوب إنشاء تكست لها:\n\n{topics}",
+      "label": "تجميع البرومبت"
+    },
+    {
+      "id": "scripts",
+      "action": "generate",
+      "input": "{prompt}",
+      "temperature": 0.7,
+      "max_tokens": 16000,
+      "label": "توليد التكست"
+    },
+    {
+      "id": "docx",
+      "action": "save_docx",
+      "input": "{scripts}",
+      "save_as": "scripts_output.docx",
+      "font_size": 14,
+      "label": "حفظ Word"
+    }
+  ]
+}

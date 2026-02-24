@@ -1,0 +1,38 @@
+{
+  "name": "تجهيز نصوص للصوت",
+  "steps": [
+    {
+      "id": "instructions",
+      "action": "read_input",
+      "file": "instructions.txt",
+      "label": "قراءة التعليمات"
+    },
+    {
+      "id": "text",
+      "action": "read_docx",
+      "label": "قراءة ملفات Word"
+    },
+    {
+      "id": "prompt",
+      "action": "template",
+      "text": "{instructions}\n\n{text}",
+      "label": "تجميع البرومبت"
+    },
+    {
+      "id": "processed",
+      "action": "generate",
+      "input": "{prompt}",
+      "max_tokens": 32000,
+      "temperature": 0.3,
+      "label": "تشكيل النصوص"
+    },
+    {
+      "id": "docx",
+      "action": "save_docx",
+      "input": "{processed}",
+      "save_as": "tts_ready.docx",
+      "font_size": 14,
+      "label": "حفظ ملف Word"
+    }
+  ]
+}

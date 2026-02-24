@@ -4,13 +4,18 @@ services:
     container_name: shorts-app-container
     restart: unless-stopped
     user: root
+    env_file:
+      - .env
     ports:
       - "8001:8000"
     volumes:
       - ./data:/app/data:rw
       - ./shorts/out:/app/shorts/out:rw
+      - ./longs/out:/app/longs/out:rw
       - ./recipes:/app/recipes:ro
       - ./app:/app/app:ro
+      - ./.env:/app/.env:ro
+      - ./static:/app/static:ro
       - /var/run/docker.sock:/var/run/docker.sock:rw
       - C:/Users/w10/AppData/Roaming/gcloud:/root/.config/gcloud:ro
       # ربط فيديوهات كل قناة (read-only)
@@ -21,6 +26,7 @@ services:
       - PYTHONUNBUFFERED=1
       - DATA_ROOT=/app/data
       - OUTPUT_ROOT=/app/shorts/out
+      - LONGS_OUTPUT_ROOT=/app/longs/out
       - SANDBOX_IMAGE=shorts-runner-sandbox
       - DOCKER_HOST=unix:///var/run/docker.sock
       - MAX_CONCURRENT_RUNS=2

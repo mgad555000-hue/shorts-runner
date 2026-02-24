@@ -11,6 +11,7 @@ class RecipeCreate(BaseModel):
     description: Optional[str] = None
     code: str
     input_folder: Optional[str] = None
+    recipe_type: str = "shorts"
 
 
 class RecipeUpdate(BaseModel):
@@ -18,6 +19,7 @@ class RecipeUpdate(BaseModel):
     description: Optional[str] = None
     code: Optional[str] = None
     input_folder: Optional[str] = None
+    recipe_type: Optional[str] = None
 
 
 class RecipeResponse(BaseModel):
@@ -26,6 +28,7 @@ class RecipeResponse(BaseModel):
     description: Optional[str]
     code: str
     input_folder: Optional[str]
+    recipe_type: str
     created_at: datetime
     updated_at: datetime
 
@@ -38,6 +41,10 @@ class RunCreate(BaseModel):
     input_folder: str
     recipe_id: Optional[int] = None
     model_name: Optional[str] = "gemini-2.5-flash"
+    tts_provider: Optional[str] = "vertex"
+    execution_mode: Optional[str] = "instant"
+    topic_ids: Optional[List[int]] = None
+    content_type: str = "shorts"
 
 
 class RunResponse(BaseModel):

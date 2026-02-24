@@ -1,0 +1,24 @@
+{
+  "name": "إزالة تشكيل",
+  "steps": [
+    {
+      "id": "text",
+      "action": "read_docx",
+      "label": "قراءة ملفات Word"
+    },
+    {
+      "id": "cleaned",
+      "action": "remove_tashkeel",
+      "input": "{text}",
+      "label": "إزالة التشكيل"
+    },
+    {
+      "id": "docx",
+      "action": "save_docx",
+      "input": "{cleaned}",
+      "save_as": "without_tashkeel.docx",
+      "font_size": 14,
+      "label": "حفظ ملف Word"
+    }
+  ]
+}

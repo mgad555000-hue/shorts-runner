@@ -31,6 +31,7 @@ class Recipe(Base):
     description = Column(Text, nullable=True)
     code = Column(Text, nullable=False)
     input_folder = Column(String, nullable=True)
+    recipe_type = Column(String, default="shorts")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -77,6 +78,12 @@ def _migrate_db():
                 if col_name not in existing:
                     conn.execute(text(sql))
                     conn.commit()
+    if insp.has_table("shorts_recipes"):
+        existing = {col["name"] for col in insp.get_columns("shorts_recipes")}
+        if "recipe_type" not in existing:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE shorts_recipes ADD COLUMN recipe_type TEXT DEFAULT 'shorts'"))
+                conn.commit()
 
 
 def init_db():

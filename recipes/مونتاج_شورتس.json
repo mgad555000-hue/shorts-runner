@@ -1,0 +1,28 @@
+{
+  "name": "مونتاج شورتس",
+  "steps": [
+    {
+      "id": "video_list",
+      "action": "read_docx",
+      "file": "videos_list.docx",
+      "reconstruct_markers": true,
+      "label": "قراءة قائمة الفيديوهات"
+    },
+    {
+      "id": "screen_texts",
+      "action": "read_docx",
+      "file": "screen_texts.docx",
+      "reconstruct_markers": true,
+      "label": "قراءة جمل الشاشة"
+    },
+    {
+      "id": "montage",
+      "action": "montage_short",
+      "input": "{video_list}",
+      "screen_texts": "{screen_texts}",
+      "audio_mode": "auto",
+      "text_color": "white",
+      "label": "مونتاج الفيديوهات القصيرة"
+    }
+  ]
+}

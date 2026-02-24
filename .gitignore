@@ -33,3 +33,27 @@ Thumbs.db
 # Test files
 test_*.py
 debug_*.py
+
+# Large local directories
+Channel_lists&videos/
+New folder/
+
+# Temp/utility scripts
+_get_token.py
+_new_token.txt
+add_recipes_to_db.py
+analyze_diff.py
+check_balance.py
+check_batch_status.py
+check_detail.py
+check_locs.py
+folder_helper.py
+merge_topics.py
+remap_topics.py
+replace_topics.py
+verify_topics.py
+problematic_topics.json
+nul
+
+# VPS-specific
+docker-compose.vps.yml

@@ -1,0 +1,9 @@
+data/
+Channel_lists&videos/
+shorts/
+.git/
+__pycache__/
+*.pyc
+.env
+node_modules/
+New folder/

@@ -4,13 +4,15 @@
 مكتبة موحدة للتعامل مع كل موديلات الذكاء الصناعي.
 الوصفات بتستدعي الدوال دي وبس - مش بتتعامل مع الموديلات مباشرة.
 
-الدوال الستة:
+الدوال الثمانية:
 1. generate()         - توليد نص من برومبت
 2. batch_send()       - إرسال دفعة برومبتات
 3. batch_retrieve()   - استقبال نتائج الدفعة
-4. tts_elevenlabs()   - تحويل نص لصوت (ElevenLabs)
-5. tts_vertex()       - تحويل نص لصوت (Vertex AI)
-6. transcribe()       - تحويل صوت لنص (Whisper)
+4. tts()              - تحويل نص لصوت (موحدة - بتقرأ المزود من البيئة)
+5. tts_elevenlabs()   - تحويل نص لصوت (ElevenLabs)
+6. tts_minimax()      - تحويل نص لصوت (MiniMax)
+7. tts_vertex()       - تحويل نص لصوت (Vertex AI)
+8. transcribe()       - تحويل صوت لنص (Whisper)
 """
 
 import os
@@ -309,7 +311,10 @@ def _retry_call(func, max_retries: int = 3, base_delay: float = 2.0, description
 def detect_provider(model: str) -> str:
     """تحديد المزود تلقائياً من اسم الموديل"""
     model_lower = model.lower()
-    if model_lower.startswith("gemini"):
+    # Vertex AI: استخدم بادئة "vertex:" مثل vertex:gemini-2.5-pro
+    if model_lower.startswith("vertex:"):
+        return "vertex"
+    elif model_lower.startswith("gemini"):
         return "gemini"
     elif model_lower.startswith("gpt-") or model_lower.startswith("o1") or model_lower.startswith("o3") or model_lower.startswith("o4"):
         return "openai"
@@ -319,7 +324,7 @@ def detect_provider(model: str) -> str:
         return "glm"
     else:
         raise EngineError(
-            f"موديل غير معروف: {model}. الموديلات المدعومة: gemini, gpt, claude, glm",
+            f"موديل غير معروف: {model}. الموديلات المدعومة: gemini, gpt, claude, glm, vertex:gemini-*",
             code="UNKNOWN_MODEL"
         )
 
@@ -342,10 +347,12 @@ def _get_api_key_for_provider(provider: str) -> str:
 
 # ========== الدوال الستة الرئيسية (هيكل فارغ - يتملأ في المراحل التالية) ==========
 
-def generate(prompt: str, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = 8192) -> EngineResult:
+def generate(prompt: str, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = None) -> EngineResult:
     """
     الدالة 1: توليد نص من برومبت
-    تدعم: Gemini, OpenAI, Claude, GLM
+    تدعم: Gemini, OpenAI, Claude, GLM, Vertex AI
+
+    ملاحظة: لاستخدام Vertex AI، استخدم "vertex:gemini-2.5-pro" مثلاً
     """
     start_time = time.time()
 
@@ -353,7 +360,9 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
     prompt = _check_prompt(prompt)
     model = _check_model(model)
     provider = detect_provider(model)
-    api_key = _get_api_key_for_provider(provider)
+
+    # Vertex AI مش بيحتاج API key - بيستخدم Google Cloud credentials
+    api_key = None if provider == "vertex" else _get_api_key_for_provider(provider)
 
     log(f"-> generate | model: {model} | provider: {provider} | prompt: {len(prompt)} chars")
 
@@ -362,6 +371,13 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
             text = _retry_call(
                 lambda: _generate_gemini(prompt, model, api_key, system_prompt, temperature, max_tokens),
                 max_retries=3, base_delay=3.0, description=f"Gemini {model}"
+            )
+        elif provider == "vertex":
+            # استخرج اسم الموديل الفعلي (بعد "vertex:")
+            actual_model = model.split(":", 1)[1] if ":" in model else model
+            text = _retry_call(
+                lambda: _generate_vertex(prompt, actual_model, system_prompt, temperature, max_tokens),
+                max_retries=3, base_delay=3.0, description=f"Vertex AI {actual_model}"
             )
         elif provider == "openai":
             text = _retry_call(
@@ -411,11 +427,10 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
 
     client = genai.Client(api_key=api_key)
 
-    config = types.GenerateContentConfig(
-        temperature=temperature,
-        top_p=0.95,
-        max_output_tokens=max_tokens,
-    )
+    config_params = {"temperature": temperature, "top_p": 0.95}
+    if max_tokens:
+        config_params["max_output_tokens"] = max_tokens
+    config = types.GenerateContentConfig(**config_params)
     if system_prompt:
         config.system_instruction = system_prompt
 
@@ -442,16 +457,18 @@ def _generate_openai(prompt: str, model: str, api_key: str, system_prompt: str, 
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    # GPT-5 و reasoning models يستخدموا max_completion_tokens بدل max_tokens
-    is_new_model = model.startswith("gpt-5") or model.startswith("o1") or model.startswith("o3") or model.startswith("o4")
-    token_param = {"max_completion_tokens": max_tokens} if is_new_model else {"max_tokens": max_tokens}
-
     # بعض الموديلات (gpt-5-nano, o-series) مش بتقبل temperature غير 1
     call_params = {
         "model": model,
         "messages": messages,
-        **token_param,
     }
+    # max_tokens بس لو محدد
+    if max_tokens:
+        is_new_model = model.startswith("gpt-5") or model.startswith("o1") or model.startswith("o3") or model.startswith("o4")
+        if is_new_model:
+            call_params["max_completion_tokens"] = max_tokens
+        else:
+            call_params["max_tokens"] = max_tokens
     # نحط temperature بس لو الموديل بيدعمه
     is_no_temp = model.startswith("gpt-5-nano") or model.startswith("o1") or model.startswith("o3") or model.startswith("o4")
     if not is_no_temp:
@@ -473,7 +490,7 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
 
     kwargs = {
         "model": model,
-        "max_tokens": max_tokens,
+        "max_tokens": max_tokens or 16384,
         "temperature": temperature,
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -503,12 +520,12 @@ def _generate_glm(prompt: str, model: str, api_key: str, system_prompt: str, tem
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
-        json={
+        json={k: v for k, v in {
             "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-        },
+        }.items() if v is not None},
         timeout=180.0,
     )
     response.raise_for_status()
@@ -520,10 +537,408 @@ def _generate_glm(prompt: str, model: str, api_key: str, system_prompt: str, tem
     return data["choices"][0]["message"]["content"]
 
 
-def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = 8192, save_path: str = None) -> EngineResult:
+def _generate_vertex(prompt: str, model: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+    """ربط Vertex AI لتوليد النصوص (من الوثيقة - طريقة 6)"""
+    import json
+    import tempfile
+    from google import genai
+    from google.genai import types
+
+    # جلب بيانات الاعتماد من المتغيرات البيئية
+    project_id = os.getenv("GOOGLE_QUOTA_PROJECT", "")
+    if not project_id:
+        raise ValueError("GOOGLE_QUOTA_PROJECT غير محدد في .env")
+
+    location = os.getenv("GOOGLE_LOCATION", "europe-west1")
+
+    # إعداد بيانات الاعتماد
+    creds = {
+        "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
+        "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
+        "refresh_token": os.getenv("GOOGLE_REFRESH_TOKEN", ""),
+        "quota_project_id": project_id,
+        "type": "authorized_user",
+        "universe_domain": "googleapis.com"
+    }
+
+    # التحقق من وجود البيانات الأساسية
+    if not creds["client_id"] or not creds["client_secret"] or not creds["refresh_token"]:
+        raise ValueError("بيانات اعتماد Vertex AI ناقصة. تأكد من GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN")
+
+    # حفظ بيانات الاعتماد في ملف مؤقت
+    creds_file = os.path.join(tempfile.gettempdir(), 'gcp_creds_generate.json')
+    with open(creds_file, 'w') as f:
+        json.dump(creds, f)
+
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = creds_file
+
+    # الاتصال بـ Vertex AI
+    client = genai.Client(vertexai=True, project=project_id, location=location)
+
+    # تكوين الطلب
+    config_params = {"temperature": temperature}
+    if max_tokens:
+        config_params["max_output_tokens"] = max_tokens
+    config = types.GenerateContentConfig(**config_params)
+    if system_prompt:
+        config.system_instruction = system_prompt
+
+    # توليد النص
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=config
+    )
+
+    if not response or not response.text:
+        raise ValueError("Vertex AI returned empty response")
+
+    return response.text
+
+
+# ========== دوال مساعدة لـ Google Cloud Storage ==========
+
+def _setup_gcs_credentials(project_id: str = None) -> tuple:
+    """إعداد بيانات اعتماد GCS وإرجاع (project_id, location, bucket_name)"""
+    import json
+    import tempfile
+
+    project_id = project_id or os.getenv("GOOGLE_QUOTA_PROJECT", "")
+    if not project_id:
+        raise EngineError(
+            "GOOGLE_QUOTA_PROJECT غير محدد في .env - مطلوب لـ Batch operations",
+            code="MISSING_GCS_PROJECT"
+        )
+
+    location = os.getenv("GOOGLE_LOCATION", "us-central1")
+    bucket_name = os.getenv("GOOGLE_GCS_BUCKET", "")
+
+    if not bucket_name:
+        raise EngineError(
+            "GOOGLE_GCS_BUCKET غير محدد في .env - مطلوب لـ Batch operations",
+            code="MISSING_GCS_BUCKET"
+        )
+
+    # إعداد بيانات الاعتماد
+    creds = {
+        "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
+        "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
+        "refresh_token": os.getenv("GOOGLE_REFRESH_TOKEN", ""),
+        "quota_project_id": project_id,
+        "type": "authorized_user",
+        "universe_domain": "googleapis.com"
+    }
+
+    if not creds["client_id"] or not creds["client_secret"] or not creds["refresh_token"]:
+        raise EngineError(
+            "بيانات اعتماد Google Cloud ناقصة. تأكد من: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN",
+            code="MISSING_GCS_CREDENTIALS"
+        )
+
+    # حفظ بيانات الاعتماد في ملف مؤقت
+    creds_file = os.path.join(tempfile.gettempdir(), f'gcp_creds_{os.getpid()}.json')
+    with open(creds_file, 'w') as f:
+        json.dump(creds, f)
+
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = creds_file
+    os.environ['GOOGLE_CLOUD_PROJECT'] = project_id
+    os.environ['GCLOUD_PROJECT'] = project_id
+
+    return project_id, location, bucket_name
+
+
+def _upload_to_gcs(bucket_name: str, blob_name: str, content: str) -> str:
+    """رفع محتوى نصي إلى GCS وإرجاع gs:// URI"""
+    from google.cloud import storage
+
+    project_id = os.getenv("GOOGLE_QUOTA_PROJECT", "")
+    storage_client = storage.Client(project=project_id)
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    blob.upload_from_string(content, content_type='application/json')
+
+    return f"gs://{bucket_name}/{blob_name}"
+
+
+def _download_from_gcs(gcs_uri: str) -> str:
+    """تنزيل محتوى من GCS — يدعم ملف واحد أو مجلد (prefix)"""
+    from google.cloud import storage
+
+    # استخراج bucket و blob من URI
+    path = gcs_uri.replace("gs://", "")
+    bucket_name = path.split("/")[0]
+    blob_name = "/".join(path.split("/")[1:])
+
+    project_id = os.getenv("GOOGLE_QUOTA_PROJECT", "")
+    storage_client = storage.Client(project=project_id)
+    bucket = storage_client.bucket(bucket_name)
+
+    # محاولة تنزيل كملف واحد أولاً
+    blob = bucket.blob(blob_name)
+    if blob.exists():
+        return blob.download_as_text()
+
+    # لو مش ملف → يبقى مجلد (prefix) — ننزّل كل الملفات جواه
+    prefix = blob_name.rstrip("/") + "/"
+    blobs = list(bucket.list_blobs(prefix=prefix))
+    if not blobs:
+        raise EngineError(
+            f"لا يوجد ملفات في GCS: {gcs_uri}",
+            code="GCS_NOT_FOUND"
+        )
+
+    log(f"  GCS prefix: {len(blobs)} ملف في {prefix}")
+    all_content = []
+    for b in sorted(blobs, key=lambda x: x.name):
+        if b.size and b.size > 0:
+            content = b.download_as_text()
+            all_content.append(content)
+            log(f"    ✓ {b.name.split('/')[-1]} ({b.size} bytes)")
+
+    return "\n".join(all_content)
+
+
+def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> BatchInfo:
+    """إرسال دفعة عبر Gemini Batch API (يحتاج GCS)"""
+    import json
+    from google import genai
+
+    # إعداد GCS
+    project_id, location, bucket_name = _setup_gcs_credentials()
+
+    # بناء الطلبات بصيغة JSONL
+    jsonl_lines = []
+    for i, prompt in enumerate(prompts):
+        request = {
+            "contents": [{"parts": [{"text": prompt}], "role": "user"}],
+            "generationConfig": {
+                "temperature": temperature,
+                "topP": 0.95,
+                "maxOutputTokens": max_tokens,
+            }
+        }
+        if system_prompt:
+            request["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+
+        # كل سطر في JSONL لازم يكون {"request": {...}}
+        jsonl_lines.append(json.dumps({"request": request}, ensure_ascii=False))
+
+    jsonl_content = "\n".join(jsonl_lines)
+
+    # رفع JSONL إلى GCS
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    input_blob_name = f"batch_input/gemini_{timestamp}.jsonl"
+    input_uri = _upload_to_gcs(bucket_name, input_blob_name, jsonl_content)
+
+    log(f"  رفع الطلبات إلى: {input_uri}")
+
+    # إنشاء الـ Batch Job باستخدام Vertex AI client (مطلوب مع GCS)
+    client = genai.Client(
+        vertexai=True,
+        project=project_id,
+        location=location,
+    )
+    job_name = f"batch-{timestamp}"
+
+    batch_job = client.batches.create(
+        model=model,
+        src=input_uri,  # GCS URI
+        config={'display_name': job_name},
+    )
+
+    # استخراج معلومات المهمة
+    job_full_name = batch_job.name if hasattr(batch_job, 'name') else ""
+    job_id = job_full_name.split('/')[-1] if job_full_name else job_name
+
+    batch_info = BatchInfo(
+        provider="gemini",
+        model=model,
+        job_id=job_id,
+        job_name=job_full_name,
+        item_order=list(range(len(prompts))),
+        items_count=len(prompts),
+        created_at=datetime.now().isoformat(),
+        status="submitted",
+        extra={
+            "display_name": job_name,
+            "input_uri": input_uri,
+            "method": "sdk"
+        }
+    )
+
+    return batch_info
+
+
+def _batch_send_claude(prompts: list, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> BatchInfo:
+    """إرسال دفعة عبر Claude Batch API"""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    # بناء الطلبات
+    requests = []
+    for i, prompt in enumerate(prompts):
+        request = {
+            "custom_id": str(i),
+            "params": {
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+        }
+        if system_prompt:
+            request["params"]["system"] = system_prompt
+
+        requests.append(request)
+
+    # إرسال الدفعة
+    batch = client.messages.batches.create(requests=requests)
+
+    # استخراج معلومات المهمة
+    batch_info = BatchInfo(
+        provider="claude",
+        model=model,
+        job_id=batch.id,
+        job_name=batch.id,
+        item_order=list(range(len(prompts))),
+        items_count=len(prompts),
+        created_at=datetime.now().isoformat(),
+        status=batch.processing_status if hasattr(batch, 'processing_status') else "submitted",
+        extra={}
+    )
+
+    return batch_info
+
+
+def _batch_send_gemini_rest(prompts: list, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> BatchInfo:
+    """إرسال دفعة عبر Gemini REST API (من الوثيقة - طريقة 4)"""
+    import httpx
+
+    # بناء الطلبات
+    requests = []
+    for i, prompt in enumerate(prompts):
+        request = {
+            "model": f"models/{model}",
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": temperature,
+                "topP": 0.95,
+                "maxOutputTokens": max_tokens,
+            }
+        }
+        if system_prompt:
+            request["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+
+        requests.append(request)
+
+    # إرسال الدفعة
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:batchGenerateContent"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key
+    }
+
+    payload = {
+        "batch": {
+            "display_name": f"batch-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+            "input_config": {
+                "requests": {
+                    "requests": requests
+                }
+            }
+        }
+    }
+
+    response = httpx.post(url, headers=headers, json=payload, timeout=120.0)
+    response.raise_for_status()
+    job_name = response.json().get('name', '')
+
+    batch_info = BatchInfo(
+        provider="gemini",
+        model=model,
+        job_id=job_name.split('/')[-1] if job_name else "",
+        job_name=job_name,
+        item_order=list(range(len(prompts))),
+        items_count=len(prompts),
+        created_at=datetime.now().isoformat(),
+        status="submitted",
+        extra={"method": "rest"}
+    )
+
+    return batch_info
+
+
+def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperature: float, max_tokens: int) -> BatchInfo:
+    """إرسال دفعة عبر Vertex AI Batch Prediction (من الوثيقة - طريقة 7)"""
+    import json
+    from google.cloud import aiplatform
+
+    # إعداد GCS
+    project_id, location, bucket_name = _setup_gcs_credentials()
+
+    # تهيئة Vertex AI
+    aiplatform.init(project=project_id, location=location)
+
+    # بناء JSONL
+    jsonl_lines = []
+    for i, prompt in enumerate(prompts):
+        request = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_tokens,
+            }
+        }
+        if system_prompt:
+            request["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+
+        jsonl_lines.append(json.dumps({"request": request}, ensure_ascii=False))
+
+    jsonl_content = "\n".join(jsonl_lines)
+
+    # رفع إلى GCS
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    input_blob_name = f"batch_input/vertex_{timestamp}.jsonl"
+    input_uri = _upload_to_gcs(bucket_name, input_blob_name, jsonl_content)
+
+    output_uri = f"gs://{bucket_name}/batch_output/vertex_{timestamp}/"
+
+    log(f"  رفع الطلبات إلى: {input_uri}")
+
+    # إنشاء مهمة Batch
+    job_display_name = f"vertex-batch-{timestamp}"
+    batch_job = aiplatform.BatchPredictionJob.create(
+        job_display_name=job_display_name,
+        model_name=f"publishers/google/models/{model}",
+        instances_format="jsonl",
+        predictions_format="jsonl",
+        gcs_source=input_uri,
+        gcs_destination_prefix=output_uri,
+        sync=False,
+    )
+
+    batch_info = BatchInfo(
+        provider="vertex",
+        model=model,
+        job_id=batch_job.resource_name,
+        job_name=batch_job.display_name,
+        item_order=list(range(len(prompts))),
+        items_count=len(prompts),
+        created_at=datetime.now().isoformat(),
+        status="submitted",
+        extra={"gcs_output": output_uri, "input_uri": input_uri}
+    )
+
+    return batch_info
+
+
+def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = 8192, save_path: str = None, method: str = "sdk") -> EngineResult:
     """
     الدالة 2: إرسال دفعة برومبتات
-    تدعم: Gemini Batch, Claude Batch
+    تدعم: Gemini Batch (SDK/REST), Claude Batch, Vertex AI Batch
+
+    method: "sdk" (افتراضي), "rest" (Gemini REST API), "vertex" (Vertex AI Batch Prediction)
     """
     start_time = time.time()
 
@@ -531,16 +946,306 @@ def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: 
     prompts = _check_batch_prompts(prompts)
     model = _check_model(model)
     provider = detect_provider(model)
-    api_key = _get_api_key_for_provider(provider)
 
-    log(f"→ إرسال دفعة | الموديل: {model} | المزود: {provider} | العدد: {len(prompts)}")
+    # Vertex في method لا يحتاج API key
+    api_key = None if method == "vertex" else _get_api_key_for_provider(provider)
 
-    raise EngineError("دالة batch_send لم تُنفذ بعد - المرحلة 3", code="NOT_IMPLEMENTED")
+    log(f"→ إرسال دفعة | الموديل: {model} | المزود: {provider} | الطريقة: {method} | العدد: {len(prompts)}")
+
+    try:
+        if provider == "gemini" and method == "sdk":
+            batch_info = _retry_call(
+                lambda: _batch_send_gemini(prompts, model, api_key, system_prompt, temperature, max_tokens),
+                max_retries=3, base_delay=3.0, description=f"Gemini Batch SDK {model}"
+            )
+        elif provider == "gemini" and method == "rest":
+            batch_info = _retry_call(
+                lambda: _batch_send_gemini_rest(prompts, model, api_key, system_prompt, temperature, max_tokens),
+                max_retries=3, base_delay=3.0, description=f"Gemini Batch REST {model}"
+            )
+        elif (provider == "gemini" or provider == "vertex") and method == "vertex":
+            # Vertex AI Batch Prediction
+            actual_model = model.split(":", 1)[1] if ":" in model else model
+            batch_info = _retry_call(
+                lambda: _batch_send_vertex(prompts, actual_model, system_prompt, temperature, max_tokens),
+                max_retries=3, base_delay=3.0, description=f"Vertex AI Batch {actual_model}"
+            )
+        elif provider == "claude":
+            batch_info = _retry_call(
+                lambda: _batch_send_claude(prompts, model, api_key, system_prompt, temperature, max_tokens),
+                max_retries=3, base_delay=3.0, description=f"Claude Batch {model}"
+            )
+        else:
+            raise EngineError(
+                f"Batch غير مدعوم للمزود: {provider} بالطريقة: {method}",
+                code="BATCH_NOT_SUPPORTED"
+            )
+
+        # حفظ معلومات الـ Batch
+        if save_path:
+            batch_info.save(save_path)
+            log(f"✓ تم حفظ معلومات الدفعة في: {save_path}")
+        else:
+            # حفظ في المجلد الحالي
+            default_path = BATCH_INFO_FILENAME
+            batch_info.save(default_path)
+            log(f"✓ تم حفظ معلومات الدفعة في: {default_path}")
+
+        duration = int((time.time() - start_time) * 1000)
+        log(f"<- batch_send OK | job_id: {batch_info.job_id[:20]}... | {duration}ms")
+
+        return EngineResult(
+            success=True,
+            data=batch_info,
+            model=model,
+            provider=provider,
+            duration_ms=duration
+        )
+
+    except EngineError:
+        raise
+    except Exception as e:
+        duration = int((time.time() - start_time) * 1000)
+        raise EngineError(
+            f"خطأ غير متوقع من {provider} Batch: {str(e)[:500]}",
+            code="UNEXPECTED_ERROR"
+        )
+
+
+def _batch_retrieve_gemini(batch_info: BatchInfo, api_key: str) -> list:
+    """استقبال نتائج دفعة من Gemini"""
+    import json
+    from google import genai
+
+    # إعداد GCS
+    project_id, location, bucket_name = _setup_gcs_credentials()
+
+    # استخدام Vertex AI client (مطلوب مع GCS)
+    client = genai.Client(
+        vertexai=True,
+        project=project_id,
+        location=location,
+    )
+
+    # استرجاع معلومات المهمة
+    job_name = batch_info.job_name or batch_info.job_id
+    batch_job = client.batches.get(name=job_name)
+
+    # فحص الحالة
+    state = batch_job.state if hasattr(batch_job, 'state') else "UNKNOWN"
+    state_str = str(state)
+    log(f"  حالة المهمة: {state_str}")
+
+    if "FAILED" in state_str:
+        raise EngineError(
+            f"المهمة فشلت على Gemini: {job_name}",
+            code="BATCH_JOB_FAILED"
+        )
+
+    if "SUCCEEDED" not in state_str:
+        raise EngineError(
+            f"المهمة لم تكتمل بعد. الحالة: {state_str}",
+            code="BATCH_JOB_NOT_READY"
+        )
+
+    # استخراج النتائج
+    results = []
+
+    # طريقة 1: من GCS output (الطريقة الأساسية)
+    if hasattr(batch_job, 'dest') and hasattr(batch_job.dest, 'gcs_uri'):
+        gcs_uri = batch_job.dest.gcs_uri
+        log(f"  قراءة النتائج من: {gcs_uri}")
+
+        # تنزيل JSONL من GCS
+        jsonl_content = _download_from_gcs(gcs_uri)
+
+        # تحليل JSONL
+        for line in jsonl_content.strip().split('\n'):
+            if line:
+                try:
+                    data = json.loads(line)
+                    text = data['response']['candidates'][0]['content']['parts'][0]['text']
+                    results.append(text)
+                except (KeyError, IndexError, json.JSONDecodeError) as e:
+                    log(f"[!] فشل استخراج نتيجة من GCS: {str(e)}")
+                    results.append("")
+
+    # طريقة 2: من inlined_responses (fallback)
+    elif hasattr(batch_job, 'dest') and hasattr(batch_job.dest, 'inlined_responses'):
+        log(f"  قراءة النتائج من inlined_responses")
+        for response in batch_job.dest.inlined_responses:
+            try:
+                text = response.response.candidates[0].content.parts[0].text
+                results.append(text)
+            except (AttributeError, IndexError) as e:
+                log(f"[!] فشل استخراج نتيجة: {str(e)}")
+                results.append("")
+    else:
+        log(f"[!] تحذير: لم يتم العثور على نتائج في batch_job.dest")
+
+    return results
+
+
+def _batch_retrieve_claude(batch_info: BatchInfo, api_key: str) -> list:
+    """استقبال نتائج دفعة من Claude"""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    # استرجاع معلومات المهمة
+    batch_id = batch_info.job_id
+    batch_status = client.messages.batches.retrieve(batch_id)
+
+    # فحص الحالة
+    status = batch_status.processing_status
+    log(f"  حالة المهمة: {status}")
+
+    if status == "ended":
+        # المهمة انتهت - نتحقق من النتائج
+        pass
+    elif status in ["in_progress", "pending"]:
+        raise EngineError(
+            f"المهمة لم تكتمل بعد. الحالة: {status}",
+            code="BATCH_JOB_NOT_READY"
+        )
+    else:
+        raise EngineError(
+            f"حالة غير معروفة: {status}",
+            code="BATCH_JOB_UNKNOWN_STATUS"
+        )
+
+    # استخراج النتائج
+    results = []
+    for result in client.messages.batches.results(batch_id):
+        try:
+            if hasattr(result, 'result') and hasattr(result.result, 'message'):
+                text = result.result.message.content[0].text
+                results.append(text)
+            else:
+                results.append("")
+        except (AttributeError, IndexError) as e:
+            log(f"[!] فشل استخراج نتيجة: {str(e)}")
+            results.append("")
+
+    return results
+
+
+def _batch_retrieve_gemini_rest(batch_info: BatchInfo, api_key: str) -> list:
+    """استقبال نتائج دفعة من Gemini REST API (من الوثيقة - طريقة 4)"""
+    import httpx
+
+    # استرجاع معلومات المهمة
+    job_name = batch_info.job_name or batch_info.job_id
+    batch_url = f"https://generativelanguage.googleapis.com/v1beta/{job_name}"
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key
+    }
+
+    response = httpx.get(batch_url, headers=headers, timeout=60.0)
+    response.raise_for_status()
+    data = response.json()
+
+    # فحص الحالة
+    state = data.get('state', 'UNKNOWN')
+    log(f"  حالة المهمة: {state}")
+
+    if state == "FAILED":
+        raise EngineError(
+            f"المهمة فشلت على Gemini REST: {job_name}",
+            code="BATCH_JOB_FAILED"
+        )
+
+    if state != "SUCCEEDED":
+        raise EngineError(
+            f"المهمة لم تكتمل بعد. الحالة: {state}",
+            code="BATCH_JOB_NOT_READY"
+        )
+
+    # استخراج النتائج
+    results = []
+    responses = data.get('responses', [])
+    for resp in responses:
+        try:
+            text = resp['candidates'][0]['content']['parts'][0]['text']
+            results.append(text)
+        except (KeyError, IndexError) as e:
+            log(f"[!] فشل استخراج نتيجة: {str(e)}")
+            results.append("")
+
+    return results
+
+
+def _batch_retrieve_vertex(batch_info: BatchInfo) -> list:
+    """استقبال نتائج دفعة من Vertex AI Batch Prediction (من الوثيقة - طريقة 7)"""
+    import json
+    from google.cloud import aiplatform
+    from google.cloud import storage
+
+    # إعداد GCS
+    project_id, location, bucket_name = _setup_gcs_credentials()
+
+    # تهيئة Vertex AI
+    aiplatform.init(project=project_id, location=location)
+
+    # جلب المهمة
+    batch_job = aiplatform.BatchPredictionJob(batch_info.job_id)
+
+    # فحص الحالة
+    state = batch_job.state
+    log(f"  حالة المهمة: {state}")
+
+    if state == aiplatform.gapic.JobState.JOB_STATE_FAILED:
+        raise EngineError(
+            f"المهمة فشلت على Vertex AI: {batch_info.job_id}",
+            code="BATCH_JOB_FAILED"
+        )
+
+    if state != aiplatform.gapic.JobState.JOB_STATE_SUCCEEDED:
+        raise EngineError(
+            f"المهمة لم تكتمل بعد. الحالة: {state}",
+            code="BATCH_JOB_NOT_READY"
+        )
+
+    # قراءة النتائج من GCS
+    output_uri = batch_info.extra.get('gcs_output', '')
+    if not output_uri:
+        raise EngineError(
+            "مسار النتائج غير موجود في batch_info",
+            code="BATCH_OUTPUT_URI_MISSING"
+        )
+
+    # جلب ملفات النتائج من GCS
+    storage_client = storage.Client()
+    bucket_name = output_uri.replace("gs://", "").split("/")[0]
+    prefix = "/".join(output_uri.replace("gs://", "").split("/")[1:])
+
+    bucket = storage_client.bucket(bucket_name)
+    blobs = bucket.list_blobs(prefix=prefix)
+
+    # قراءة النتائج
+    results = []
+    for blob in blobs:
+        if blob.name.endswith('.jsonl'):
+            content = blob.download_as_text()
+            for line in content.strip().split('\n'):
+                if line:
+                    data = json.loads(line)
+                    try:
+                        text = data['prediction']['candidates'][0]['content']['parts'][0]['text']
+                        results.append(text)
+                    except (KeyError, IndexError) as e:
+                        log(f"[!] فشل استخراج نتيجة: {str(e)}")
+                        results.append("")
+
+    return results
 
 
 def batch_retrieve(batch_info_path: str = None, batch_info: BatchInfo = None) -> EngineResult:
     """
     الدالة 3: استقبال نتائج الدفعة
+    تدعم: Gemini (SDK/REST), Claude, Vertex AI Batch
     """
     start_time = time.time()
 
@@ -548,42 +1253,522 @@ def batch_retrieve(batch_info_path: str = None, batch_info: BatchInfo = None) ->
     info = batch_info or (BatchInfo.load(batch_info_path) if batch_info_path else None)
     info = _check_batch_info(info)
 
-    log(f"→ استقبال دفعة | المزود: {info.provider} | المهمة: {info.job_id[:20]}...")
+    provider = info.provider
+    method = info.extra.get('method', 'sdk')  # الطريقة المستخدمة في الإرسال
 
-    raise EngineError("دالة batch_retrieve لم تُنفذ بعد - المرحلة 4", code="NOT_IMPLEMENTED")
+    # Vertex لا يحتاج API key
+    api_key = None if provider == "vertex" else _get_api_key_for_provider(provider)
+
+    log(f"→ استقبال دفعة | المزود: {provider} | الطريقة: {method} | المهمة: {info.job_id[:20]}...")
+
+    try:
+        if provider == "gemini" and method == "sdk":
+            results = _retry_call(
+                lambda: _batch_retrieve_gemini(info, api_key),
+                max_retries=3, base_delay=3.0, description=f"Gemini Batch SDK Retrieve"
+            )
+        elif provider == "gemini" and method == "rest":
+            results = _retry_call(
+                lambda: _batch_retrieve_gemini_rest(info, api_key),
+                max_retries=3, base_delay=3.0, description=f"Gemini Batch REST Retrieve"
+            )
+        elif provider == "vertex":
+            results = _retry_call(
+                lambda: _batch_retrieve_vertex(info),
+                max_retries=3, base_delay=3.0, description=f"Vertex AI Batch Retrieve"
+            )
+        elif provider == "claude":
+            results = _retry_call(
+                lambda: _batch_retrieve_claude(info, api_key),
+                max_retries=3, base_delay=3.0, description=f"Claude Batch Retrieve"
+            )
+        else:
+            raise EngineError(
+                f"Batch غير مدعوم للمزود: {provider} بالطريقة: {method}",
+                code="BATCH_NOT_SUPPORTED"
+            )
+
+        # التحقق من عدد النتائج
+        expected_count = info.items_count
+        actual_count = len(results)
+        if actual_count != expected_count:
+            log(f"[!] تحذير: العدد المتوقع {expected_count} لكن استلمنا {actual_count}")
+
+        duration = int((time.time() - start_time) * 1000)
+        log(f"<- batch_retrieve OK | {len(results)} نتيجة | {duration}ms")
+
+        return EngineResult(
+            success=True,
+            data=results,
+            model=info.model,
+            provider=provider,
+            duration_ms=duration
+        )
+
+    except EngineError:
+        raise
+    except Exception as e:
+        duration = int((time.time() - start_time) * 1000)
+        raise EngineError(
+            f"خطأ غير متوقع من {provider} Batch Retrieve: {str(e)[:500]}",
+            code="UNEXPECTED_ERROR"
+        )
 
 
-def tts_elevenlabs(text: str, voice_id: str = None) -> EngineResult:
+def tts(text: str) -> EngineResult:
+    """
+    الدالة الموحدة: تحويل نص لصوت
+    بتقرأ المزود والصوت من متغيرات البيئة:
+    - TTS_PROVIDER: elevenlabs / minimax / vertex (الافتراضي: vertex)
+    - TTS_VOICE_ID: معرف الصوت (الافتراضي: Achird)
+    الوصفة بتنادي tts(text) وبس - مش محتاجة تعرف أي تفاصيل.
+    """
+    provider = os.getenv("TTS_PROVIDER", "vertex").lower().strip()
+    voice_id = os.getenv("TTS_VOICE_ID", "Achird").strip()
+
+    log(f"→ TTS موحد | المزود: {provider} | الصوت: {voice_id}")
+
+    if provider == "elevenlabs":
+        return tts_elevenlabs(text, voice_id=voice_id)
+    elif provider == "minimax":
+        return tts_minimax(text, voice_id=voice_id)
+    else:
+        return tts_vertex(text, voice=voice_id)
+
+
+def tts_elevenlabs(text: str, voice_id: str = "21m00Tcm4TlvDq8ikWAM") -> EngineResult:
     """
     الدالة 4: تحويل نص لصوت عبر ElevenLabs
+    الصوت الافتراضي: Rachel (21m00Tcm4TlvDq8ikWAM)
     """
     start_time = time.time()
     text = _check_text_for_tts(text)
+    api_key = _check_api_key("ELEVENLABS_API_KEY")
 
-    log(f"→ TTS ElevenLabs | طول النص: {len(text)}")
+    log(f"→ TTS ElevenLabs | طول النص: {len(text)} | الصوت: {voice_id[:10]}...")
 
-    raise EngineError("دالة tts_elevenlabs لم تُنفذ بعد - المرحلة 5", code="NOT_IMPLEMENTED")
+    try:
+        audio_data = _retry_call(
+            lambda: _tts_elevenlabs_impl(text, voice_id, api_key),
+            max_retries=3, base_delay=3.0, description="ElevenLabs TTS"
+        )
+
+        # فحص الصوت
+        audio_data = _check_audio_data(audio_data, "ElevenLabs")
+
+        duration = int((time.time() - start_time) * 1000)
+        log(f"<- TTS ElevenLabs OK | {len(audio_data)} bytes | {duration}ms")
+
+        return EngineResult(
+            success=True,
+            data=audio_data,
+            provider="elevenlabs",
+            duration_ms=duration
+        )
+
+    except EngineError:
+        raise
+    except Exception as e:
+        duration = int((time.time() - start_time) * 1000)
+        raise EngineError(
+            f"خطأ غير متوقع من ElevenLabs TTS: {str(e)[:500]}",
+            code="UNEXPECTED_ERROR"
+        )
+
+
+def _tts_elevenlabs_impl(text: str, voice_id: str, api_key: str) -> bytes:
+    """تنفيذ TTS عبر ElevenLabs API"""
+    import httpx
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+
+    headers = {
+        "xi-api-key": api_key,
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "text": text,
+        "model_id": "eleven_v3",
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75
+        }
+    }
+
+    response = httpx.post(url, headers=headers, json=data, timeout=60.0)
+    response.raise_for_status()
+
+    return response.content
+
+
+def tts_minimax(text: str, voice_id: str = "moss_audio_c4f52a13-a60c-11f0-9b9d-12927f33a4b7", model: str = "speech-2.8-hd") -> EngineResult:
+    """
+    الدالة 5: تحويل نص لصوت عبر MiniMax
+    الصوت الافتراضي: moss_audio_c4f52a13-a60c-11f0-9b9d-12927f33a4b7
+    الموديل الافتراضي: speech-2.8-hd
+    """
+    start_time = time.time()
+    text = _check_text_for_tts(text)
+    api_key = _check_api_key("MINIMAX_API_KEY")
+
+    log(f"→ TTS MiniMax | طول النص: {len(text)} | الصوت: {voice_id[:15]}... | الموديل: {model}")
+
+    try:
+        audio_data = _retry_call(
+            lambda: _tts_minimax_impl(text, voice_id, model, api_key),
+            max_retries=3, base_delay=3.0, description="MiniMax TTS"
+        )
+
+        # فحص الصوت
+        audio_data = _check_audio_data(audio_data, "MiniMax")
+
+        duration = int((time.time() - start_time) * 1000)
+        log(f"<- TTS MiniMax OK | {len(audio_data)} bytes | {duration}ms")
+
+        return EngineResult(
+            success=True,
+            data=audio_data,
+            provider="minimax",
+            model=model,
+            duration_ms=duration
+        )
+
+    except EngineError:
+        raise
+    except Exception as e:
+        duration = int((time.time() - start_time) * 1000)
+        raise EngineError(
+            f"خطأ غير متوقع من MiniMax TTS: {str(e)[:500]}",
+            code="UNEXPECTED_ERROR"
+        )
+
+
+def _tts_minimax_impl(text: str, voice_id: str, model: str, api_key: str) -> bytes:
+    """تنفيذ TTS عبر MiniMax API"""
+    import httpx
+
+    url = "https://api.minimax.io/v1/t2a_v2"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "model": model,
+        "text": text,
+        "stream": False,
+        "voice_setting": {
+            "voice_id": voice_id,
+            "speed": 1.0,
+            "vol": 1.0,
+            "pitch": 0
+        },
+        "audio_setting": {
+            "sample_rate": 32000,
+            "bitrate": 128000,
+            "format": "mp3",
+            "channel": 1
+        }
+    }
+
+    response = httpx.post(url, headers=headers, json=data, timeout=60.0)
+    response.raise_for_status()
+
+    result = response.json()
+
+    # فحص حالة الرد
+    base_resp = result.get("base_resp", {})
+    if base_resp.get("status_code", 0) != 0:
+        raise ValueError(f"MiniMax API error: {base_resp.get('status_msg', 'unknown')}")
+
+    # استخراج الصوت من hex
+    hex_audio = result.get("data", {}).get("audio", "")
+    if not hex_audio:
+        raise ValueError("MiniMax returned empty audio data")
+
+    audio_bytes = bytes.fromhex(hex_audio)
+    return audio_bytes
 
 
 def tts_vertex(text: str, voice: str = "Achird", project_id: str = None, location: str = "europe-west1") -> EngineResult:
     """
     الدالة 5: تحويل نص لصوت عبر Vertex AI
+    الصوت الافتراضي: Achird (عربي)
     """
     start_time = time.time()
     text = _check_text_for_tts(text)
 
-    log(f"→ TTS Vertex AI | طول النص: {len(text)} | الصوت: {voice}")
+    # المشروع والموقع من البيئة أو المعاملات
+    project_id = project_id or os.getenv("GOOGLE_QUOTA_PROJECT", "")
+    if not project_id:
+        raise EngineError(
+            "GOOGLE_QUOTA_PROJECT غير محدد في .env",
+            code="MISSING_PROJECT_ID"
+        )
 
-    raise EngineError("دالة tts_vertex لم تُنفذ بعد - المرحلة 6", code="NOT_IMPLEMENTED")
+    log(f"→ TTS Vertex AI | طول النص: {len(text)} | الصوت: {voice} | المشروع: {project_id}")
+
+    try:
+        audio_data = _retry_call(
+            lambda: _tts_vertex_impl(text, voice, project_id, location),
+            max_retries=3, base_delay=3.0, description="Vertex AI TTS"
+        )
+
+        # فحص الصوت
+        audio_data = _check_audio_data(audio_data, "Vertex AI")
+
+        duration = int((time.time() - start_time) * 1000)
+        log(f"<- TTS Vertex AI OK | {len(audio_data)} bytes | {duration}ms")
+
+        return EngineResult(
+            success=True,
+            data=audio_data,
+            provider="vertex",
+            duration_ms=duration
+        )
+
+    except EngineError:
+        raise
+    except Exception as e:
+        duration = int((time.time() - start_time) * 1000)
+        raise EngineError(
+            f"خطأ غير متوقع من Vertex AI TTS: {str(e)[:500]}",
+            code="UNEXPECTED_ERROR"
+        )
 
 
-def transcribe(audio_file: str) -> EngineResult:
+def _tts_vertex_impl(text: str, voice: str, project_id: str, location: str) -> bytes:
+    """تنفيذ TTS عبر Vertex AI"""
+    import json
+    import tempfile
+    from google import genai
+    from google.genai import types
+
+    # إعداد بيانات الاعتماد
+    creds = {
+        "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
+        "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
+        "refresh_token": os.getenv("GOOGLE_REFRESH_TOKEN", ""),
+        "quota_project_id": project_id,
+        "type": "authorized_user",
+        "universe_domain": "googleapis.com"
+    }
+
+    creds_file = os.path.join(tempfile.gettempdir(), 'gcp_creds_tts.json')
+    with open(creds_file, 'w') as f:
+        json.dump(creds, f)
+
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = creds_file
+
+    # الاتصال بـ Vertex AI
+    client = genai.Client(vertexai=True, project=project_id, location=location)
+
+    # تحويل النص لصوت
+    response = client.models.generate_content(
+        model="gemini-2.5-pro-tts",
+        contents=text,
+        config=types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
+                )
+            )
+        )
+    )
+
+    # استخراج الصوت
+    if not response.candidates or not response.candidates[0].content.parts:
+        raise ValueError("Vertex AI returned empty audio response")
+
+    inline_data = response.candidates[0].content.parts[0].inline_data
+    raw_data = inline_data.data
+    mime_type = inline_data.mime_type if hasattr(inline_data, 'mime_type') else "unknown"
+
+    # فحص البيانات: هل هي base64 (نص) أو binary (بايتات خام)?
+    import base64
+    import io
+    import wave as wav_module
+
+    pcm_data = raw_data
+    data_type = "binary"
+
+    # لو البيانات نص (base64) نفكها الأول
+    if isinstance(raw_data, (str, bytes)):
+        try:
+            # لو bytes، نشوف لو شكلها base64 text
+            test_bytes = raw_data if isinstance(raw_data, bytes) else raw_data.encode()
+            # base64 بيكون حروف ASCII فقط (A-Z, a-z, 0-9, +, /, =)
+            if all(b < 128 for b in test_bytes[:100]):
+                decoded = base64.b64decode(test_bytes)
+                # لو الناتج أصغر يبقى كان فعلاً base64
+                if len(decoded) < len(test_bytes):
+                    pcm_data = decoded
+                    data_type = "base64-decoded"
+        except Exception:
+            pass  # مش base64، نستخدم البيانات الخام
+
+    header_hex = pcm_data[:16].hex() if pcm_data else "empty"
+    log(f"  Vertex TTS mime_type: {mime_type} | raw: {len(raw_data)} bytes | {data_type}: {len(pcm_data)} bytes | header: {header_hex}")
+
+    # استخراج sample rate من mime_type
+    sample_rate = 24000
+    if 'rate=' in mime_type:
+        try:
+            rate_str = mime_type.split('rate=')[1].split(';')[0].strip()
+            sample_rate = int(rate_str)
+        except (ValueError, IndexError):
+            pass
+
+    # كتابة WAV من البيانات PCM
+    wav_buffer = io.BytesIO()
+    with wav_module.open(wav_buffer, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_data)
+
+    wav_data = wav_buffer.getvalue()
+    log(f"  WAV: {len(wav_data)} bytes | rate: {sample_rate}Hz | {data_type}")
+
+    return wav_data
+
+
+def transcribe(audio_file: str, model: str = "whisper-1", language: str = None) -> EngineResult:
     """
-    الدالة 6: تحويل صوت لنص عبر Whisper
+    الدالة 6: تحويل صوت لنص عبر Whisper (OpenAI)
+    language: كود اللغة (مثل 'ar' للعربي، 'en' للإنجليزي) - اختياري
     """
     start_time = time.time()
     audio_file = _check_audio_file(audio_file)
+    api_key = _check_api_key("OPENAI_API_KEY")
 
-    log(f"→ Whisper | الملف: {os.path.basename(audio_file)}")
+    log(f"→ Whisper | الملف: {os.path.basename(audio_file)} | الحجم: {os.path.getsize(audio_file)} bytes" + (f" | اللغة: {language}" if language else ""))
 
-    raise EngineError("دالة transcribe لم تُنفذ بعد - المرحلة 7", code="NOT_IMPLEMENTED")
+    try:
+        text = _retry_call(
+            lambda: _transcribe_impl(audio_file, model, api_key, language=language),
+            max_retries=3, base_delay=3.0, description="Whisper"
+        )
+
+        # فحص النتيجة
+        if not text or not text.strip():
+            raise EngineError(
+                "Whisper رجع نص فاضي - ممكن الملف الصوتي فيه مشكلة",
+                code="EMPTY_TRANSCRIPTION"
+            )
+
+        text = text.strip()
+
+        duration = int((time.time() - start_time) * 1000)
+        log(f"<- Whisper OK | {len(text)} chars | {duration}ms")
+
+        return EngineResult(
+            success=True,
+            data=text,
+            provider="whisper",
+            model=model,
+            duration_ms=duration
+        )
+
+    except EngineError:
+        raise
+    except Exception as e:
+        duration = int((time.time() - start_time) * 1000)
+        raise EngineError(
+            f"خطأ غير متوقع من Whisper: {str(e)[:500]}",
+            code="UNEXPECTED_ERROR"
+        )
+
+
+def _transcribe_impl(audio_file: str, model: str, api_key: str, language: str = None) -> str:
+    """تنفيذ Whisper Transcription"""
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+
+    kwargs = {"model": model}
+    if language:
+        kwargs["language"] = language
+
+    with open(audio_file, 'rb') as f:
+        kwargs["file"] = f
+        transcript = client.audio.transcriptions.create(**kwargs)
+
+    return transcript.text
+
+
+def transcribe_with_timestamps(audio_file: str, model: str = "whisper-1", language: str = None) -> EngineResult:
+    """
+    تحويل صوت لنص مع word-level timestamps عبر Whisper (OpenAI)
+    يرجع list of dicts: [{"word": "...", "start": 0.0, "end": 0.5}, ...]
+    """
+    start_time = time.time()
+    audio_file = _check_audio_file(audio_file)
+    api_key = _check_api_key("OPENAI_API_KEY")
+
+    log(f"→ Whisper+Timestamps | الملف: {os.path.basename(audio_file)} | الحجم: {os.path.getsize(audio_file)} bytes" + (f" | اللغة: {language}" if language else ""))
+
+    try:
+        words = _retry_call(
+            lambda: _transcribe_timestamps_impl(audio_file, model, api_key, language=language),
+            max_retries=3, base_delay=3.0, description="Whisper+Timestamps"
+        )
+
+        if not words:
+            raise EngineError(
+                "Whisper رجع نتيجة فاضية — ممكن الملف الصوتي فيه مشكلة",
+                code="EMPTY_TRANSCRIPTION"
+            )
+
+        duration = int((time.time() - start_time) * 1000)
+        log(f"<- Whisper+Timestamps OK | {len(words)} words | {duration}ms")
+
+        return EngineResult(
+            success=True,
+            data=words,
+            provider="whisper",
+            model=model,
+            duration_ms=duration
+        )
+
+    except EngineError:
+        raise
+    except Exception as e:
+        duration = int((time.time() - start_time) * 1000)
+        raise EngineError(
+            f"خطأ غير متوقع من Whisper+Timestamps: {str(e)[:500]}",
+            code="UNEXPECTED_ERROR"
+        )
+
+
+def _transcribe_timestamps_impl(audio_file: str, model: str, api_key: str, language: str = None) -> list:
+    """تنفيذ Whisper Transcription مع word timestamps"""
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+
+    kwargs = {
+        "model": model,
+        "response_format": "verbose_json",
+        "timestamp_granularities": ["word"],
+    }
+    if language:
+        kwargs["language"] = language
+
+    with open(audio_file, 'rb') as f:
+        kwargs["file"] = f
+        transcript = client.audio.transcriptions.create(**kwargs)
+
+    words = []
+    if hasattr(transcript, 'words') and transcript.words:
+        for w in transcript.words:
+            words.append({
+                "word": w.word.strip(),
+                "start": w.start,
+                "end": w.end,
+            })
+
+    return words

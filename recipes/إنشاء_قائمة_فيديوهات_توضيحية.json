@@ -1,0 +1,53 @@
+{
+  "name": "إنشاء قائمة فيديوهات توضيحية",
+  "steps": [
+    {
+      "id": "instructions",
+      "action": "read_input",
+      "file": "instructions.txt",
+      "label": "قراءة التعليمات"
+    },
+    {
+      "id": "scripts",
+      "action": "read_docx",
+      "reconstruct_markers": true,
+      "marker_prefix": "SCRIPT",
+      "label": "قراءة السكريبتات من Word"
+    },
+    {
+      "id": "videos_list",
+      "action": "read_excel",
+      "file": "videos_list.xlsx",
+      "label": "قراءة قائمة الفيديوهات"
+    },
+    {
+      "id": "prompt",
+      "action": "template",
+      "text": "{instructions}\n\n---\n\nقائمة الفيديوهات التوضيحية المتاحة:\n\n{videos_list}\n\n---\n\nالسكريبتات المطلوب عمل قوائم فيديوهات توضيحية لها:\n\n{scripts}",
+      "label": "تجميع البرومبت"
+    },
+    {
+      "id": "video_lists",
+      "action": "generate",
+      "input": "{prompt}",
+      "max_tokens": 32000,
+      "temperature": 0.3,
+      "label": "توليد قوائم الفيديوهات التوضيحية"
+    },
+    {
+      "id": "docx",
+      "action": "save_docx",
+      "input": "{video_lists}",
+      "save_as": "video_lists_output.docx",
+      "font_size": 14,
+      "label": "حفظ ملف Word"
+    },
+    {
+      "id": "copy",
+      "action": "copy_videos",
+      "input": "{video_lists}",
+      "marker_prefix": "SCRIPT",
+      "label": "نسخ الفيديوهات للمجلدات"
+    }
+  ]
+}

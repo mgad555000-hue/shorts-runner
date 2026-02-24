@@ -1,0 +1,12 @@
+{
+  "name": "استخراج جمل الشاشة",
+  "steps": [
+    {
+      "id": "screen_texts",
+      "action": "extract_screen_text",
+      "section": "القسم الأول",
+      "save_as": "screen_texts.docx",
+      "label": "استخراج جمل الشاشة من القسم الأول"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "name": "{{RECIPE_NAME}}",
+  "steps": [
+    {
+      "id": "instructions",
+      "action": "read_input",
+      "file": "instructions.txt",
+      "label": "قراءة التعليمات"
+    },
+    {
+      "id": "topics",
+      "action": "read_input",
+      "file": "topics.json",
+      "label": "قراءة العناوين"
+    },
+    {
+      "id": "prompt",
+      "action": "template",
+      "text": "{instructions}\n\n---\n\nقائمة العناوين المطلوب إنشاء مقدمات لها:\n\n{topics}",
+      "label": "تجميع البرومبت"
+    },
+    {
+      "id": "intros",
+      "action": "generate",
+      "input": "{prompt}",
+      "max_tokens": 8000,
+      "temperature": 0.3,
+      "label": "توليد المقدمات"
+    },
+    {
+      "id": "formatted",
+      "action": "format_text",
+      "input": "{intros}",
+      "color_words": ["بس", "ده", "دي", "دى", "دول"],
+      "spaces_after_punctuation": 5,
+      "label": "تنسيق النص"
+    },
+    {
+      "id": "docx",
+      "action": "save_docx",
+      "input": "{formatted}",
+      "save_as": "intros_output.docx",
+      "font_size": 14,
+      "marker_prefix": "INTRO",
+      "label": "حفظ ملف Word"
+    }
+  ]
+}

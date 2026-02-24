@@ -45,10 +45,12 @@ MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() in ("true", "1", "yes")
 DATA_ROOT = os.getenv("DATA_ROOT", "./data")
 CHANNELS_ROOT = os.path.join(DATA_ROOT, "channels")
 OUTPUT_ROOT = os.getenv("OUTPUT_ROOT", "./shorts/out")
+LONGS_OUTPUT_ROOT = os.getenv("LONGS_OUTPUT_ROOT", "./longs/out")
 
 Path(DATA_ROOT).mkdir(parents=True, exist_ok=True)
 Path(CHANNELS_ROOT).mkdir(parents=True, exist_ok=True)
 Path(OUTPUT_ROOT).mkdir(parents=True, exist_ok=True)
+Path(LONGS_OUTPUT_ROOT).mkdir(parents=True, exist_ok=True)
 
 
 # ========== نظام القنوات ==========
@@ -102,12 +104,36 @@ async def cleanup_old_runs():
             print(f"[Cleanup] error: {e}")
 
 
+def cleanup_zombie_runs():
+    """تنظيف الـ runs اللي فضلت 'running' بعد restart السيرفر"""
+    db = SessionLocal()
+    try:
+        zombies = db.query(Run).filter(Run.status == "running").all()
+        if zombies:
+            for run in zombies:
+                run.status = "failed"
+                run.completed_at = datetime.utcnow()
+                run.error_message = "توقف بسبب إعادة تشغيل السيرفر (zombie run cleanup)"
+                if run.started_at:
+                    run.execution_time_ms = int((run.completed_at - run.started_at).total_seconds() * 1000)
+            db.commit()
+            print(f"[Startup] تم تنظيف {len(zombies)} zombie run(s)")
+        else:
+            print(f"[Startup] لا يوجد zombie runs")
+    except Exception as e:
+        print(f"[Startup] خطأ في تنظيف zombie runs: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    cleanup_zombie_runs()
     cleanup_task = asyncio.create_task(cleanup_old_runs())
-    print(f"[Shorts Runner] Started on port 8001")
-    print(f"[Shorts Runner] Channels root: {CHANNELS_ROOT}")
+    print(f"[MG Ranner] Started on port 8001")
+    print(f"[MG Ranner] Channels root: {CHANNELS_ROOT}")
     yield
     cleanup_task.cancel()
     try:
@@ -116,7 +142,7 @@ async def lifespan(app: FastAPI):
         pass
 
 
-app = FastAPI(title="Shorts Runner", lifespan=lifespan)
+app = FastAPI(title="MG Ranner", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -162,8 +188,9 @@ def is_mock_mode() -> bool:
     return get_dynamic_settings()["mock_mode"]
 
 
-def mock_execute(run_id: str, code: str, input_folder: str):
-    output_dir = Path(OUTPUT_ROOT) / run_id
+def mock_execute(run_id: str, code: str, input_folder: str, content_type: str = "shorts"):
+    output_root = LONGS_OUTPUT_ROOT if content_type == "long" else OUTPUT_ROOT
+    output_dir = Path(output_root) / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "script.py").write_text(code, encoding="utf-8")
     time.sleep(1)
@@ -227,7 +254,7 @@ def perform_cleanup(max_age_days: int = None, keep_last_n: int = None) -> dict:
                 continue
             if run.created_at < cutoff_date:
                 try:
-                    output_dir = Path(OUTPUT_ROOT) / run.run_id
+                    output_dir = get_run_output_dir(run.run_id, run.output_relpath)
                     if output_dir.exists():
                         for f in output_dir.rglob('*'):
                             if f.is_file():
@@ -301,7 +328,7 @@ async def list_channels():
 
 
 @app.post("/api/channels")
-async def create_channel(name: str):
+async def create_channel(name: str, db: Session = Depends(get_db)):
     """إنشاء قناة جديدة"""
     safe_name = sanitize_folder_name(name)
     if not safe_name:
@@ -310,8 +337,10 @@ async def create_channel(name: str):
     if ch_path.exists():
         return {"message": "القناة موجودة بالفعل", "channel": safe_name, "created": False}
     ch_path.mkdir(parents=True, exist_ok=True)
-    # إنشاء مجلد الفيديوهات
     (ch_path / "videos").mkdir(exist_ok=True)
+    # إنشاء مجلدات كل الوصفات الموجودة في القناة الجديدة
+    for recipe in db.query(Recipe).all():
+        ensure_channel_recipe_folders(safe_name, recipe.name)
     return {"message": "تم إنشاء القناة", "channel": safe_name, "created": True}
 
 
@@ -343,7 +372,7 @@ async def get_paths():
 
 
 @app.post("/api/utilities/folders")
-async def create_folder(folder_name: str):
+async def create_folder(folder_name: str, db: Session = Depends(get_db)):
     """إنشاء قناة جديدة"""
     safe_name = sanitize_folder_name(folder_name)
     if not safe_name:
@@ -353,6 +382,9 @@ async def create_folder(folder_name: str):
         return {"message": "القناة موجودة بالفعل", "folder": safe_name, "created": False}
     ch_path.mkdir(parents=True, exist_ok=True)
     (ch_path / "videos").mkdir(exist_ok=True)
+    # إنشاء مجلدات كل الوصفات الموجودة في القناة الجديدة
+    for recipe in db.query(Recipe).all():
+        ensure_channel_recipe_folders(safe_name, recipe.name)
     return {"message": "تم إنشاء القناة", "folder": safe_name, "created": True}
 
 
@@ -366,10 +398,13 @@ async def create_recipe_folders_for_all_channels(recipe_id: int, db: Session = D
         raise HTTPException(status_code=404, detail="الوصفة غير موجودة")
     channels = get_channels()
     created = []
+    folder = recipe.input_folder or sanitize_folder_name(recipe.name).replace(' ', '_')
     for ch in channels:
-        ensure_channel_recipe_folders(ch, recipe.name)
+        (get_channel_path(ch) / folder / "input").mkdir(parents=True, exist_ok=True)
+        (get_channel_path(ch) / folder / "output").mkdir(parents=True, exist_ok=True)
         created.append(ch)
-    recipe.input_folder = sanitize_folder_name(recipe.name).replace(' ', '_')
+    if not recipe.input_folder:
+        recipe.input_folder = folder
     db.commit()
     return {"message": f"تم إنشاء المجلدات في {len(created)} قناة", "channels": created}
 
@@ -381,10 +416,13 @@ async def create_all_recipe_folders(db: Session = Depends(get_db)):
     channels = get_channels()
     count = 0
     for recipe in recipes:
+        folder = recipe.input_folder or sanitize_folder_name(recipe.name).replace(' ', '_')
         for ch in channels:
-            ensure_channel_recipe_folders(ch, recipe.name)
+            (get_channel_path(ch) / folder / "input").mkdir(parents=True, exist_ok=True)
+            (get_channel_path(ch) / folder / "output").mkdir(parents=True, exist_ok=True)
             count += 1
-        recipe.input_folder = sanitize_folder_name(recipe.name).replace(' ', '_')
+        if not recipe.input_folder:
+            recipe.input_folder = folder
     db.commit()
     return {"message": f"تم إنشاء {count} مجلد", "summary": {"recipes": len(recipes), "channels": len(channels), "folders_created": count}}
 
@@ -414,7 +452,11 @@ async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, db:
     check_concurrency(db)
 
     run_id = str(uuid.uuid4())
-    output_relpath = f"shorts/out/{run_id}"
+    content_type = run_data.content_type or "shorts"
+    if content_type == "long":
+        output_relpath = f"longs/out/{run_id}"
+    else:
+        output_relpath = f"shorts/out/{run_id}"
     recipe_name = None
     code_to_run = run_data.code or ""
 
@@ -422,14 +464,40 @@ async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, db:
         recipe = db.query(Recipe).filter(Recipe.id == run_data.recipe_id).first()
         if recipe:
             recipe_name = recipe.name
-            if not code_to_run.strip():
-                code_to_run = recipe.code or ""
+            # "#" أو فاضي = مفيش كود حقيقي، نقرأ من ملف الوصفة
+            if not code_to_run.strip() or code_to_run.strip().startswith("#"):
+                # أولاً: قراءة الكود من ملف الوصفة (الأحدث دائماً)
+                # بيدور في /app/recipes (Docker) أو المسار النسبي (local)
+                recipe_base = recipe.input_folder or sanitize_folder_name(recipe.name).replace(' ', '_')
+                local_recipes_dir = Path(__file__).resolve().parent.parent / "recipes"
+                print(f"[RECIPE DEBUG] recipe.name=[{recipe.name}] input_folder=[{recipe.input_folder}] recipe_base=[{recipe_base}] local_dir=[{local_recipes_dir}]")
+                # جرّب JSON أولاً (pipeline)، ثم Python
+                recipe_filename = f"{recipe_base}.json"
+                recipe_file = Path("/app/recipes") / recipe_filename
+                print(f"[RECIPE DEBUG] Try Docker JSON: {recipe_file} exists={recipe_file.exists()}")
+                if not recipe_file.exists():
+                    recipe_file = local_recipes_dir / recipe_filename
+                    print(f"[RECIPE DEBUG] Try Local JSON: {recipe_file} exists={recipe_file.exists()}")
+                if not recipe_file.exists():
+                    # fallback لـ Python
+                    recipe_filename = f"{recipe_base}.py"
+                    recipe_file = Path("/app/recipes") / recipe_filename
+                    print(f"[RECIPE DEBUG] Try Docker PY: {recipe_file} exists={recipe_file.exists()}")
+                    if not recipe_file.exists():
+                        recipe_file = local_recipes_dir / recipe_filename
+                        print(f"[RECIPE DEBUG] Try Local PY: {recipe_file} exists={recipe_file.exists()}")
+                if recipe_file.exists():
+                    code_to_run = recipe_file.read_text(encoding="utf-8")
+                    print(f"[RECIPE DEBUG] Loaded {len(code_to_run)} chars from {recipe_file}")
+                else:
+                    code_to_run = recipe.code or ""
+                    print(f"[RECIPE DEBUG] FALLBACK to recipe.code: [{code_to_run[:50]}]")
 
             # ربط input/output بالقناة والوصفة
             channel = run_data.input_folder  # اسم القناة
-            recipe_folder = sanitize_folder_name(recipe.name).replace(' ', '_')
-            input_path = get_recipe_input_path(channel, recipe.name)
-            output_path = get_recipe_output_path(channel, recipe.name)
+            recipe_folder = recipe.input_folder or sanitize_folder_name(recipe.name).replace(' ', '_')
+            input_path = get_channel_path(channel) / recipe_folder / "input"
+            output_path = get_channel_path(channel) / recipe_folder / "output"
             input_path.mkdir(parents=True, exist_ok=True)
             output_path.mkdir(parents=True, exist_ok=True)
 
@@ -447,18 +515,27 @@ async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, db:
     db.commit()
     db.refresh(db_run)
 
-    # تمرير اسم القناة واسم الوصفة واسم الموديل مع التشغيل
+    # تمرير اسم القناة واسم الوصفة واسم الموديل ومزود الصوت مع التشغيل
+    # تحويل topic_ids لـ string مفصولة بفواصل
+    topic_ids_str = ""
+    if run_data.topic_ids:
+        topic_ids_str = ",".join(str(x) for x in run_data.topic_ids)
+
     background_tasks.add_task(
         execute_run,
         run_id=run_id, code=code_to_run,
         input_folder=run_data.input_folder,
         recipe_name=recipe_name,
-        model_name=run_data.model_name or "gemini-2.5-flash"
+        model_name=run_data.model_name or "gemini-2.5-flash",
+        tts_provider=run_data.tts_provider or "vertex",
+        execution_mode=run_data.execution_mode or "instant",
+        topic_ids=topic_ids_str,
+        content_type=content_type
     )
     return RunResponse.model_validate(db_run)
 
 
-def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = None, model_name: str = "gemini-2.5-flash"):
+def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = None, model_name: str = "gemini-2.5-flash", tts_provider: str = "vertex", execution_mode: str = "instant", topic_ids: str = "", content_type: str = "shorts"):
     db = SessionLocal()
     try:
         db_run = db.query(Run).filter(Run.run_id == run_id).first()
@@ -472,19 +549,31 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
 
         # تحديد المسارات بناءً على القناة والوصفة
         channel = input_folder
-        actual_input = str(get_recipe_input_path(channel, recipe_name)) if recipe_name else str(Path(CHANNELS_ROOT) / channel)
-        actual_output_recipe = str(get_recipe_output_path(channel, recipe_name)) if recipe_name else None
+        # استخدام input_folder من DB بدل sanitize(name) — لتجنب عدم تطابق الأسماء
+        db_recipe = db.query(Recipe).filter(Recipe.name == recipe_name).first() if recipe_name else None
+        if db_recipe and db_recipe.input_folder:
+            actual_input = str(get_channel_path(channel) / db_recipe.input_folder / "input")
+            actual_output_recipe = str(get_channel_path(channel) / db_recipe.input_folder / "output")
+        elif recipe_name:
+            actual_input = str(get_recipe_input_path(channel, recipe_name))
+            actual_output_recipe = str(get_recipe_output_path(channel, recipe_name))
+        else:
+            actual_input = str(Path(CHANNELS_ROOT) / channel)
+            actual_output_recipe = None
         channel_root = str(get_channel_path(channel))
 
-        # تمرير متغيرات بيئة (القناة + الموديل)
+        # تمرير متغيرات بيئة (القناة + الموديل + مزود الصوت)
         os.environ["CHANNEL_NAME"] = channel
         os.environ["CHANNEL_ROOT"] = channel_root
         os.environ["MODEL_NAME"] = model_name
+        os.environ["TTS_PROVIDER"] = tts_provider
+        os.environ["EXECUTION_MODE"] = execution_mode
+        os.environ["TOPIC_IDS"] = topic_ids
         if actual_output_recipe:
             os.environ["RECIPE_OUTPUT_DIR"] = actual_output_recipe
 
         if is_mock_mode():
-            success, output_path, error_msg = mock_execute(run_id, code, actual_input)
+            success, output_path, error_msg = mock_execute(run_id, code, actual_input, content_type)
         else:
             success, output_path, error_msg = create_sandbox_container(
                 run_id=run_id, code=code, input_folder=actual_input
@@ -492,16 +581,79 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
 
         execution_time_ms = int((time.time() - start_time) * 1000)
 
-        if success and output_path:
-            output_dir = Path(output_path)
+        if output_path:
+            output_dir = Path(output_path).resolve()
+            print(f"[COPY] === بدء نسخ المخرجات ===")
+            print(f"[COPY] المصدر: {output_dir} (exists={output_dir.exists()})")
             if output_dir.exists():
-                auto_files = {"script.py", "run_log.txt", "result_manifest.json", "batch_job_info.json"}
-                actual_files = {f.name for f in output_dir.iterdir() if f.is_file()}
-                if actual_files.issubset(auto_files) and not [d for d in output_dir.iterdir() if d.is_dir()]:
-                    try:
-                        shutil.rmtree(output_dir)
-                    except Exception:
-                        pass
+                all_files = list(output_dir.iterdir())
+                print(f"[COPY] عدد الملفات في المصدر: {len(all_files)}")
+                for item in all_files:
+                    print(f"[COPY]   - {item.name} ({'dir' if item.is_dir() else f'{item.stat().st_size} bytes'})")
+
+                skip_files = {"script.py", "result_manifest.json", "run_log.txt"}
+                if actual_output_recipe:
+                    recipe_out = Path(actual_output_recipe).resolve()
+                    recipe_out.mkdir(parents=True, exist_ok=True)
+                    print(f"[COPY] الوجهة: {recipe_out} (exists={recipe_out.exists()})")
+
+                    copied_count = 0
+                    for f in all_files:
+                        if f.is_file() and f.name not in skip_files:
+                            dest = recipe_out / f.name
+                            try:
+                                # لو الملف موجود ومقفول، امسحه الأول
+                                if dest.exists():
+                                    try:
+                                        dest.unlink()
+                                        print(f"[COPY] حذف ملف قديم: {dest.name}")
+                                    except Exception:
+                                        pass
+                                shutil.copy2(str(f), str(dest))
+                                copied_count += 1
+                                print(f"[COPY] OK: {f.name} ({f.stat().st_size} bytes) -> {dest}")
+                                if dest.exists():
+                                    print(f"[COPY] تأكيد: {dest.name} موجود ({dest.stat().st_size} bytes)")
+                                else:
+                                    print(f"[COPY] تحذير: {dest.name} مش موجود بعد النسخ!")
+                            except Exception as e:
+                                print(f"[COPY] خطأ في نسخ {f.name}: {type(e).__name__}: {e}")
+                                # محاولة تانية بطريقة مختلفة
+                                try:
+                                    with open(str(f), 'rb') as src, open(str(dest), 'wb') as dst:
+                                        dst.write(src.read())
+                                    copied_count += 1
+                                    print(f"[COPY] OK (محاولة تانية): {f.name}")
+                                except Exception as e2:
+                                    # محاولة ثالثة: حفظ باسم جديد (timestamp)
+                                    from datetime import datetime as _dt
+                                    ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+                                    stem = f.stem
+                                    suffix = f.suffix
+                                    alt_name = f"{stem}_{ts}{suffix}"
+                                    alt_dest = recipe_out / alt_name
+                                    try:
+                                        shutil.copy2(str(f), str(alt_dest))
+                                        copied_count += 1
+                                        print(f"[COPY] OK (اسم بديل): {f.name} -> {alt_name} ({alt_dest.stat().st_size} bytes)")
+                                    except Exception as e3:
+                                        print(f"[COPY] فشل نهائي: {f.name}: {e2} | بديل: {e3}")
+
+                    for d in all_files:
+                        if d.is_dir():
+                            dest_dir = recipe_out / d.name
+                            try:
+                                shutil.copytree(str(d), str(dest_dir), dirs_exist_ok=True)
+                                copied_count += 1
+                                print(f"[COPY] OK dir: {d.name}")
+                            except Exception as e:
+                                print(f"[COPY] خطأ في نسخ مجلد {d.name}: {e}")
+
+                    print(f"[COPY] === اكتمل: {copied_count} ملف/مجلد تم نسخهم ===")
+                else:
+                    print(f"[COPY] تحذير: actual_output_recipe فارغ - مفيش وجهة للنسخ!")
+            else:
+                print(f"[COPY] تحذير: مجلد المصدر مش موجود: {output_dir}")
 
         db_run = db.query(Run).filter(Run.run_id == run_id).first()
         if db_run and db_run.status != "cancelled":
@@ -547,8 +699,9 @@ async def cancel_run(run_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/utilities/runs/{run_id}/log")
-async def get_run_log(run_id: str):
-    log_path = Path(OUTPUT_ROOT) / run_id / "run_log.txt"
+async def get_run_log(run_id: str, db: Session = Depends(get_db)):
+    run = db.query(Run).filter(Run.run_id == run_id).first()
+    log_path = get_run_output_dir(run_id, run.output_relpath if run else None) / "run_log.txt"
     if not log_path.exists():
         return {"log": "لا يوجد سجل بعد"}
     try:
@@ -558,16 +711,18 @@ async def get_run_log(run_id: str):
 
 
 @app.get("/api/utilities/runs/{run_id}/manifest")
-async def get_run_manifest(run_id: str):
-    manifest_path = Path(OUTPUT_ROOT) / run_id / "result_manifest.json"
+async def get_run_manifest(run_id: str, db: Session = Depends(get_db)):
+    run = db.query(Run).filter(Run.run_id == run_id).first()
+    manifest_path = get_run_output_dir(run_id, run.output_relpath if run else None) / "result_manifest.json"
     if not manifest_path.exists():
         return {"manifest": None}
     return FileResponse(manifest_path, media_type="application/json")
 
 
 @app.get("/api/utilities/runs/{run_id}/files")
-async def list_run_files(run_id: str):
-    output_dir = Path(OUTPUT_ROOT) / run_id
+async def list_run_files(run_id: str, db: Session = Depends(get_db)):
+    run = db.query(Run).filter(Run.run_id == run_id).first()
+    output_dir = get_run_output_dir(run_id, run.output_relpath if run else None)
     if not output_dir.exists():
         return {"files": []}
     files = [{"name": f.name, "size": f.stat().st_size, "path": f"/api/utilities/runs/{run_id}/files/{f.name}"} for f in output_dir.iterdir() if f.is_file()]
@@ -575,18 +730,20 @@ async def list_run_files(run_id: str):
 
 
 @app.get("/api/utilities/runs/{run_id}/files/{filename}")
-async def get_run_file(run_id: str, filename: str):
+async def get_run_file(run_id: str, filename: str, db: Session = Depends(get_db)):
     if ".." in filename or "/" in filename or "\\" in filename:
         raise HTTPException(status_code=400, detail="اسم ملف غير صالح")
-    file_path = Path(OUTPUT_ROOT) / run_id / filename
+    run = db.query(Run).filter(Run.run_id == run_id).first()
+    file_path = get_run_output_dir(run_id, run.output_relpath if run else None) / filename
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="الملف غير موجود")
     return FileResponse(file_path)
 
 
 @app.get("/api/utilities/runs/{run_id}/download")
-async def download_run_outputs(run_id: str):
-    output_dir = Path(OUTPUT_ROOT) / run_id
+async def download_run_outputs(run_id: str, db: Session = Depends(get_db)):
+    run = db.query(Run).filter(Run.run_id == run_id).first()
+    output_dir = get_run_output_dir(run_id, run.output_relpath if run else None)
     if not output_dir.exists():
         raise HTTPException(status_code=404, detail="مجلد الإخراج غير موجود")
     zip_buffer = io.BytesIO()
@@ -613,7 +770,7 @@ async def delete_run(run_id: str, db: Session = Depends(get_db)):
     run = db.query(Run).filter(Run.run_id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="التشغيل غير موجود")
-    output_dir = Path(OUTPUT_ROOT) / run_id
+    output_dir = get_run_output_dir(run_id, run.output_relpath)
     if output_dir.exists():
         shutil.rmtree(output_dir)
     db.delete(run)
@@ -626,18 +783,24 @@ async def delete_run(run_id: str, db: Session = Depends(get_db)):
 @app.post("/api/utilities/recipes", response_model=RecipeResponse)
 async def create_recipe(recipe: RecipeCreate, db: Session = Depends(get_db)):
     db_recipe = Recipe(**recipe.model_dump())
+    if not db_recipe.input_folder:
+        db_recipe.input_folder = sanitize_folder_name(db_recipe.name).replace(' ', '_')
     db.add(db_recipe)
     db.commit()
     db.refresh(db_recipe)
     # إنشاء مجلدات في كل القنوات
     for ch in get_channels():
-        ensure_channel_recipe_folders(ch, db_recipe.name)
+        (get_channel_path(ch) / db_recipe.input_folder / "input").mkdir(parents=True, exist_ok=True)
+        (get_channel_path(ch) / db_recipe.input_folder / "output").mkdir(parents=True, exist_ok=True)
     return RecipeResponse.model_validate(db_recipe)
 
 
 @app.get("/api/utilities/recipes", response_model=List[RecipeResponse])
-async def list_recipes(db: Session = Depends(get_db)):
-    return [RecipeResponse.model_validate(r) for r in db.query(Recipe).order_by(Recipe.created_at.desc()).all()]
+async def list_recipes(recipe_type: Optional[str] = Query(None), db: Session = Depends(get_db)):
+    query = db.query(Recipe)
+    if recipe_type:
+        query = query.filter((Recipe.recipe_type == recipe_type) | (Recipe.recipe_type == "both"))
+    return [RecipeResponse.model_validate(r) for r in query.order_by(Recipe.created_at.desc()).all()]
 
 
 @app.get("/api/utilities/recipes/{recipe_id}", response_model=RecipeResponse)
@@ -688,6 +851,31 @@ async def update_settings(updates: SettingsUpdate, db: Session = Depends(get_db)
             db.add(Setting(key=key, value=str_value))
     db.commit()
     return get_dynamic_settings()
+
+
+# ========== مسارات المجلدات على الجهاز المضيف ==========
+
+def get_run_output_dir(run_id: str, output_relpath: str = None) -> Path:
+    """تحديد مجلد الإخراج بناءً على output_relpath أو البحث في المسارين"""
+    if output_relpath and output_relpath.startswith("longs/"):
+        return Path(LONGS_OUTPUT_ROOT) / run_id
+    return Path(OUTPUT_ROOT) / run_id
+
+HOST_DATA_DIR = os.getenv("HOST_DATA_DIR", "C:/Users/w10/shorts-runner/data")
+
+@app.post("/api/open-folder")
+async def get_host_folder_path(docker_path: str):
+    """تحويل مسار Docker لمسار Windows وإنشاء المجلد"""
+    host_path = docker_path.replace("/app/data/", HOST_DATA_DIR + "/").replace("/", "\\")
+    os.makedirs(docker_path, exist_ok=True)
+    return {"success": True, "path": host_path}
+
+
+def get_output_root_for_content(content_type: str) -> str:
+    """إرجاع مسار الإخراج حسب نوع المحتوى"""
+    if content_type == "long":
+        return LONGS_OUTPUT_ROOT
+    return OUTPUT_ROOT
 
 
 # ========== Static ==========

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Shorts Runner</title>
+    <title>MG Ranner</title>
     <style>
         :root {
             --primary: #ec4899;
@@ -469,7 +469,7 @@
 <!-- Header -->
 <div class="header">
     <div class="header-inner">
-        <h1>Shorts Runner <span id="mockIndicator" class="badge badge-pending" style="display:none; font-size:11px; margin-right:6px;">MOCK</span></h1>
+        <h1>MG Ranner <span id="mockIndicator" class="badge badge-pending" style="display:none; font-size:11px; margin-right:6px;">MOCK</span></h1>
         <div class="header-stats" id="headerStats">
             <div class="header-stat"><span class="stat-dot total"></span> <span id="statTotal">-</span> اجمالي</div>
             <div class="header-stat"><span class="stat-dot running"></span> <span id="statRunning">-</span> جاري</div>
@@ -497,7 +497,14 @@
     <div id="runner" class="tab-content active">
         <div class="card">
             <div class="card-title">تشغيل كود Python</div>
-            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;" class="run-form-grid">
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr 1fr 1fr; gap:12px;" class="run-form-grid">
+                <div class="form-group">
+                    <label class="form-label">نوع المحتوى</label>
+                    <select id="contentTypeSelect" onchange="onContentTypeChanged()">
+                        <option value="shorts">شورتس</option>
+                        <option value="long">لونج</option>
+                    </select>
+                </div>
                 <div class="form-group">
                     <label class="form-label">الوصفة (اختياري)</label>
                     <select id="recipeSelect" onchange="onRecipeSelected()">
@@ -511,12 +518,22 @@
                     </select>
                 </div>
                 <div class="form-group">
-                    <label class="form-label">الموديل</label>
+                    <label class="form-label">مود التشغيل</label>
+                    <select id="executionModeSelect">
+                        <option value="instant">فوري</option>
+                        <option value="batch_auto">باتش أوتوماتيك</option>
+                        <option value="send_only">إرسال فقط</option>
+                        <option value="receive_only">استقبال فقط</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">موديل النص</label>
                     <select id="modelSelect">
                         <optgroup label="Gemini">
                             <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
                             <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
                             <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
+                            <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
                         </optgroup>
                         <optgroup label="OpenAI">
                             <option value="gpt-4.1-nano">GPT-4.1 Nano</option>
@@ -537,7 +554,47 @@
                         </optgroup>
                     </select>
                 </div>
+                <div class="form-group">
+                    <label class="form-label">مزود الصوت</label>
+                    <select id="ttsProviderSelect">
+                        <option value="vertex">Vertex AI (Google TTS)</option>
+                        <option value="elevenlabs">ElevenLabs</option>
+                        <option value="minimax">MiniMax</option>
+                    </select>
+                </div>
             </div>
+
+            <!-- قسم اختيار الموضوعات -->
+            <div class="card" style="margin-bottom:16px; padding:16px; background:var(--gray-50); border:2px solid var(--gray-200);">
+                <div class="card-title" style="margin-bottom:12px; font-size:15px;">اختيار الموضوعات (اختياري)</div>
+
+                <!-- النطاق -->
+                <div style="display:flex; gap:12px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
+                    <div style="flex:1; min-width:100px;">
+                        <label class="form-label">من</label>
+                        <input type="number" id="topicFrom" min="1" placeholder="1" oninput="updateTopicCount()">
+                    </div>
+                    <div style="flex:1; min-width:100px;">
+                        <label class="form-label">إلى</label>
+                        <input type="number" id="topicTo" min="1" placeholder="100" oninput="updateTopicCount()">
+                    </div>
+                    <div style="flex:2; min-width:150px; padding:10px; background:white; border-radius:8px; font-size:13px; color:var(--gray-600); text-align:center;">
+                        النطاق: <strong id="rangeCount" style="color:var(--primary);">0</strong> موضوع
+                    </div>
+                </div>
+
+                <!-- موضوعات منفصلة -->
+                <div style="margin-bottom:8px;">
+                    <label class="form-label">موضوعات منفصلة (أرقام)</label>
+                    <div id="topicGrid" style="display:grid; grid-template-columns:repeat(5, 1fr); gap:6px;"></div>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <button type="button" class="btn btn-ghost btn-sm" onclick="addTopicRow()">+ صف جديد</button>
+                    <button type="button" class="btn btn-ghost btn-sm" onclick="clearTopics()">مسح الكل</button>
+                    <span style="font-size:13px; color:var(--gray-500);">منفصلة: <strong id="separateCount" style="color:var(--primary);">0</strong> | الإجمالي: <strong id="totalTopicCount" style="color:var(--success);">0</strong></span>
+                </div>
+            </div>
+
             <div class="form-group">
                 <label class="form-label">كود Python</label>
                 <textarea id="pythonCode" placeholder="# الصق كود Python هنا...&#10;&#10;import os&#10;from pathlib import Path&#10;&#10;INPUT_DIR = os.getenv('INPUT_DIR', '/mnt/input')&#10;OUTPUT_DIR = os.getenv('OUTPUT_DIR', '/mnt/output')&#10;&#10;# اكتب كودك هنا"></textarea>
@@ -654,6 +711,14 @@
             <div class="form-group">
                 <label class="form-label">الوصف</label>
                 <input type="text" id="modalRecipeDesc">
+            </div>
+            <div class="form-group">
+                <label class="form-label">نوع المحتوى</label>
+                <select id="modalRecipeType">
+                    <option value="shorts">شورتس</option>
+                    <option value="long">لونج</option>
+                    <option value="both">الاثنين</option>
+                </select>
             </div>
             <div class="form-group">
                 <label class="form-label">القناة الافتراضية</label>
@@ -803,35 +868,46 @@ async function loadFolders() {
 }
 
 // ===== Load Recipes (for select + list) =====
-async function loadRecipes() {
+async function loadRecipes(filterType) {
     try {
-        const res = await fetch(`${API}/recipes`);
-        allRecipes = await res.json();
+        let url = `${API}/recipes`;
+        if (filterType) url += `?recipe_type=${filterType}`;
+        const res = await fetch(url);
+        const recipes = await res.json();
+        if (!filterType) allRecipes = recipes;
 
         // Update recipe select in Runner tab
         const sel = document.getElementById('recipeSelect');
         const val = sel.value;
         sel.innerHTML = '<option value="">-- كتابة كود يدوي --</option>';
-        allRecipes.forEach(r => {
+        const displayRecipes = filterType ? recipes : allRecipes;
+        displayRecipes.forEach(r => {
             const opt = document.createElement('option');
             opt.value = r.id; opt.textContent = r.name;
             sel.appendChild(opt);
         });
         if (val) sel.value = val;
 
-        // Update Recipes list
+        // Update Recipes list (always show all in recipes tab)
         const list = document.getElementById('recipesList');
         if (!list) return;
 
-        if (allRecipes.length === 0) {
+        const listRecipes = filterType ? recipes : allRecipes;
+        if (listRecipes.length === 0) {
             list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">لا توجد وصفات محفوظة</div></div>';
             return;
         }
 
-        list.innerHTML = allRecipes.map(r => `
+        const typeBadge = (type) => {
+            const colors = { shorts: '#dbeafe;color:#1e40af', long: '#fce7f3;color:#9d174d', both: '#d1fae5;color:#065f46' };
+            const labels = { shorts: 'شورتس', long: 'لونج', both: 'الاثنين' };
+            return `<span class="badge" style="background:${colors[type] || colors.shorts}">${labels[type] || type}</span>`;
+        };
+
+        list.innerHTML = listRecipes.map(r => `
             <div class="list-item" onclick="loadRecipeToRunner(${r.id})">
                 <div class="list-item-header">
-                    <h3>${esc(r.name)}</h3>
+                    <h3>${esc(r.name)} ${typeBadge(r.recipe_type)}</h3>
                     <div class="btn-group" onclick="event.stopPropagation()">
                         <button class="btn btn-ghost btn-sm" onclick="editRecipe(${r.id})">تعديل</button>
                         ${!r.input_folder ? `<button class="btn btn-success btn-sm" onclick="createRecipeFolder(${r.id})">+ مجلد</button>` : ''}
@@ -846,6 +922,11 @@ async function loadRecipes() {
             </div>
         `).join('');
     } catch(e) { console.error('Load recipes error:', e); }
+}
+
+function onContentTypeChanged() {
+    const contentType = document.getElementById('contentTypeSelect').value;
+    loadRecipes(contentType);
 }
 
 function onRecipeSelected() {
@@ -890,8 +971,13 @@ async function runCode() {
     btn.innerHTML = '<span class="spinner"></span> جاري التشغيل...';
 
     try {
-        const body = { code, input_folder: inputFolder, model_name: modelName };
+        const ttsProvider = document.getElementById('ttsProviderSelect').value;
+        const executionMode = document.getElementById('executionModeSelect').value;
+        const contentType = document.getElementById('contentTypeSelect').value;
+        const body = { code, input_folder: inputFolder, model_name: modelName, tts_provider: ttsProvider, execution_mode: executionMode, content_type: contentType };
         if (recipeId) body.recipe_id = parseInt(recipeId);
+        const topicIds = collectTopicIds();
+        if (topicIds.length > 0) body.topic_ids = topicIds;
 
         const res = await fetch(`${API}/runs`, {
             method: 'POST',
@@ -1114,6 +1200,7 @@ function showRecipeModal(recipe) {
     document.getElementById('modalRecipeName').value = recipe ? recipe.name : '';
     document.getElementById('modalRecipeDesc').value = recipe ? (recipe.description || '') : '';
     document.getElementById('modalRecipeCode').value = recipe ? recipe.code : '';
+    document.getElementById('modalRecipeType').value = recipe ? (recipe.recipe_type || 'shorts') : 'shorts';
     loadFolders().then(() => {
         if (recipe && recipe.input_folder) {
             document.getElementById('modalRecipeFolder').value = recipe.input_folder;
@@ -1136,6 +1223,7 @@ async function saveRecipe() {
     const desc = document.getElementById('modalRecipeDesc').value.trim();
     const code = document.getElementById('modalRecipeCode').value.trim();
     const input_folder = document.getElementById('modalRecipeFolder').value;
+    const recipe_type = document.getElementById('modalRecipeType').value;
 
     if (!name || !code) return showAlert('error', 'الاسم والكود مطلوبان');
 
@@ -1144,7 +1232,7 @@ async function saveRecipe() {
         const method = currentRecipeId ? 'PUT' : 'POST';
         const res = await fetch(url, {
             method, headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ name, description: desc, code, input_folder: input_folder || null })
+            body: JSON.stringify({ name, description: desc, code, input_folder: input_folder || null, recipe_type })
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.detail || 'خطأ'); }
         closeRecipeModal();
@@ -1176,7 +1264,7 @@ async function createAllFolders() {
     try {
         const res = await fetch(`${API}/create-all-recipe-folders`, { method: 'POST' });
         const result = await res.json();
-        showAlert('success', `تم انشاء ${result.summary.created} مجلد، تم تخطي ${result.summary.skipped}`);
+        showAlert('success', `تم انشاء ${result.summary.folders_created} مجلد (${result.summary.recipes} وصفة × ${result.summary.channels} قناة)`);
         loadRecipes(); loadFolders();
     } catch(e) { showAlert('error', e.message); }
 }
@@ -1330,8 +1418,30 @@ function clearCode() {
 }
 
 function dockerToLocal(dockerPath) {
-    // تحويل مسار Docker لمسار Windows
-    return dockerPath.replace('/app/data/', 'c:\\shorts-runner\\data\\').replace(/\//g, '\\');
+    // تحويل مسار Docker لمسار Windows الفعلي
+    return dockerPath
+        .replace('/app/data/', 'C:\\Users\\w10\\shorts-runner\\data\\')
+        .replace('/app/shorts/out/', 'C:\\Users\\w10\\shorts-runner\\shorts\\out\\')
+        .replace('/app/longs/out/', 'C:\\Users\\w10\\shorts-runner\\longs\\out\\')
+        .replace(/\//g, '\\');
+}
+
+async function openFolder(dockerPath) {
+    const localPath = dockerToLocal(dockerPath);
+    // إنشاء المجلد على السيرفر
+    await fetch(`/api/open-folder?docker_path=${encodeURIComponent(dockerPath)}`, {method:'POST'}).catch(()=>{});
+    // محاولة فتح المجلد عن طريق الـ helper (port 8002)
+    try {
+        const res = await fetch(`http://127.0.0.1:8002/open?path=${encodeURIComponent(localPath)}`, {signal: AbortSignal.timeout(2000)});
+        const data = await res.json();
+        if (data.success) {
+            showAlert('success', 'تم فتح المجلد');
+            return;
+        }
+    } catch(e) { /* helper مش شغال */ }
+    // لو الـ helper مش شغال، ننسخ المسار
+    await navigator.clipboard.writeText(localPath);
+    showAlert('info', 'تم نسخ المسار - افتح Run (Win+R) والصقه: ' + localPath, true);
 }
 
 async function openInputFolder() {
@@ -1344,9 +1454,7 @@ async function openInputFolder() {
     try {
         const res = await fetch(`${API.replace('utilities','channels')}/${channel}/recipe-path/${encodeURIComponent(recipe.name)}`);
         const data = await res.json();
-        const localPath = dockerToLocal(data.input_path);
-        await navigator.clipboard.writeText(localPath);
-        showAlert('success', 'تم نسخ مسار المدخلات. الصقه في File Explorer', true);
+        await openFolder(data.input_path);
     } catch(e) { showAlert('error', e.message); }
 }
 
@@ -1354,9 +1462,7 @@ async function openOutputFolder(channel, recipeName) {
     try {
         const res = await fetch(`${API.replace('utilities','channels')}/${channel}/recipe-path/${encodeURIComponent(recipeName)}`);
         const data = await res.json();
-        const localPath = dockerToLocal(data.output_path);
-        await navigator.clipboard.writeText(localPath);
-        showAlert('success', 'تم نسخ مسار المخرجات. الصقه في File Explorer', true);
+        await openFolder(data.output_path);
     } catch(e) { showAlert('error', e.message); }
 }
 
@@ -1374,7 +1480,95 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
     });
 });
 
+// ===== Topics Selection =====
+function initTopicGrid() {
+    const grid = document.getElementById('topicGrid');
+    grid.innerHTML = '';
+    for (let i = 0; i < 10; i++) {
+        const inp = document.createElement('input');
+        inp.type = 'number';
+        inp.min = '1';
+        inp.className = 'topic-cell';
+        inp.style.cssText = 'padding:8px; text-align:center; font-size:13px;';
+        inp.addEventListener('input', updateTopicCount);
+        inp.addEventListener('keydown', function(e) {
+            if (e.key === 'Tab' || e.key === 'Enter') {
+                e.preventDefault();
+                const cells = grid.querySelectorAll('input');
+                const idx = Array.from(cells).indexOf(this);
+                if (idx < cells.length - 1) cells[idx + 1].focus();
+                else addTopicRow();
+            }
+        });
+        grid.appendChild(inp);
+    }
+}
+
+function addTopicRow() {
+    const grid = document.getElementById('topicGrid');
+    for (let i = 0; i < 5; i++) {
+        const inp = document.createElement('input');
+        inp.type = 'number';
+        inp.min = '1';
+        inp.className = 'topic-cell';
+        inp.style.cssText = 'padding:8px; text-align:center; font-size:13px;';
+        inp.addEventListener('input', updateTopicCount);
+        inp.addEventListener('keydown', function(e) {
+            if (e.key === 'Tab' || e.key === 'Enter') {
+                e.preventDefault();
+                const cells = grid.querySelectorAll('input');
+                const idx = Array.from(cells).indexOf(this);
+                if (idx < cells.length - 1) cells[idx + 1].focus();
+                else addTopicRow();
+            }
+        });
+        grid.appendChild(inp);
+    }
+    // Focus first new cell
+    const cells = grid.querySelectorAll('input');
+    cells[cells.length - 5].focus();
+}
+
+function clearTopics() {
+    document.getElementById('topicFrom').value = '';
+    document.getElementById('topicTo').value = '';
+    initTopicGrid();
+    updateTopicCount();
+}
+
+function updateTopicCount() {
+    const from = parseInt(document.getElementById('topicFrom').value) || 0;
+    const to = parseInt(document.getElementById('topicTo').value) || 0;
+    const rangeCount = (from > 0 && to >= from) ? (to - from + 1) : 0;
+    document.getElementById('rangeCount').textContent = rangeCount;
+
+    const cells = document.getElementById('topicGrid').querySelectorAll('input');
+    let sepCount = 0;
+    cells.forEach(c => { if (c.value && parseInt(c.value) > 0) sepCount++; });
+    document.getElementById('separateCount').textContent = sepCount;
+
+    // حساب الإجمالي بدون تكرار
+    const allIds = collectTopicIds();
+    document.getElementById('totalTopicCount').textContent = allIds.length;
+}
+
+function collectTopicIds() {
+    const ids = new Set();
+    const from = parseInt(document.getElementById('topicFrom').value) || 0;
+    const to = parseInt(document.getElementById('topicTo').value) || 0;
+    if (from > 0 && to >= from) {
+        for (let i = from; i <= to; i++) ids.add(i);
+    }
+    const cells = document.getElementById('topicGrid').querySelectorAll('input');
+    cells.forEach(c => {
+        const v = parseInt(c.value);
+        if (v > 0) ids.add(v);
+    });
+    return Array.from(ids).sort((a, b) => a - b);
+}
+
 // ===== Init =====
+initTopicGrid();
 loadFolders();
 loadRecipes();
 loadHeaderStats();
@@ -1382,6 +1576,10 @@ setInterval(loadHeaderStats, 15000);
 
 // Responsive: make run form single column on mobile
 if (window.innerWidth <= 768) {
+    const grid = document.querySelector('.run-form-grid');
+    if (grid) grid.style.gridTemplateColumns = '1fr 1fr 1fr';
+}
+if (window.innerWidth <= 480) {
     const grid = document.querySelector('.run-form-grid');
     if (grid) grid.style.gridTemplateColumns = '1fr';
 }

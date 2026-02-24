@@ -1,0 +1,19 @@
+{
+  "name": "تحويل نصوص لصوت",
+  "steps": [
+    {
+      "id": "scripts",
+      "action": "read_docx",
+      "reconstruct_markers": true,
+      "marker_prefix": "SCRIPT",
+      "label": "قراءة السكريبتات من Word"
+    },
+    {
+      "id": "audio",
+      "action": "tts_multi",
+      "input": "{scripts}",
+      "marker_prefix": "SCRIPT",
+      "label": "تحويل النصوص لصوت"
+    }
+  ]
+}

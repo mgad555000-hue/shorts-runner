@@ -95,11 +95,39 @@ def create_sandbox_container(run_id: str, code: str, input_folder: str) -> Tuple
         if not input_dir.exists():
             return False, str(output_dir), f"مجلد الإدخال غير موجود: {input_folder}"
 
-        # كتابة الكود في مجلد الإخراج
-        script_path = output_dir / "script.py"
-        print(f"[SANDBOX DEBUG] Code length to write: {len(code) if code else 0}")
-        script_path.write_text(code, encoding="utf-8")
-        print(f"[SANDBOX DEBUG] Script written, file size: {script_path.stat().st_size}")
+        # كشف JSON Pipeline
+        is_json_pipeline = False
+        if code and code.strip().startswith("{"):
+            try:
+                json.loads(code)
+                is_json_pipeline = True
+            except json.JSONDecodeError:
+                pass
+
+        if is_json_pipeline:
+            # حفظ الـ config
+            config_path = output_dir / "recipe_config.json"
+            config_path.write_text(code, encoding="utf-8")
+            print(f"[SANDBOX DEBUG] JSON Pipeline detected, config saved: {config_path.stat().st_size} bytes")
+            # توليد wrapper script
+            wrapper = '''import sys, json, os
+sys.path.insert(0, '/app/app')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'app'))
+from recipe_runner import run_pipeline
+config_path = os.path.join(os.environ.get("OUTPUT_DIR", "/mnt/output"), "recipe_config.json")
+with open(config_path, "r", encoding="utf-8") as f:
+    config = json.load(f)
+run_pipeline(config)
+'''
+            script_path = output_dir / "script.py"
+            script_path.write_text(wrapper, encoding="utf-8")
+            print(f"[SANDBOX DEBUG] Wrapper script written, file size: {script_path.stat().st_size}")
+        else:
+            # كتابة الكود في مجلد الإخراج
+            script_path = output_dir / "script.py"
+            print(f"[SANDBOX DEBUG] Code length to write: {len(code) if code else 0}")
+            script_path.write_text(code, encoding="utf-8")
+            print(f"[SANDBOX DEBUG] Script written, file size: {script_path.stat().st_size}")
 
         # مسارات ملفات السجل والـ manifest
         log_path = output_dir / "run_log.txt"
@@ -120,11 +148,20 @@ def create_sandbox_container(run_id: str, code: str, input_folder: str) -> Tuple
                         "OUTPUT_DIR": "/mnt/output",
                         "PYTHONUNBUFFERED": "1",
                         "MODEL_NAME": os.getenv("MODEL_NAME", ""),
+                        "CHANNEL_NAME": os.getenv("CHANNEL_NAME", ""),
+                        "CHANNEL_ROOT": os.getenv("CHANNEL_ROOT", ""),
+                        "RECIPE_OUTPUT_DIR": os.getenv("RECIPE_OUTPUT_DIR", ""),
+                        "TTS_PROVIDER": os.getenv("TTS_PROVIDER", "vertex"),
+                        "TTS_VOICE_ID": _get_api_env().get("TTS_VOICE_ID", "Achird"),
+                        "EXECUTION_MODE": os.getenv("EXECUTION_MODE", "instant"),
+                        "TOPIC_IDS": os.getenv("TOPIC_IDS", ""),
                         # تمرير مفاتيح API (قراءة .env من المشروع عند كل تشغيلة)
                         "GEMINI_API_KEY": _get_api_env().get("GEMINI_API_KEY", ""),
                         "CLAUDE_API_KEY": _get_api_env().get("CLAUDE_API_KEY", ""),
                         "GLM_API_KEY": _get_api_env().get("GLM_API_KEY", ""),
                         "OPENAI_API_KEY": _get_api_env().get("OPENAI_API_KEY", ""),
+                        "ELEVENLABS_API_KEY": _get_api_env().get("ELEVENLABS_API_KEY", ""),
+                        "MINIMAX_API_KEY": _get_api_env().get("MINIMAX_API_KEY", ""),
                         "GOOGLE_CLIENT_ID": _get_api_env().get("GOOGLE_CLIENT_ID", ""),
                         "GOOGLE_CLIENT_SECRET": _get_api_env().get("GOOGLE_CLIENT_SECRET", ""),
                         "GOOGLE_REFRESH_TOKEN": _get_api_env().get("GOOGLE_REFRESH_TOKEN", ""),
@@ -141,7 +178,7 @@ def create_sandbox_container(run_id: str, code: str, input_folder: str) -> Tuple
                 )
 
                 # انتظار انتهاء التنفيذ (10 دقائق للمهام الطويلة مع AI)
-                result = container.wait(timeout=600)
+                result = container.wait(timeout=21600)  # 6 ساعات
 
                 # قراءة السجلات
                 logs = container.logs().decode("utf-8", errors="ignore")
@@ -222,11 +259,20 @@ def create_sandbox_container(run_id: str, code: str, input_folder: str) -> Tuple
                     "PYTHONUNBUFFERED": "1",
                     # تمرير اسم الموديل المختار من الواجهة
                     "MODEL_NAME": os.getenv("MODEL_NAME", ""),
+                    "TTS_PROVIDER": os.getenv("TTS_PROVIDER", "vertex"),
+                    "TTS_VOICE_ID": api_env.get("TTS_VOICE_ID", "Achird"),
+                    "EXECUTION_MODE": os.getenv("EXECUTION_MODE", "instant"),
+                    "TOPIC_IDS": os.getenv("TOPIC_IDS", ""),
                     # تمرير مفاتيح API (قراءة .env من المشروع عند كل تشغيلة)
                     "GEMINI_API_KEY": api_env.get("GEMINI_API_KEY", ""),
                     "CLAUDE_API_KEY": api_env.get("CLAUDE_API_KEY", ""),
                     "GLM_API_KEY": api_env.get("GLM_API_KEY", ""),
                     "OPENAI_API_KEY": api_env.get("OPENAI_API_KEY", ""),
+                    "ELEVENLABS_API_KEY": api_env.get("ELEVENLABS_API_KEY", ""),
+                    "MINIMAX_API_KEY": api_env.get("MINIMAX_API_KEY", ""),
+                    "CHANNEL_NAME": os.getenv("CHANNEL_NAME", ""),
+                    "CHANNEL_ROOT": os.getenv("CHANNEL_ROOT", ""),
+                    "RECIPE_OUTPUT_DIR": os.getenv("RECIPE_OUTPUT_DIR", ""),
                     "GOOGLE_CLIENT_ID": api_env.get("GOOGLE_CLIENT_ID", ""),
                     "GOOGLE_CLIENT_SECRET": api_env.get("GOOGLE_CLIENT_SECRET", ""),
                     "GOOGLE_REFRESH_TOKEN": api_env.get("GOOGLE_REFRESH_TOKEN", ""),
@@ -240,25 +286,41 @@ def create_sandbox_container(run_id: str, code: str, input_folder: str) -> Tuple
 
             # Use absolute paths to avoid path confusion
             abs_script_path = script_path.resolve()
-            
-            proc = subprocess.run(
-                ["python", str(abs_script_path)],
+
+            # كتابة header اللوج مبدئياً
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(f"=== Run ID: {run_id} (local execution) ===\n")
+                f.write(f"Input Folder: {input_folder}\n")
+                f.write(f"Exit Code: running...\n\n")
+                f.write("=== Execution Logs ===\n")
+
+            # تشغيل بـ Popen عشان نكتب اللوج أول بأول
+            proc = subprocess.Popen(
+                ["python", "-u", str(abs_script_path)],
                 cwd=str(abs_output_dir),
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                timeout=3600,  # ساعة كاملة للمهام الطويلة مع AI (100 موضوع)
             )
 
-            logs = proc.stdout or ""
+            # قراءة وكتابة اللوج سطر بسطر
+            logs_lines = []
+            with open(log_path, "a", encoding="utf-8") as f:
+                for line in proc.stdout:
+                    logs_lines.append(line)
+                    f.write(line)
+                    f.flush()
 
+            proc.wait(timeout=21600)  # 6 ساعات للباتش
+            logs = "".join(logs_lines)
+
+            # تحديث header بـ exit code النهائي
+            with open(log_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            content = content.replace("Exit Code: running...", f"Exit Code: {proc.returncode}", 1)
             with open(log_path, "w", encoding="utf-8") as f:
-                f.write(f"=== Run ID: {run_id} (local execution) ===\n")
-                f.write(f"Input Folder: {input_folder}\n")
-                f.write(f"Exit Code: {proc.returncode}\n\n")
-                f.write("=== Execution Logs ===\n")
-                f.write(logs)
+                f.write(content)
 
             success = proc.returncode == 0
 
