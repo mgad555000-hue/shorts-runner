@@ -40,6 +40,7 @@
       "action": "extract_screen_text",
       "input": "{scripts}",
       "extract_label": "جملة الصورة المصغرة للفيديو الأول:",
+      "extract_end": "جملة الصورة المصغرة للفيديو الثاني:",
       "save_as": "thumbnail_texts.docx",
       "label": "استخراج جمل الصورة المصغرة"
     }

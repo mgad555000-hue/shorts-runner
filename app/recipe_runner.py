@@ -734,9 +734,10 @@ def action_copy_videos(step, ctx):
     return f"تم نسخ {copied_count} فيديو لـ {script_count} سكريبت"
 
 
-def _extract_screen_phrase(text, section_name="القسم الأول", extract_label="جملة الشاشة:"):
-    """استخراج جملة من نص سكريبت واحد بناءً على label محدد
-    يدعم جمل متعددة الأسطر — يقف عند أول label تاني (سطر بيبدأ بـ **)
+def _extract_screen_phrase(text, section_name, extract_label, extract_end):
+    """استخراج نص بين extract_label و extract_end داخل قسم محدد
+    - extract_label: بداية النص المطلوب (مثلاً "جملة الصورة المصغرة للفيديو الأول:")
+    - extract_end: نهاية النص المطلوب (مثلاً "جملة الصورة المصغرة للفيديو الثاني:")
     """
     section_start = text.find(section_name)
     if section_start == -1:
@@ -754,19 +755,16 @@ def _extract_screen_phrase(text, section_name="القسم الأول", extract_l
 
     after_marker = section_text[marker_pos + len(extract_label):]
 
-    # أخد كل الأسطر لحد ما نلاقي label تاني (سطر بيبدأ بـ **) أو نهاية النص
-    collected = []
-    for line in after_marker.split("\n"):
-        stripped = line.strip()
-        # لو لقينا label جديد (سطر بيبدأ بـ **) → وقّف
-        if stripped.startswith("**") and collected:
-            break
-        # نضّف الـ markdown ونضيف لو فيه محتوى
-        cleaned = re.sub(r'\*+', '', stripped).strip()
-        if cleaned:
-            collected.append(cleaned)
+    # قص النص عند extract_end
+    end_pos = after_marker.find(extract_end)
+    if end_pos != -1:
+        raw = after_marker[:end_pos]
+    else:
+        raw = after_marker
 
-    return "\n".join(collected) if collected else None
+    # تنظيف: شيل markdown وسطور فاضية
+    cleaned = re.sub(r'\*+', '', raw).strip()
+    return cleaned if cleaned else None
 
 
 def action_extract_screen_text(step, ctx):
@@ -782,17 +780,18 @@ def action_extract_screen_text(step, ctx):
     section_name = step.get("section", "القسم الأول")
     save_as = step.get("save_as", "screen_texts.docx")
     extract_label = step.get("extract_label", "جملة الشاشة:")
+    extract_end = step.get("extract_end", "الكلمات المفتاحية:")
 
     results = []
 
     if raw_input:
         # === وضع جديد: نص مباشر بماركرز MG Ranner ===
-        log(f"  استخراج [{extract_label}] من نص مباشر ({len(raw_input)} حرف)")
+        log(f"  استخراج [{extract_label}] → [{extract_end}] من نص مباشر ({len(raw_input)} حرف)")
         marker_pattern = re.compile(r'<<<SCRIPT_(\d+)>>>(.*?)<<<END_SCRIPT>>>', re.DOTALL)
         for m in marker_pattern.finditer(raw_input):
             script_num = m.group(1)
             script_text = m.group(2)
-            screen_text = _extract_screen_phrase(script_text, section_name, extract_label)
+            screen_text = _extract_screen_phrase(script_text, section_name, extract_label, extract_end)
             if screen_text:
                 results.append((script_num, screen_text))
             else:
@@ -822,7 +821,7 @@ def action_extract_screen_text(step, ctx):
 
             if heading_match:
                 if current_num is not None and current_text:
-                    screen_text = _extract_screen_phrase(current_text, section_name, extract_label)
+                    screen_text = _extract_screen_phrase(current_text, section_name, extract_label, extract_end)
                     if screen_text:
                         results.append((current_num, screen_text))
                     else:
@@ -833,7 +832,7 @@ def action_extract_screen_text(step, ctx):
                 current_text += p.text + "\n"
 
         if current_num is not None and current_text:
-            screen_text = _extract_screen_phrase(current_text, section_name, extract_label)
+            screen_text = _extract_screen_phrase(current_text, section_name, extract_label, extract_end)
             if screen_text:
                 results.append((current_num, screen_text))
             else:
