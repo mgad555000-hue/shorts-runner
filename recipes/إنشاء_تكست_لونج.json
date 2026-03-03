@@ -1,0 +1,47 @@
+{
+  "name": "إنشاء تكست لونج",
+  "steps": [
+    {
+      "id": "instructions",
+      "action": "read_input",
+      "file": "instructions.txt",
+      "label": "قراءة التعليمات"
+    },
+    {
+      "id": "topics",
+      "action": "read_input",
+      "file": "topics.json",
+      "label": "قراءة العناوين"
+    },
+    {
+      "id": "prompt",
+      "action": "template",
+      "text": "{instructions}\n\n---\n\nقائمة العناوين المطلوب إنشاء تكست لها:\n\n{topics}",
+      "label": "تجميع البرومبت"
+    },
+    {
+      "id": "scripts",
+      "action": "generate",
+      "input": "{prompt}",
+      "temperature": 0.3,
+      "max_tokens": 64000,
+      "label": "توليد التكست"
+    },
+    {
+      "id": "docx",
+      "action": "save_docx",
+      "input": "{scripts}",
+      "save_as": "scripts_output.docx",
+      "font_size": 14,
+      "label": "حفظ Word"
+    },
+    {
+      "id": "thumbnails",
+      "action": "extract_screen_text",
+      "input": "{scripts}",
+      "extract_label": "جملة الصورة المصغرة للفيديو الأول:",
+      "save_as": "thumbnail_texts.docx",
+      "label": "استخراج جمل الصورة المصغرة"
+    }
+  ]
+}

@@ -734,8 +734,8 @@ def action_copy_videos(step, ctx):
     return f"تم نسخ {copied_count} فيديو لـ {script_count} سكريبت"
 
 
-def _extract_screen_phrase(text, section_name="القسم الأول"):
-    """استخراج جملة الشاشة من نص سكريبت واحد"""
+def _extract_screen_phrase(text, section_name="القسم الأول", extract_label="جملة الشاشة:"):
+    """استخراج جملة من نص سكريبت واحد بناءً على label محدد"""
     # تحديد نطاق القسم المطلوب
     section_start = text.find(section_name)
     if section_start == -1:
@@ -748,15 +748,14 @@ def _extract_screen_phrase(text, section_name="القسم الأول"):
     else:
         section_text = text[section_start:next_section]
 
-    # البحث عن "جملة الشاشة:" في هذا القسم
-    marker = "جملة الشاشة:"
-    marker_pos = section_text.find(marker)
+    # البحث عن الـ label في هذا القسم
+    marker_pos = section_text.find(extract_label)
     if marker_pos == -1:
         return None
 
-    after_marker = section_text[marker_pos + len(marker):]
+    after_marker = section_text[marker_pos + len(extract_label):]
 
-    # النص ينتهي عند "الكلمات المفتاحية:"
+    # النص ينتهي عند "الكلمات المفتاحية:" أو سطر فاضي مزدوج
     end_marker = "الكلمات المفتاحية:"
     end_pos = after_marker.find(end_marker)
     if end_pos == -1:
@@ -779,21 +778,22 @@ def action_extract_screen_text(step, ctx):
     source_file = step.get("file")
     section_name = step.get("section", "القسم الأول")
     save_as = step.get("save_as", "screen_texts.docx")
+    extract_label = step.get("extract_label", "جملة الشاشة:")
 
     results = []
 
     if raw_input:
         # === وضع جديد: نص مباشر بماركرز MG Ranner ===
-        log(f"  استخراج جمل الشاشة من نص مباشر ({len(raw_input)} حرف)")
+        log(f"  استخراج [{extract_label}] من نص مباشر ({len(raw_input)} حرف)")
         marker_pattern = re.compile(r'<<<SCRIPT_(\d+)>>>(.*?)<<<END_SCRIPT>>>', re.DOTALL)
         for m in marker_pattern.finditer(raw_input):
             script_num = m.group(1)
             script_text = m.group(2)
-            screen_text = _extract_screen_phrase(script_text, section_name)
+            screen_text = _extract_screen_phrase(script_text, section_name, extract_label)
             if screen_text:
                 results.append((script_num, screen_text))
             else:
-                log(f"  [!] Script {script_num}: لم يتم العثور على جملة الشاشة")
+                log(f"  [!] Script {script_num}: لم يتم العثور على [{extract_label}]")
     else:
         # === وضع قديم: قراءة من ملف docx ===
         if source_file:
@@ -819,18 +819,18 @@ def action_extract_screen_text(step, ctx):
 
             if heading_match:
                 if current_num is not None and current_text:
-                    screen_text = _extract_screen_phrase(current_text, section_name)
+                    screen_text = _extract_screen_phrase(current_text, section_name, extract_label)
                     if screen_text:
                         results.append((current_num, screen_text))
                     else:
-                        log(f"  [!] Script {current_num}: لم يتم العثور على جملة الشاشة")
+                        log(f"  [!] Script {current_num}: لم يتم العثور على [{extract_label}]")
                 current_num = heading_match.group(1)
                 current_text = ""
             elif current_num is not None:
                 current_text += p.text + "\n"
 
         if current_num is not None and current_text:
-            screen_text = _extract_screen_phrase(current_text, section_name)
+            screen_text = _extract_screen_phrase(current_text, section_name, extract_label)
             if screen_text:
                 results.append((current_num, screen_text))
             else:
