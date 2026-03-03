@@ -774,7 +774,7 @@ def action_extract_screen_text(step, ctx):
     """
     from docx import Document
 
-    raw_input = resolve(step.get("input", ""), ctx)
+    raw_input = ctx.resolve(step.get("input", "")) if step.get("input") else ""
     source_file = step.get("file")
     section_name = step.get("section", "القسم الأول")
     save_as = step.get("save_as", "screen_texts.docx")
