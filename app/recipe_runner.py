@@ -755,14 +755,14 @@ def _extract_screen_phrase(text, section_name="القسم الأول", extract_l
 
     after_marker = section_text[marker_pos + len(extract_label):]
 
-    # استخراج أول سطر فقط بعد الـ label
-    first_line = after_marker.split("\n")[0].strip()
-    if first_line:
-        screen_text = first_line
-    else:
-        # لو السطر الأول فاضي، خد التاني
-        lines = [l.strip() for l in after_marker.split("\n") if l.strip()]
-        screen_text = lines[0] if lines else None
+    # تنظيف markdown واستخراج أول سطر حقيقي
+    lines = after_marker.split("\n")
+    screen_text = None
+    for line in lines:
+        cleaned = line.strip().strip("*").strip("#").strip(":").strip()
+        if cleaned:
+            screen_text = cleaned
+            break
 
     return screen_text if screen_text else None
 
