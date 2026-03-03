@@ -735,36 +735,38 @@ def action_copy_videos(step, ctx):
 
 
 def _extract_screen_phrase(text, section_name="القسم الأول", extract_label="جملة الشاشة:"):
-    """استخراج جملة من نص سكريبت واحد بناءً على label محدد"""
-    # تحديد نطاق القسم المطلوب
+    """استخراج جملة من نص سكريبت واحد بناءً على label محدد
+    يدعم جمل متعددة الأسطر — يقف عند أول label تاني (سطر بيبدأ بـ **)
+    """
     section_start = text.find(section_name)
     if section_start == -1:
         return None
 
-    # تحديد نهاية القسم (بداية القسم التالي)
     next_section = text.find("القسم الثاني", section_start)
     if next_section == -1:
         section_text = text[section_start:]
     else:
         section_text = text[section_start:next_section]
 
-    # البحث عن الـ label في هذا القسم
     marker_pos = section_text.find(extract_label)
     if marker_pos == -1:
         return None
 
     after_marker = section_text[marker_pos + len(extract_label):]
 
-    # تنظيف markdown واستخراج أول سطر حقيقي
-    lines = after_marker.split("\n")
-    screen_text = None
-    for line in lines:
-        cleaned = line.strip().strip("*").strip("#").strip(":").strip()
-        if cleaned:
-            screen_text = cleaned
+    # أخد كل الأسطر لحد ما نلاقي label تاني (سطر بيبدأ بـ **) أو نهاية النص
+    collected = []
+    for line in after_marker.split("\n"):
+        stripped = line.strip()
+        # لو لقينا label جديد (سطر بيبدأ بـ **) → وقّف
+        if stripped.startswith("**") and collected:
             break
+        # نضّف الـ markdown ونضيف لو فيه محتوى
+        cleaned = re.sub(r'\*+', '', stripped).strip()
+        if cleaned:
+            collected.append(cleaned)
 
-    return screen_text if screen_text else None
+    return "\n".join(collected) if collected else None
 
 
 def action_extract_screen_text(step, ctx):
