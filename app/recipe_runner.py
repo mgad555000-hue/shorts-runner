@@ -755,13 +755,14 @@ def _extract_screen_phrase(text, section_name="القسم الأول", extract_l
 
     after_marker = section_text[marker_pos + len(extract_label):]
 
-    # النص ينتهي عند "الكلمات المفتاحية:" أو سطر فاضي مزدوج
-    end_marker = "الكلمات المفتاحية:"
-    end_pos = after_marker.find(end_marker)
-    if end_pos == -1:
-        screen_text = after_marker.strip()
+    # استخراج أول سطر فقط بعد الـ label
+    first_line = after_marker.split("\n")[0].strip()
+    if first_line:
+        screen_text = first_line
     else:
-        screen_text = after_marker[:end_pos].strip()
+        # لو السطر الأول فاضي، خد التاني
+        lines = [l.strip() for l in after_marker.split("\n") if l.strip()]
+        screen_text = lines[0] if lines else None
 
     return screen_text if screen_text else None
 
