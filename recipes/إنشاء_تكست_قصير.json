@@ -34,6 +34,13 @@
       "save_as": "scripts_output.docx",
       "font_size": 14,
       "label": "حفظ Word"
+    },
+    {
+      "id": "screen_texts",
+      "action": "extract_screen_text",
+      "input": "{scripts}",
+      "save_as": "screen_texts.docx",
+      "label": "استخراج جمل الشاشة"
     }
   ]
 }

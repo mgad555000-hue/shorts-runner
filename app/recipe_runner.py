@@ -768,57 +768,73 @@ def _extract_screen_phrase(text, section_name="القسم الأول"):
 
 
 def action_extract_screen_text(step, ctx):
-    """استخراج جمل الشاشة من مخرج وصفة إنشاء تكست قصير وحفظها في ملف Word"""
+    """استخراج جمل الشاشة من مخرج وصفة إنشاء تكست قصير وحفظها في ملف Word
+    يدعم وضعين:
+    1. input من خطوة سابقة (نص بماركرز MG Ranner)
+    2. قراءة من ملف docx (الوضع القديم)
+    """
     from docx import Document
 
+    raw_input = resolve(step.get("input", ""), ctx)
     source_file = step.get("file")
     section_name = step.get("section", "القسم الأول")
     save_as = step.get("save_as", "screen_texts.docx")
 
-    # تحديد الملف المصدر
-    if source_file:
-        filepath = ctx.input_path(source_file)
-    else:
-        docx_files = sorted([f for f in os.listdir(ctx.input_dir) if f.endswith('.docx')])
-        if not docx_files:
-            raise EngineError("لا توجد ملفات Word في مجلد الإدخال", code="FILE_NOT_FOUND")
-        filepath = ctx.input_path(docx_files[0])
-
-    if not os.path.exists(filepath):
-        raise EngineError(f"ملف غير موجود: {filepath}", code="FILE_NOT_FOUND")
-
-    log(f"  قراءة: {filepath}")
-    doc = Document(filepath)
-
-    # استخراج جمل الشاشة من كل سكريبت
     results = []
-    current_num = None
-    current_text = ""
 
-    for p in doc.paragraphs:
-        is_heading = p.style.name.startswith("Heading")
-        heading_match = re.match(r'Script\s+(\d+)', p.text) if is_heading else None
-
-        if heading_match:
-            # معالجة السكريبت السابق
-            if current_num is not None and current_text:
-                screen_text = _extract_screen_phrase(current_text, section_name)
-                if screen_text:
-                    results.append((current_num, screen_text))
-                else:
-                    log(f"  [!] Script {current_num}: لم يتم العثور على جملة الشاشة")
-            current_num = heading_match.group(1)
-            current_text = ""
-        elif current_num is not None:
-            current_text += p.text + "\n"
-
-    # معالجة آخر سكريبت
-    if current_num is not None and current_text:
-        screen_text = _extract_screen_phrase(current_text, section_name)
-        if screen_text:
-            results.append((current_num, screen_text))
+    if raw_input:
+        # === وضع جديد: نص مباشر بماركرز MG Ranner ===
+        log(f"  استخراج جمل الشاشة من نص مباشر ({len(raw_input)} حرف)")
+        marker_pattern = re.compile(r'<<<SCRIPT_(\d+)>>>(.*?)<<<END_SCRIPT>>>', re.DOTALL)
+        for m in marker_pattern.finditer(raw_input):
+            script_num = m.group(1)
+            script_text = m.group(2)
+            screen_text = _extract_screen_phrase(script_text, section_name)
+            if screen_text:
+                results.append((script_num, screen_text))
+            else:
+                log(f"  [!] Script {script_num}: لم يتم العثور على جملة الشاشة")
+    else:
+        # === وضع قديم: قراءة من ملف docx ===
+        if source_file:
+            filepath = ctx.input_path(source_file)
         else:
-            log(f"  [!] Script {current_num}: لم يتم العثور على جملة الشاشة")
+            docx_files = sorted([f for f in os.listdir(ctx.input_dir) if f.endswith('.docx')])
+            if not docx_files:
+                raise EngineError("لا توجد ملفات Word في مجلد الإدخال", code="FILE_NOT_FOUND")
+            filepath = ctx.input_path(docx_files[0])
+
+        if not os.path.exists(filepath):
+            raise EngineError(f"ملف غير موجود: {filepath}", code="FILE_NOT_FOUND")
+
+        log(f"  قراءة: {filepath}")
+        doc = Document(filepath)
+
+        current_num = None
+        current_text = ""
+
+        for p in doc.paragraphs:
+            is_heading = p.style.name.startswith("Heading")
+            heading_match = re.match(r'Script\s+(\d+)', p.text) if is_heading else None
+
+            if heading_match:
+                if current_num is not None and current_text:
+                    screen_text = _extract_screen_phrase(current_text, section_name)
+                    if screen_text:
+                        results.append((current_num, screen_text))
+                    else:
+                        log(f"  [!] Script {current_num}: لم يتم العثور على جملة الشاشة")
+                current_num = heading_match.group(1)
+                current_text = ""
+            elif current_num is not None:
+                current_text += p.text + "\n"
+
+        if current_num is not None and current_text:
+            screen_text = _extract_screen_phrase(current_text, section_name)
+            if screen_text:
+                results.append((current_num, screen_text))
+            else:
+                log(f"  [!] Script {current_num}: لم يتم العثور على جملة الشاشة")
 
     if not results:
         raise EngineError("لم يتم العثور على أي جمل شاشة", code="NO_SCREEN_TEXT_FOUND")
