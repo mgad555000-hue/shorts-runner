@@ -16,6 +16,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             cd /opt/mg-ranner
-            git pull origin master
-            docker-compose -f docker-compose.vps.yml restart shorts-app
+            git fetch origin master
+            git reset --hard origin/master
+            docker compose -f docker-compose.vps.yml restart shorts-app
             echo "Deploy done at $(date)"
