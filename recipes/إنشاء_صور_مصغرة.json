@@ -5,7 +5,6 @@
     {
       "id": "texts",
       "action": "read_docx",
-      "file": "thumbnail_texts.docx",
       "label": "قراءة جمل الشاشة"
     },
     {
