@@ -2014,39 +2014,43 @@ def action_draw_thumbnail(step, ctx):
         return []
 
     # Parse texts into groups of 3 lines each
+    # entries = list of (topic_id, [lines]) tuples
     entries = []
 
     # Method 1: MG Ranner markers <<<SCRIPT_N>>> or <<<THUMB_N>>>
-    marker_pattern = re.compile(r'<<<(?:SCRIPT|THUMB)_\d+>>>(.*?)<<<END_(?:SCRIPT|THUMB)>>>', re.DOTALL)
+    marker_pattern = re.compile(r'<<<(?:SCRIPT|THUMB)_(\d+)>>>(.*?)<<<END_(?:SCRIPT|THUMB)>>>', re.DOTALL)
     matches = marker_pattern.findall(text_content)
 
     if matches:
-        for m in matches:
+        for topic_id, m in matches:
             lines = [l.strip() for l in m.strip().split('\n') if l.strip()]
             if lines:
-                entries.append(lines)
+                entries.append((topic_id, lines))
     else:
         # Method 2: "Script NNNN" headers (from thumbnail_texts.docx)
         all_lines = [l.strip() for l in text_content.split('\n') if l.strip()]
-        script_header = re.compile(r'^Script\s+\d+', re.IGNORECASE)
+        script_header = re.compile(r'^Script\s+(\d+)', re.IGNORECASE)
         current = []
+        current_id = None
         for line in all_lines:
-            if script_header.match(line):
+            m = script_header.match(line)
+            if m:
                 if current:
-                    entries.append(current)
+                    entries.append((current_id, current))
+                current_id = m.group(1)
                 current = []
             else:
                 current.append(line)
         if current:
-            entries.append(current)
+            entries.append((current_id, current))
 
-    # Fallback: group every 3 non-empty lines
+    # Fallback: group every 3 non-empty lines (no topic ID)
     if not entries:
         all_lines = [l.strip() for l in text_content.split('\n') if l.strip()]
         for i in range(0, len(all_lines), 3):
             group = all_lines[i:i+3]
             if group:
-                entries.append(group)
+                entries.append((str(i // 3 + 1), group))
 
     if not entries:
         log("  draw_thumbnail: لا توجد نصوص للمعالجة")
@@ -2058,7 +2062,7 @@ def action_draw_thumbnail(step, ctx):
     with sync_playwright() as p:
         browser = p.chromium.launch()
         try:
-            for i, entry_texts in enumerate(entries):
+            for i, (topic_id, entry_texts) in enumerate(entries):
                 tid = template_ids[i % total_templates]
                 bg_path = os.path.join(templates_dir, f"{tid}.png")
 
@@ -2091,7 +2095,7 @@ def action_draw_thumbnail(step, ctx):
                         img = Image.open(raw_path)
                         if img.size != (1280, 720):
                             img = img.resize((1280, 720), Image.LANCZOS)
-                        output_name = f"{save_prefix}_{i+1}.png"
+                        output_name = f"{save_prefix}_{topic_id}.png"
                         output_path = ctx.output_path(output_name)
                         img.save(output_path, format="PNG")
                     finally:
