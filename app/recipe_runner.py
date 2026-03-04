@@ -1952,6 +1952,11 @@ def _generate_thumbnail_html(template_config, bg_path, texts):
 <html dir="rtl" lang="ar">
 <head><meta charset="UTF-8">
 <style>
+  @font-face {{
+    font-family: 'ArialBold';
+    src: url('file:///usr/share/fonts/truetype/arialbd.ttf');
+    font-weight: bold;
+  }}
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   body {{ width: 1280px; height: 720px; overflow: hidden; }}
   .container {{
@@ -1962,7 +1967,7 @@ def _generate_thumbnail_html(template_config, bg_path, texts):
   .text-area {{
     position: absolute; display: flex; align-items: center;
     justify-content: center; text-align: center;
-    font-family: 'Arial', sans-serif; font-weight: bold;
+    font-family: 'ArialBold', 'Arial', sans-serif; font-weight: bold;
     direction: rtl; line-height: 1.0; overflow: hidden;
     padding: 5px 20px; white-space: nowrap;
   }}

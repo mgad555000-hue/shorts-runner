@@ -52,6 +52,10 @@ RUN mkdir -p /app/fonts \
     && curl -sL 'https://github.com/google/fonts/raw/main/ofl/notokuficarabic/static/NotoKufiArabic-Bold.ttf' \
        -o /app/fonts/NotoKufiArabic-Bold.ttf
 
+# Arial Bold for thumbnails
+COPY fonts/arialbd.ttf /usr/share/fonts/truetype/arialbd.ttf
+RUN fc-cache -f
+
 # نسخ باقي ملفات التطبيق
 COPY . .
 
