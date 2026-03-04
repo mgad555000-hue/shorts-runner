@@ -1924,19 +1924,20 @@ THUMBNAILS_TEMPLATES_DIR = "/app/data/thumbnails/templates"
 
 def _generate_thumbnail_html(template_config, bg_path, texts):
     """Generate HTML for a single thumbnail."""
-    text_areas = template_config["text_areas"]
+    import html as _html
+    text_areas = template_config.get("text_areas", [])
 
     # Build CSS and divs for each text area
     text_css = ""
     text_divs = ""
     for i, area in enumerate(text_areas):
-        cx, cy = area["center"]
-        w, h = area["size"]
-        angle = area["angle"]
-        color = area["color"]
+        cx, cy = area.get("center", [640, 360])
+        w, h = area.get("size", [600, 150])
+        angle = area.get("angle", 0)
+        color = area.get("color", "#000000")
         left = cx - w / 2
         top = cy - h / 2
-        text = texts[i] if i < len(texts) else ""
+        text = _html.escape(texts[i]) if i < len(texts) else ""
 
         text_css += f"""
   .text-{i+1} {{
@@ -2008,12 +2009,15 @@ def action_draw_thumbnail(step, ctx):
     template_ids = sorted(config.keys(), key=int)
     total_templates = len(template_ids)
 
+    if total_templates == 0:
+        log("  draw_thumbnail: لا توجد تمبليتات في ملف الإعدادات")
+        return []
+
     # Parse texts into groups of 3 lines each
     entries = []
-    import re as _re
 
     # Method 1: MG Ranner markers <<<SCRIPT_N>>> or <<<THUMB_N>>>
-    marker_pattern = _re.compile(r'<<<(?:SCRIPT|THUMB)_\d+>>>(.*?)<<<END_(?:SCRIPT|THUMB)>>>', _re.DOTALL)
+    marker_pattern = re.compile(r'<<<(?:SCRIPT|THUMB)_\d+>>>(.*?)<<<END_(?:SCRIPT|THUMB)>>>', re.DOTALL)
     matches = marker_pattern.findall(text_content)
 
     if matches:
@@ -2024,7 +2028,7 @@ def action_draw_thumbnail(step, ctx):
     else:
         # Method 2: "Script NNNN" headers (from thumbnail_texts.docx)
         all_lines = [l.strip() for l in text_content.split('\n') if l.strip()]
-        script_header = _re.compile(r'^Script\s+\d+', _re.IGNORECASE)
+        script_header = re.compile(r'^Script\s+\d+', re.IGNORECASE)
         current = []
         for line in all_lines:
             if script_header.match(line):
@@ -2053,48 +2057,60 @@ def action_draw_thumbnail(step, ctx):
     output_paths = []
     with sync_playwright() as p:
         browser = p.chromium.launch()
+        try:
+            for i, entry_texts in enumerate(entries):
+                tid = template_ids[i % total_templates]
+                bg_path = os.path.join(templates_dir, f"{tid}.png")
 
-        for i, entry_texts in enumerate(entries):
-            tid = template_ids[i % total_templates]
-            bg_path = os.path.join(templates_dir, f"{tid}.png")
+                # Generate HTML
+                html = _generate_thumbnail_html(config[tid], bg_path, entry_texts)
+                temp_html = os.path.join(ctx.output_dir, f"_temp_{i}.html")
+                raw_path = os.path.join(ctx.output_dir, f"_raw_{i}.png")
+                page = None
+                try:
+                    with open(temp_html, "w", encoding="utf-8") as f:
+                        f.write(html)
 
-            # Generate HTML
-            html = _generate_thumbnail_html(config[tid], bg_path, entry_texts)
-            temp_html = os.path.join(ctx.output_dir, f"_temp_{i}.html")
-            with open(temp_html, "w", encoding="utf-8") as f:
-                f.write(html)
+                    # Render
+                    page = browser.new_page(
+                        viewport={"width": 1280, "height": 720},
+                        device_scale_factor=2
+                    )
+                    page.goto(f"file://{temp_html}")
+                    page.wait_for_load_state("networkidle")
+                    page.wait_for_timeout(300)
 
-            # Render
-            page = browser.new_page(
-                viewport={"width": 1280, "height": 720},
-                device_scale_factor=2
-            )
-            page.goto(f"file://{temp_html}")
-            page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(300)
+                    # Screenshot at 2x then resize to 1280x720
+                    page.screenshot(path=raw_path, type="png")
+                    page.close()
+                    page = None
 
-            # Screenshot at 2x then resize to 1280x720
-            raw_path = os.path.join(ctx.output_dir, f"_raw_{i}.png")
-            page.screenshot(path=raw_path, type="png")
-            page.close()
+                    # Resize to final 1280x720
+                    img = None
+                    try:
+                        img = Image.open(raw_path)
+                        if img.size != (1280, 720):
+                            img = img.resize((1280, 720), Image.LANCZOS)
+                        output_name = f"{save_prefix}_{i+1}.png"
+                        output_path = ctx.output_path(output_name)
+                        img.save(output_path, format="PNG")
+                    finally:
+                        if img is not None:
+                            img.close()
 
-            # Resize to final 1280x720
-            img = Image.open(raw_path)
-            if img.size != (1280, 720):
-                img = img.resize((1280, 720), Image.LANCZOS)
-
-            output_name = f"{save_prefix}_{i+1}.png"
-            output_path = ctx.output_path(output_name)
-            img.save(output_path, format="PNG")
-
-            # Cleanup temp files
-            os.remove(temp_html)
-            os.remove(raw_path)
-
-            output_paths.append(output_path)
-            log(f"  [{i+1}/{len(entries)}] template {tid} → {output_name}")
-
-        browser.close()
+                    output_paths.append(output_path)
+                    log(f"  [{i+1}/{len(entries)}] template {tid} → {output_name}")
+                finally:
+                    if page is not None:
+                        page.close()
+                    # Cleanup temp files safely
+                    for tmp in (temp_html, raw_path):
+                        try:
+                            os.remove(tmp)
+                        except OSError:
+                            pass
+        finally:
+            browser.close()
 
     log(f"  draw_thumbnail: تم إنشاء {len(output_paths)} صورة مصغرة")
     return output_paths
