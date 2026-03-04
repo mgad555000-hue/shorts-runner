@@ -1917,6 +1917,184 @@ def action_split_script(step, ctx):
     return "\n\n".join(result_parts)
 
 
+# ========== Thumbnail Generation ==========
+
+THUMBNAILS_CONFIG_PATH = "/app/data/thumbnails/thumbnails_config.json"
+THUMBNAILS_TEMPLATES_DIR = "/app/data/thumbnails/templates"
+
+def _generate_thumbnail_html(template_config, bg_path, texts):
+    """Generate HTML for a single thumbnail."""
+    text_areas = template_config["text_areas"]
+
+    # Build CSS and divs for each text area
+    text_css = ""
+    text_divs = ""
+    for i, area in enumerate(text_areas):
+        cx, cy = area["center"]
+        w, h = area["size"]
+        angle = area["angle"]
+        color = area["color"]
+        left = cx - w / 2
+        top = cy - h / 2
+        text = texts[i] if i < len(texts) else ""
+
+        text_css += f"""
+  .text-{i+1} {{
+    left: {left}px; top: {top}px;
+    width: {w}px; height: {h}px;
+    transform: rotate({angle}deg);
+    color: {color};
+  }}
+"""
+        text_divs += f'    <div class="text-area text-{i+1}">{text}</div>\n'
+
+    return f"""<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head><meta charset="UTF-8">
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ width: 1280px; height: 720px; overflow: hidden; }}
+  .container {{
+    position: relative; width: 1280px; height: 720px;
+    background-image: url('file://{bg_path}');
+    background-size: 1280px 720px; background-repeat: no-repeat;
+  }}
+  .text-area {{
+    position: absolute; display: flex; align-items: center;
+    justify-content: center; text-align: center;
+    font-family: 'Arial', sans-serif; font-weight: bold;
+    direction: rtl; line-height: 1.0; overflow: hidden;
+    padding: 5px 20px; white-space: nowrap;
+  }}
+{text_css}
+</style></head>
+<body>
+  <div class="container">
+{text_divs}  </div>
+  <script>
+    function autoFit(el) {{
+      let size = 120;
+      el.style.fontSize = size + 'px';
+      while ((el.scrollWidth > el.clientWidth || el.scrollHeight > el.clientHeight) && size > 20) {{
+        size -= 2;
+        el.style.fontSize = size + 'px';
+      }}
+    }}
+    document.querySelectorAll('.text-area').forEach(autoFit);
+  </script>
+</body></html>"""
+
+
+def action_draw_thumbnail(step, ctx):
+    """رسم صور مصغرة (thumbnails) باستخدام Playwright — round-robin على 12 تمبليت"""
+    from playwright.sync_api import sync_playwright
+    from PIL import Image
+
+    text_content = str(ctx.resolve(step["input"]))
+    save_prefix = step.get("save_prefix", "thumbnail")
+
+    # Load config
+    config_path = step.get("config_path", THUMBNAILS_CONFIG_PATH)
+    templates_dir = step.get("templates_dir", THUMBNAILS_TEMPLATES_DIR)
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    template_ids = sorted(config.keys(), key=int)
+    total_templates = len(template_ids)
+
+    # Parse texts into groups of 3 lines each
+    entries = []
+    import re as _re
+
+    # Method 1: MG Ranner markers <<<SCRIPT_N>>> or <<<THUMB_N>>>
+    marker_pattern = _re.compile(r'<<<(?:SCRIPT|THUMB)_\d+>>>(.*?)<<<END_(?:SCRIPT|THUMB)>>>', _re.DOTALL)
+    matches = marker_pattern.findall(text_content)
+
+    if matches:
+        for m in matches:
+            lines = [l.strip() for l in m.strip().split('\n') if l.strip()]
+            if lines:
+                entries.append(lines)
+    else:
+        # Method 2: "Script NNNN" headers (from thumbnail_texts.docx)
+        all_lines = [l.strip() for l in text_content.split('\n') if l.strip()]
+        script_header = _re.compile(r'^Script\s+\d+', _re.IGNORECASE)
+        current = []
+        for line in all_lines:
+            if script_header.match(line):
+                if current:
+                    entries.append(current)
+                current = []
+            else:
+                current.append(line)
+        if current:
+            entries.append(current)
+
+    # Fallback: group every 3 non-empty lines
+    if not entries:
+        all_lines = [l.strip() for l in text_content.split('\n') if l.strip()]
+        for i in range(0, len(all_lines), 3):
+            group = all_lines[i:i+3]
+            if group:
+                entries.append(group)
+
+    if not entries:
+        log("  draw_thumbnail: لا توجد نصوص للمعالجة")
+        return []
+
+    log(f"  draw_thumbnail: {len(entries)} صورة مصغرة × {total_templates} تمبليت (round-robin)")
+
+    output_paths = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+
+        for i, entry_texts in enumerate(entries):
+            tid = template_ids[i % total_templates]
+            bg_path = os.path.join(templates_dir, f"{tid}.png")
+
+            # Generate HTML
+            html = _generate_thumbnail_html(config[tid], bg_path, entry_texts)
+            temp_html = os.path.join(ctx.output_dir, f"_temp_{i}.html")
+            with open(temp_html, "w", encoding="utf-8") as f:
+                f.write(html)
+
+            # Render
+            page = browser.new_page(
+                viewport={"width": 1280, "height": 720},
+                device_scale_factor=2
+            )
+            page.goto(f"file://{temp_html}")
+            page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(300)
+
+            # Screenshot at 2x then resize to 1280x720
+            raw_path = os.path.join(ctx.output_dir, f"_raw_{i}.png")
+            page.screenshot(path=raw_path, type="png")
+            page.close()
+
+            # Resize to final 1280x720
+            img = Image.open(raw_path)
+            if img.size != (1280, 720):
+                img = img.resize((1280, 720), Image.LANCZOS)
+
+            output_name = f"{save_prefix}_{i+1}.png"
+            output_path = ctx.output_path(output_name)
+            img.save(output_path, format="PNG")
+
+            # Cleanup temp files
+            os.remove(temp_html)
+            os.remove(raw_path)
+
+            output_paths.append(output_path)
+            log(f"  [{i+1}/{len(entries)}] template {tid} → {output_name}")
+
+        browser.close()
+
+    log(f"  draw_thumbnail: تم إنشاء {len(output_paths)} صورة مصغرة")
+    return output_paths
+
+
 # ========== ACTIONS Registry ==========
 
 ACTIONS = {
@@ -1940,6 +2118,7 @@ ACTIONS = {
     "montage_short": action_montage_short,
     "remove_tashkeel": action_remove_tashkeel,
     "split_script": action_split_script,
+    "draw_thumbnail": action_draw_thumbnail,
 }
 
 # ========== REQUIRED_PARAMS ==========
@@ -1965,6 +2144,7 @@ REQUIRED_PARAMS = {
     "montage_short": ["input", "screen_texts"],
     "remove_tashkeel": ["input"],
     "split_script": ["input", "part"],
+    "draw_thumbnail": ["input"],
 }
 
 

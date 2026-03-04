@@ -1,0 +1,19 @@
+{
+  "name": "إنشاء صور مصغرة",
+  "description": "إنشاء صور مصغرة (thumbnails) من ملف جمل الشاشة — 12 تمبليت بالتناوب",
+  "steps": [
+    {
+      "id": "texts",
+      "action": "read_docx",
+      "file": "thumbnail_texts.docx",
+      "label": "قراءة جمل الشاشة"
+    },
+    {
+      "id": "thumbnails",
+      "action": "draw_thumbnail",
+      "input": "{texts}",
+      "save_prefix": "thumbnail",
+      "label": "إنشاء الصور المصغرة"
+    }
+  ]
+}

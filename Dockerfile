@@ -42,6 +42,11 @@ RUN pip install --no-cache-dir \
     arabic-reshaper \
     python-bidi
 
+# Playwright for thumbnail generation (high-quality Arabic text rendering)
+RUN pip install --no-cache-dir playwright \
+    && playwright install chromium \
+    && playwright install-deps chromium
+
 # تحميل خط عربي للعناوين
 RUN mkdir -p /app/fonts \
     && curl -sL 'https://github.com/google/fonts/raw/main/ofl/notokuficarabic/static/NotoKufiArabic-Bold.ttf' \
