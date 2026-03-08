@@ -22,6 +22,7 @@ services:
       - "D:/Ranner paython/ranner paython channel videos lists/Alhashab2000:/app/data/channels/Alhashab2000/videos:ro"
       - "D:/Ranner paython/ranner paython channel videos lists/My_Kidney:/app/data/channels/My_Kidney/videos:ro"
       - "D:/Ranner paython/ranner paython channel videos lists/Social_relations:/app/data/channels/Social_relations/videos:ro"
+      - "D:/Ranner paython/ranner paython channel videos lists/Gum_Arabic:/app/data/channels/Gum_Arabic/videos:ro"
     environment:
       - PYTHONUNBUFFERED=1
       - DATA_ROOT=/app/data
