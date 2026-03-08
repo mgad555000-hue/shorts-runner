@@ -462,9 +462,204 @@
             user-select: none;
         }
         .checkbox-label input { width: 16px; height: 16px; accent-color: var(--primary); }
+
+        /* ===== Login Screen ===== */
+        .login-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background: linear-gradient(135deg, var(--gray-900) 0%, #1a1a2e 50%, var(--gray-800) 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .login-overlay.hidden { display: none; }
+        .login-card {
+            background: white;
+            border-radius: 16px;
+            padding: 40px 36px;
+            width: 100%;
+            max-width: 380px;
+            box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25);
+            text-align: center;
+        }
+        .login-card h1 {
+            font-size: 28px;
+            font-weight: 800;
+            margin-bottom: 8px;
+            background: linear-gradient(135deg, var(--primary), #a855f7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .login-card .subtitle {
+            color: var(--gray-500);
+            font-size: 14px;
+            margin-bottom: 28px;
+        }
+        .login-card .form-group { text-align: right; }
+        .login-card input[type="text"], .login-card input[type="password"] {
+            width: 100%;
+            padding: 12px 14px;
+            border: 2px solid var(--gray-200);
+            border-radius: 10px;
+            font-size: 15px;
+            transition: border-color 0.2s;
+        }
+        .login-card input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(236,72,153,0.1);
+        }
+        .pin-dots {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin: 16px 0;
+        }
+        .pin-dot {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            border: 2px solid var(--gray-300);
+            transition: all 0.2s;
+        }
+        .pin-dot.filled {
+            background: var(--primary);
+            border-color: var(--primary);
+        }
+        .pin-pad {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            max-width: 260px;
+            margin: 0 auto 20px;
+        }
+        .pin-key {
+            padding: 14px;
+            font-size: 20px;
+            font-weight: 700;
+            border: none;
+            border-radius: 10px;
+            background: var(--gray-100);
+            cursor: pointer;
+            transition: all 0.15s;
+            color: var(--gray-800);
+        }
+        .pin-key:hover { background: var(--gray-200); }
+        .pin-key:active { transform: scale(0.95); background: var(--gray-300); }
+        .pin-key.backspace { font-size: 18px; color: var(--danger); }
+        .login-error {
+            color: var(--danger);
+            font-size: 13px;
+            margin-bottom: 12px;
+            min-height: 20px;
+        }
+
+        /* ===== User Info in Header ===== */
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 13px;
+        }
+        .user-badge {
+            background: rgba(236,72,153,0.2);
+            color: #ec4899;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .logout-btn {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: white;
+            padding: 6px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+        .logout-btn:hover { background: rgba(255,255,255,0.2); }
+
+        /* ===== Admin Panel ===== */
+        .user-card {
+            background: white;
+            padding: 16px;
+            margin-bottom: 8px;
+            border-radius: var(--radius);
+            border: 1px solid var(--gray-200);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .user-card-info { flex: 1; min-width: 200px; }
+        .user-card-info h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+        .user-card-info .meta { font-size: 12px; color: var(--gray-500); }
+        .admin-badge { background: #fef3c7; color: #92400e; }
+        .active-badge { background: #d1fae5; color: #065f46; }
+        .inactive-badge { background: #fee2e2; color: #991b1b; }
+        .perm-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 8px;
+            margin: 16px 0;
+        }
+        .perm-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            background: var(--gray-50);
+            border-radius: 8px;
+            border: 2px solid var(--gray-200);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .perm-item:hover { border-color: var(--primary); }
+        .perm-item.selected { border-color: var(--primary); background: #fdf2f8; }
+        .perm-item input { accent-color: var(--primary); width: 16px; height: 16px; }
     </style>
 </head>
 <body>
+
+<!-- Login Screen -->
+<div id="loginScreen" class="login-overlay">
+    <div class="login-card">
+        <h1>MG Ranner</h1>
+        <div class="subtitle">سجّل دخولك للمتابعة</div>
+        <div class="form-group">
+            <label class="form-label">اسم المستخدم</label>
+            <input type="text" id="loginUsername" placeholder="admin" autocomplete="username">
+        </div>
+        <div class="form-label" style="margin-top:16px;">رمز PIN</div>
+        <div class="pin-dots">
+            <div class="pin-dot" id="dot0"></div>
+            <div class="pin-dot" id="dot1"></div>
+            <div class="pin-dot" id="dot2"></div>
+            <div class="pin-dot" id="dot3"></div>
+        </div>
+        <input type="hidden" id="loginPin" value="">
+        <div class="pin-pad">
+            <button class="pin-key" onclick="pinPress('1')">1</button>
+            <button class="pin-key" onclick="pinPress('2')">2</button>
+            <button class="pin-key" onclick="pinPress('3')">3</button>
+            <button class="pin-key" onclick="pinPress('4')">4</button>
+            <button class="pin-key" onclick="pinPress('5')">5</button>
+            <button class="pin-key" onclick="pinPress('6')">6</button>
+            <button class="pin-key" onclick="pinPress('7')">7</button>
+            <button class="pin-key" onclick="pinPress('8')">8</button>
+            <button class="pin-key" onclick="pinPress('9')">9</button>
+            <button class="pin-key" style="visibility:hidden"></button>
+            <button class="pin-key" onclick="pinPress('0')">0</button>
+            <button class="pin-key backspace" onclick="pinBack()">&#9003;</button>
+        </div>
+        <div id="loginError" class="login-error"></div>
+        <button class="btn btn-primary" style="width:100%; padding:14px; font-size:16px;" onclick="doLogin()">دخول</button>
+    </div>
+</div>
 
 <!-- Header -->
 <div class="header">
@@ -474,6 +669,11 @@
             <div class="header-stat"><span class="stat-dot total"></span> <span id="statTotal">-</span> اجمالي</div>
             <div class="header-stat"><span class="stat-dot running"></span> <span id="statRunning">-</span> جاري</div>
             <div class="header-stat"><span class="stat-dot completed"></span> <span id="statCompleted">-</span> مكتمل</div>
+        </div>
+        <div class="user-info" id="userInfo" style="display:none;">
+            <span id="userDisplayName"></span>
+            <span class="user-badge" id="userRoleBadge" style="display:none;">مدير</span>
+            <button class="logout-btn" onclick="doLogout()">خروج</button>
         </div>
     </div>
 </div>
@@ -491,6 +691,7 @@
         <button class="tab" data-tab="recipes">الوصفات</button>
         <button class="tab" data-tab="runs">السجلات</button>
         <button class="tab" data-tab="stats">احصائيات</button>
+        <button class="tab admin-only" data-tab="users" style="display:none;">ادارة المستخدمين</button>
     </div>
 
     <!-- ===== Runner Tab ===== -->
@@ -622,7 +823,7 @@
         <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
                 <div class="card-title" style="margin:0;">الوصفات المحفوظة</div>
-                <div class="btn-group">
+                <div class="btn-group admin-only" style="display:none;">
                     <button class="btn btn-primary btn-sm" onclick="showRecipeModal()">+ وصفة جديدة</button>
                     <button class="btn btn-ghost btn-sm" onclick="showFolderModal()">+ قناة جديدة</button>
                     <button class="btn btn-success btn-sm" onclick="createAllFolders()">انشاء مجلدات الوصفات</button>
@@ -657,6 +858,74 @@
     <div id="stats" class="tab-content">
         <div id="statsContent"></div>
     </div>
+
+    <!-- ===== Users Tab (Admin Only) ===== -->
+    <div id="users" class="tab-content">
+        <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
+                <div class="card-title" style="margin:0;">ادارة المستخدمين</div>
+                <button class="btn btn-primary btn-sm" onclick="showNewUserModal()">+ مستخدم جديد</button>
+            </div>
+            <div id="usersList"></div>
+        </div>
+    </div>
+
+</div><!-- end container -->
+
+<!-- New/Edit User Modal -->
+<div id="userModal" class="modal-overlay">
+    <div class="modal" style="max-width:450px;">
+        <div class="modal-header">
+            <h2 id="userModalTitle">مستخدم جديد</h2>
+            <button class="close-btn" onclick="closeUserModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label class="form-label">اسم المستخدم (بالإنجليزي)</label>
+                <input type="text" id="modalUserUsername" placeholder="ahmed" style="direction:ltr;">
+            </div>
+            <div class="form-group">
+                <label class="form-label">الاسم المعروض</label>
+                <input type="text" id="modalUserDisplay" placeholder="أحمد">
+            </div>
+            <div class="form-group">
+                <label class="form-label">رمز PIN (4 أرقام)</label>
+                <input type="text" id="modalUserPin" maxlength="4" placeholder="1234" style="direction:ltr; text-align:center; letter-spacing:12px; font-size:20px;">
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="modalUserAdmin">
+                    صلاحيات مدير
+                </label>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" onclick="saveUser()">حفظ</button>
+            <button class="btn btn-ghost" onclick="closeUserModal()">الغاء</button>
+        </div>
+    </div>
+</div>
+
+<!-- Permissions Modal -->
+<div id="permModal" class="modal-overlay">
+    <div class="modal" style="max-width:600px;">
+        <div class="modal-header">
+            <h2 id="permModalTitle">صلاحيات المستخدم</h2>
+            <button class="close-btn" onclick="closePermModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div style="display:flex; gap:8px; margin-bottom:16px;">
+                <button class="btn btn-ghost btn-sm" onclick="selectAllPerms()">تحديد الكل</button>
+                <button class="btn btn-ghost btn-sm" onclick="deselectAllPerms()">إلغاء الكل</button>
+            </div>
+            <div id="permGrid" class="perm-grid"></div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" onclick="savePermissions()">حفظ الصلاحيات</button>
+            <button class="btn btn-ghost" onclick="closePermModal()">الغاء</button>
+        </div>
+    </div>
+</div>
 
 <!-- Settings Modal -->
 <div id="settingsModal" class="modal-overlay">
@@ -776,6 +1045,113 @@ const API = '/api/utilities';
 let currentRecipeId = null;
 let allRecipes = [];
 let refreshInterval = null;
+let currentUser = null;
+let authToken = localStorage.getItem('auth_token');
+let editingUserId = null;
+let permUserId = null;
+
+// ===== Auth Fetch Wrapper =====
+async function authFetch(url, options = {}) {
+    if (!options.headers) options.headers = {};
+    if (authToken) {
+        options.headers['Authorization'] = 'Bearer ' + authToken;
+    }
+    const res = await fetch(url, options);
+    if (res.status === 401) {
+        doLogout();
+        throw new Error('جلسة منتهية');
+    }
+    return res;
+}
+
+// ===== PIN Login =====
+function pinPress(n) {
+    const pin = document.getElementById('loginPin');
+    if (pin.value.length < 4) {
+        pin.value += n;
+        updatePinDots();
+        if (pin.value.length === 4) {
+            setTimeout(doLogin, 200);
+        }
+    }
+}
+function pinBack() {
+    const pin = document.getElementById('loginPin');
+    pin.value = pin.value.slice(0, -1);
+    updatePinDots();
+}
+function updatePinDots() {
+    const len = document.getElementById('loginPin').value.length;
+    for (let i = 0; i < 4; i++) {
+        document.getElementById('dot' + i).classList.toggle('filled', i < len);
+    }
+}
+async function doLogin() {
+    const username = document.getElementById('loginUsername').value.trim();
+    const pin = document.getElementById('loginPin').value;
+    const errEl = document.getElementById('loginError');
+    if (!username) { errEl.textContent = 'ادخل اسم المستخدم'; return; }
+    if (pin.length !== 4) { errEl.textContent = 'الرمز لازم 4 أرقام'; return; }
+    errEl.textContent = '';
+    try {
+        const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({username, pin})
+        });
+        if (!res.ok) {
+            const d = await res.json();
+            errEl.textContent = d.detail || 'خطأ في الدخول';
+            document.getElementById('loginPin').value = '';
+            updatePinDots();
+            return;
+        }
+        const data = await res.json();
+        authToken = data.token;
+        localStorage.setItem('auth_token', authToken);
+        currentUser = data;
+        showApp();
+    } catch(e) {
+        errEl.textContent = 'خطأ في الاتصال';
+    }
+}
+function doLogout() {
+    authToken = null;
+    currentUser = null;
+    localStorage.removeItem('auth_token');
+    document.getElementById('loginScreen').classList.remove('hidden');
+    document.getElementById('loginPin').value = '';
+    updatePinDots();
+    document.getElementById('loginError').textContent = '';
+}
+async function checkAuth() {
+    if (!authToken) return false;
+    try {
+        const res = await fetch('/api/auth/me', {
+            headers: {'Authorization': 'Bearer ' + authToken}
+        });
+        if (!res.ok) return false;
+        currentUser = await res.json();
+        return true;
+    } catch(e) { return false; }
+}
+function showApp() {
+    document.getElementById('loginScreen').classList.add('hidden');
+    // Show user info
+    document.getElementById('userInfo').style.display = 'flex';
+    document.getElementById('userDisplayName').textContent = currentUser.display_name;
+    if (currentUser.is_admin) {
+        document.getElementById('userRoleBadge').style.display = 'inline-flex';
+        // Show admin elements
+        document.querySelectorAll('.admin-only').forEach(el => el.style.display = '');
+    } else {
+        document.getElementById('userRoleBadge').style.display = 'none';
+        document.querySelectorAll('.admin-only').forEach(el => el.style.display = 'none');
+    }
+    loadFolders();
+    loadRecipes();
+    loadHeaderStats();
+}
 
 // ===== Tabs =====
 document.querySelectorAll('.tab').forEach(tab => {
@@ -787,6 +1163,7 @@ document.querySelectorAll('.tab').forEach(tab => {
         if (tab.dataset.tab === 'recipes') loadRecipes();
         if (tab.dataset.tab === 'runs') loadRuns();
         if (tab.dataset.tab === 'stats') loadStats();
+        if (tab.dataset.tab === 'users') loadUsers();
     });
 });
 
@@ -811,7 +1188,7 @@ function statusBadge(status) {
         cancelled: ['badge-cancelled', 'ملغي']
     };
     const [cls, txt] = map[status] || ['badge-pending', status];
-    return `<span class="badge ${cls}">${txt}</span>`;
+    return `<span class="badge ${cls}">${esc(txt)}</span>`;
 }
 
 // ===== Format Time =====
@@ -836,7 +1213,7 @@ function formatSize(bytes) {
 // ===== Load Header Stats =====
 async function loadHeaderStats() {
     try {
-        const res = await fetch(`${API}/stats`);
+        const res = await authFetch(`${API}/stats`);
         const data = await res.json();
         document.getElementById('statTotal').textContent = data.total_runs || 0;
         document.getElementById('statRunning').textContent = data.running_runs || 0;
@@ -850,7 +1227,7 @@ async function loadHeaderStats() {
 // ===== Load Folders =====
 async function loadFolders() {
     try {
-        const res = await fetch(`${API}/paths`);
+        const res = await authFetch(`${API}/paths`);
         const data = await res.json();
         const folders = data.available_folders || [];
 
@@ -872,15 +1249,19 @@ async function loadRecipes(filterType) {
     try {
         let url = `${API}/recipes`;
         if (filterType) url += `?recipe_type=${filterType}`;
-        const res = await fetch(url);
+        const res = await authFetch(url);
         const recipes = await res.json();
         if (!filterType) allRecipes = recipes;
 
-        // Update recipe select in Runner tab
+        // Update recipe select in Runner tab (filter by permission for non-admin)
         const sel = document.getElementById('recipeSelect');
         const val = sel.value;
         sel.innerHTML = '<option value="">-- كتابة كود يدوي --</option>';
-        const displayRecipes = filterType ? recipes : allRecipes;
+        let displayRecipes = filterType ? recipes : allRecipes;
+        if (currentUser && !currentUser.is_admin && currentUser.recipe_ids) {
+            const allowed = new Set(currentUser.recipe_ids);
+            displayRecipes = displayRecipes.filter(r => allowed.has(r.id));
+        }
         displayRecipes.forEach(r => {
             const opt = document.createElement('option');
             opt.value = r.id; opt.textContent = r.name;
@@ -908,11 +1289,11 @@ async function loadRecipes(filterType) {
             <div class="list-item" onclick="loadRecipeToRunner(${r.id})">
                 <div class="list-item-header">
                     <h3>${esc(r.name)} ${typeBadge(r.recipe_type)}</h3>
-                    <div class="btn-group" onclick="event.stopPropagation()">
+                    ${currentUser && currentUser.is_admin ? `<div class="btn-group" onclick="event.stopPropagation()">
                         <button class="btn btn-ghost btn-sm" onclick="editRecipe(${r.id})">تعديل</button>
                         ${!r.input_folder ? `<button class="btn btn-success btn-sm" onclick="createRecipeFolder(${r.id})">+ مجلد</button>` : ''}
                         <button class="btn btn-danger btn-sm" onclick="deleteRecipe(${r.id})">حذف</button>
-                    </div>
+                    </div>` : ''}
                 </div>
                 <div class="meta">
                     <span class="meta-item">${formatDate(r.created_at)}</span>
@@ -979,7 +1360,7 @@ async function runCode() {
         const topicIds = collectTopicIds();
         if (topicIds.length > 0) body.topic_ids = topicIds;
 
-        const res = await fetch(`${API}/runs`, {
+        const res = await authFetch(`${API}/runs`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(body)
@@ -997,7 +1378,7 @@ async function runCode() {
         if (document.getElementById('saveAsRecipe').checked) {
             const name = document.getElementById('recipeName').value.trim();
             if (name) {
-                await fetch(`${API}/recipes`, {
+                await authFetch(`${API}/recipes`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({name, code, description: ''})
@@ -1032,9 +1413,9 @@ async function showRunDetailInline(runId) {
 async function refreshRunDetail(runId) {
     try {
         const [runRes, logRes, filesRes] = await Promise.all([
-            fetch(`${API}/runs/${runId}`).then(r => r.json()),
-            fetch(`${API}/runs/${runId}/log`).then(r => r.json()).catch(() => ({log:''})),
-            fetch(`${API}/runs/${runId}/files`).then(r => r.json()).catch(() => ({files:[]}))
+            authFetch(`${API}/runs/${runId}`).then(r => r.json()),
+            authFetch(`${API}/runs/${runId}/log`).then(r => r.json()).catch(() => ({log:''})),
+            authFetch(`${API}/runs/${runId}/files`).then(r => r.json()).catch(() => ({files:[]}))
         ]);
 
         const run = runRes;
@@ -1058,16 +1439,16 @@ function renderRunDetail(run, log, files) {
         <div class="detail-panel">
             <div class="detail-header">
                 <div>
-                    <strong>${run.recipe_name || 'تشغيل يدوي'}</strong>
+                    <strong>${esc(run.recipe_name) || 'تشغيل يدوي'}</strong>
                     <span style="opacity:0.7; font-size:12px; margin-right:8px;">${run.run_id.substring(0,8)}...</span>
                 </div>
                 <div style="display:flex; gap:8px; align-items:center;">
                     ${statusBadge(run.status)}
                     ${run.status === 'running' || run.status === 'pending' ?
-                        `<button class="btn btn-danger btn-sm" onclick="cancelRun('${run.run_id}')">الغاء</button>` : ''}
+                        `<button class="btn btn-danger btn-sm" onclick="cancelRun('${escJs(run.run_id)}')">الغاء</button>` : ''}
                     ${['completed','failed'].includes(run.status) ?
-                        `<button class="btn btn-success btn-sm" onclick="downloadZip('${run.run_id}')">تنزيل ZIP</button>
-                         <button class="btn btn-ghost btn-sm" onclick="openOutputFolder('${run.input_folder}','${run.recipe_name || ''}')">مجلد المخرجات</button>` : ''}
+                        `<button class="btn btn-success btn-sm" onclick="downloadZip('${escJs(run.run_id)}')">تنزيل ZIP</button>
+                         <button class="btn btn-ghost btn-sm" onclick="openOutputFolder('${escJs(run.input_folder)}','${escJs(run.recipe_name || '')}')">مجلد المخرجات</button>` : ''}
                 </div>
             </div>
             <div class="detail-body">
@@ -1101,7 +1482,7 @@ function renderRunDetail(run, log, files) {
                     <div class="form-label">الملفات (${files.length})</div>
                     ${files.map(f => `
                         <div class="file-item">
-                            <a href="${f.path}" target="_blank" class="file-name">${esc(f.name)}</a>
+                            <a href="${esc(f.path)}" target="_blank" class="file-name">${esc(f.name)}</a>
                             <span class="file-size">${formatSize(f.size)}</span>
                         </div>
                     `).join('')}
@@ -1118,7 +1499,7 @@ async function loadRuns() {
         let url = `${API}/runs?limit=50`;
         if (status) url += `&status=${status}`;
 
-        const res = await fetch(url);
+        const res = await authFetch(url);
         const runs = await res.json();
         const list = document.getElementById('runsList');
 
@@ -1128,9 +1509,9 @@ async function loadRuns() {
         }
 
         list.innerHTML = runs.map(run => `
-            <div class="list-item" onclick="showRunDetailModal('${run.run_id}')">
+            <div class="list-item" onclick="showRunDetailModal('${escJs(run.run_id)}')">
                 <div class="list-item-header">
-                    <h3>${run.recipe_name || 'تشغيل يدوي'} <span style="color:var(--gray-400); font-size:12px;">${run.run_id.substring(0,8)}</span></h3>
+                    <h3>${esc(run.recipe_name) || 'تشغيل يدوي'} <span style="color:var(--gray-400); font-size:12px;">${run.run_id.substring(0,8)}</span></h3>
                     <div style="display:flex; gap:6px; align-items:center;">
                         ${statusBadge(run.status)}
                         ${run.execution_time_ms ? `<span style="font-size:12px; color:var(--gray-400);">${formatTime(run.execution_time_ms)}</span>` : ''}
@@ -1155,13 +1536,13 @@ async function showRunDetailModal(runId) {
 
     try {
         const [runRes, logRes, filesRes] = await Promise.all([
-            fetch(`${API}/runs/${runId}`).then(r => r.json()),
-            fetch(`${API}/runs/${runId}/log`).then(r => r.json()).catch(() => ({log:''})),
-            fetch(`${API}/runs/${runId}/files`).then(r => r.json()).catch(() => ({files:[]}))
+            authFetch(`${API}/runs/${runId}`).then(r => r.json()),
+            authFetch(`${API}/runs/${runId}/log`).then(r => r.json()).catch(() => ({log:''})),
+            authFetch(`${API}/runs/${runId}/files`).then(r => r.json()).catch(() => ({files:[]}))
         ]);
         content.innerHTML = renderRunDetail(runRes, logRes.log || '', filesRes.files || []);
     } catch(e) {
-        content.innerHTML = `<div class="alert alert-error active">${e.message}</div>`;
+        content.innerHTML = `<div class="alert alert-error active">${esc(e.message)}</div>`;
     }
 }
 function closeRunDetailModal() { document.getElementById('runDetailModal').classList.remove('active'); }
@@ -1170,7 +1551,7 @@ function closeRunDetailModal() { document.getElementById('runDetailModal').class
 async function cancelRun(runId) {
     if (!confirm('هل تريد الغاء التشغيل؟')) return;
     try {
-        const res = await fetch(`${API}/runs/${runId}/cancel`, { method: 'POST' });
+        const res = await authFetch(`${API}/runs/${runId}/cancel`, { method: 'POST' });
         const data = await res.json();
         showAlert(data.success ? 'success' : 'error', data.message);
         loadHeaderStats();
@@ -1178,15 +1559,24 @@ async function cancelRun(runId) {
 }
 
 // ===== Download ZIP =====
-function downloadZip(runId) {
-    window.open(`${API}/runs/${runId}/download`, '_blank');
+async function downloadZip(runId) {
+    try {
+        const res = await authFetch(`${API}/runs/${runId}/download`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `run_${runId.substring(0,8)}.zip`;
+        a.click();
+        URL.revokeObjectURL(url);
+    } catch(e) { showAlert('error', e.message); }
 }
 
 // ===== Delete Run =====
 async function deleteRun(runId) {
     if (!confirm('هل تريد حذف هذا التشغيل؟')) return;
     try {
-        await fetch(`${API}/runs/${runId}`, { method: 'DELETE' });
+        await authFetch(`${API}/runs/${runId}`, { method: 'DELETE' });
         showAlert('success', 'تم الحذف');
         loadRuns();
         loadHeaderStats();
@@ -1212,7 +1602,7 @@ function closeRecipeModal() { document.getElementById('recipeModal').classList.r
 
 async function editRecipe(id) {
     try {
-        const res = await fetch(`${API}/recipes/${id}`);
+        const res = await authFetch(`${API}/recipes/${id}`);
         const recipe = await res.json();
         showRecipeModal(recipe);
     } catch(e) { showAlert('error', e.message); }
@@ -1230,7 +1620,7 @@ async function saveRecipe() {
     try {
         const url = currentRecipeId ? `${API}/recipes/${currentRecipeId}` : `${API}/recipes`;
         const method = currentRecipeId ? 'PUT' : 'POST';
-        const res = await fetch(url, {
+        const res = await authFetch(url, {
             method, headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ name, description: desc, code, input_folder: input_folder || null, recipe_type })
         });
@@ -1244,7 +1634,7 @@ async function saveRecipe() {
 async function deleteRecipe(id) {
     if (!confirm('هل تريد حذف الوصفة؟')) return;
     try {
-        await fetch(`${API}/recipes/${id}`, { method: 'DELETE' });
+        await authFetch(`${API}/recipes/${id}`, { method: 'DELETE' });
         showAlert('success', 'تم حذف الوصفة');
         loadRecipes();
     } catch(e) { showAlert('error', e.message); }
@@ -1252,7 +1642,7 @@ async function deleteRecipe(id) {
 
 async function createRecipeFolder(id) {
     try {
-        const res = await fetch(`${API}/recipes/${id}/create-folder`, { method: 'POST' });
+        const res = await authFetch(`${API}/recipes/${id}/create-folder`, { method: 'POST' });
         const result = await res.json();
         if (res.ok) { showAlert('success', `تم انشاء المجلد: ${result.folder}`); loadRecipes(); loadFolders(); }
         else showAlert('error', result.detail);
@@ -1262,7 +1652,7 @@ async function createRecipeFolder(id) {
 async function createAllFolders() {
     if (!confirm('انشاء مجلدات لكل الوصفات؟')) return;
     try {
-        const res = await fetch(`${API}/create-all-recipe-folders`, { method: 'POST' });
+        const res = await authFetch(`${API}/create-all-recipe-folders`, { method: 'POST' });
         const result = await res.json();
         showAlert('success', `تم انشاء ${result.summary.folders_created} مجلد (${result.summary.recipes} وصفة × ${result.summary.channels} قناة)`);
         loadRecipes(); loadFolders();
@@ -1277,7 +1667,7 @@ async function createNewFolder() {
     const name = document.getElementById('newFolderName').value.trim();
     if (!name) return showAlert('error', 'ادخل اسم القناة');
     try {
-        const res = await fetch(`${API}/folders?folder_name=${encodeURIComponent(name)}`, { method: 'POST' });
+        const res = await authFetch(`${API}/folders?folder_name=${encodeURIComponent(name)}`, { method: 'POST' });
         const result = await res.json();
         if (res.ok) { showAlert('success', result.message); closeFolderModal(); loadFolders(); }
         else showAlert('error', result.detail);
@@ -1289,7 +1679,7 @@ async function createFolderForRecipe() {
     if (!name) return showAlert('error', 'ادخل اسم الوصفة اولا');
     const folderName = name.replace(/[^a-zA-Z0-9\u0600-\u06FF\s\-_.]/g, '').replace(/\s+/g, '_');
     try {
-        const res = await fetch(`${API}/folders?folder_name=${encodeURIComponent(folderName)}`, { method: 'POST' });
+        const res = await authFetch(`${API}/folders?folder_name=${encodeURIComponent(folderName)}`, { method: 'POST' });
         const result = await res.json();
         if (res.ok) {
             await loadFolders();
@@ -1303,7 +1693,7 @@ function closeSettingsModal() { document.getElementById('settingsModal').classLi
 
 async function openSettingsModal() {
     try {
-        const res = await fetch(`${API}/settings`);
+        const res = await authFetch(`${API}/settings`);
         const s = await res.json();
         document.getElementById('setMaxConcurrent').value = s.max_concurrent_runs || 2;
         document.getElementById('setTimeout').value = s.timeout_seconds || 3600;
@@ -1323,7 +1713,7 @@ async function saveSettings() {
             cleanup_max_age_days: parseInt(document.getElementById('setCleanupDays').value),
             cleanup_keep_last_n: parseInt(document.getElementById('setKeepLastN').value)
         };
-        const res = await fetch(`${API}/settings`, {
+        const res = await authFetch(`${API}/settings`, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(body)
@@ -1339,14 +1729,14 @@ async function saveSettings() {
 // ===== Stats =====
 async function loadStats() {
     try {
-        const res = await fetch(`${API}/stats`);
+        const res = await authFetch(`${API}/stats`);
         const s = await res.json();
         document.getElementById('statsContent').innerHTML = `
             ${s.mock_mode ? '<div class="alert alert-info active" style="margin-bottom:12px;">وضع المحاكاة (Mock Mode) مفعل - لا يتم تشغيل الكود فعليا</div>' : ''}
             <div class="card">
                 <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:16px;">
                     <div class="card-title" style="margin:0;">احصائيات النظام</div>
-                    <button class="btn btn-ghost btn-sm" onclick="openSettingsModal()">الاعدادات</button>
+                    ${currentUser && currentUser.is_admin ? '<button class="btn btn-ghost btn-sm" onclick="openSettingsModal()">الاعدادات</button>' : ''}
                 </div>
                 <div class="detail-grid">
                     <div class="detail-field">
@@ -1385,13 +1775,13 @@ async function loadStats() {
                     </div>
                 </div>
             </div>
-            <div class="card">
+            ${currentUser && currentUser.is_admin ? `<div class="card">
                 <div class="card-title">تنظيف يدوي</div>
                 <p style="color:var(--gray-500); font-size:14px; margin-bottom:12px;">حذف التشغيلات القديمة وتحرير المساحة</p>
                 <div class="btn-group">
                     <button class="btn btn-danger" onclick="manualCleanup()">تنظيف الان</button>
                 </div>
-            </div>
+            </div>` : ''}
         `;
     } catch(e) { console.error('Load stats error:', e); }
 }
@@ -1399,7 +1789,7 @@ async function loadStats() {
 async function manualCleanup() {
     if (!confirm('سيتم حذف التشغيلات القديمة. متابعة؟')) return;
     try {
-        const res = await fetch(`${API}/cleanup`, { method: 'POST' });
+        const res = await authFetch(`${API}/cleanup`, { method: 'POST' });
         const data = await res.json();
         showAlert('success', `تم حذف ${data.deleted_runs} تشغيل، تحرير ${data.freed_space_mb.toFixed(2)} MB`);
         loadStats();
@@ -1429,7 +1819,7 @@ function dockerToLocal(dockerPath) {
 async function openFolder(dockerPath) {
     const localPath = dockerToLocal(dockerPath);
     // إنشاء المجلد على السيرفر
-    await fetch(`/api/open-folder?docker_path=${encodeURIComponent(dockerPath)}`, {method:'POST'}).catch(()=>{});
+    await authFetch(`/api/open-folder?docker_path=${encodeURIComponent(dockerPath)}`, {method:'POST'}).catch(()=>{});
     // محاولة فتح المجلد عن طريق الـ helper (port 8002)
     try {
         const res = await fetch(`http://127.0.0.1:8002/open?path=${encodeURIComponent(localPath)}`, {signal: AbortSignal.timeout(2000)});
@@ -1452,7 +1842,7 @@ async function openInputFolder() {
     const recipe = allRecipes.find(r => r.id == recipeId);
     if (!recipe) return;
     try {
-        const res = await fetch(`${API.replace('utilities','channels')}/${channel}/recipe-path/${encodeURIComponent(recipe.name)}`);
+        const res = await authFetch(`${API.replace('utilities','channels')}/${channel}/recipe-path/${encodeURIComponent(recipe.name)}`);
         const data = await res.json();
         await openFolder(data.input_path);
     } catch(e) { showAlert('error', e.message); }
@@ -1460,7 +1850,7 @@ async function openInputFolder() {
 
 async function openOutputFolder(channel, recipeName) {
     try {
-        const res = await fetch(`${API.replace('utilities','channels')}/${channel}/recipe-path/${encodeURIComponent(recipeName)}`);
+        const res = await authFetch(`${API.replace('utilities','channels')}/${channel}/recipe-path/${encodeURIComponent(recipeName)}`);
         const data = await res.json();
         await openFolder(data.output_path);
     } catch(e) { showAlert('error', e.message); }
@@ -1471,6 +1861,10 @@ function esc(str) {
     const d = document.createElement('div');
     d.textContent = str;
     return d.innerHTML;
+}
+function escJs(str) {
+    if (!str) return '';
+    return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/</g, '\\x3c').replace(/>/g, '\\x3e');
 }
 
 // Close modals on backdrop click
@@ -1567,12 +1961,185 @@ function collectTopicIds() {
     return Array.from(ids).sort((a, b) => a - b);
 }
 
+// ===== Admin: User Management =====
+async function loadUsers() {
+    try {
+        const res = await authFetch('/api/admin/users');
+        const users = await res.json();
+        const list = document.getElementById('usersList');
+        if (users.length === 0) {
+            list.innerHTML = '<div class="empty-state"><div class="empty-state-text">لا يوجد مستخدمين</div></div>';
+            return;
+        }
+        list.innerHTML = users.map(u => `
+            <div class="user-card">
+                <div class="user-card-info">
+                    <h3>${esc(u.display_name)} <span style="color:var(--gray-400); font-size:12px;">@${esc(u.username)}</span></h3>
+                    <div class="meta">
+                        ${u.is_admin ? '<span class="badge admin-badge">مدير</span>' : '<span class="badge" style="background:#dbeafe;color:#1e40af;">مستخدم</span>'}
+                        ${u.is_active ? '<span class="badge active-badge">نشط</span>' : '<span class="badge inactive-badge">معطل</span>'}
+                        <span class="meta-item">وصفات: ${u.recipe_ids.length}</span>
+                        <span class="meta-item">${formatDate(u.created_at)}</span>
+                    </div>
+                </div>
+                <div class="btn-group">
+                    <button class="btn btn-ghost btn-sm" onclick="editUser(${u.id})">تعديل</button>
+                    <button class="btn btn-primary btn-sm" onclick="showPermModal(${u.id}, '${escJs(u.display_name)}')">الصلاحيات</button>
+                    ${u.is_active ?
+                        `<button class="btn btn-ghost btn-sm" onclick="toggleUserActive(${u.id}, false)">تعطيل</button>` :
+                        `<button class="btn btn-success btn-sm" onclick="toggleUserActive(${u.id}, true)">تفعيل</button>`}
+                    <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id})">حذف</button>
+                </div>
+            </div>
+        `).join('');
+    } catch(e) { console.error('Load users error:', e); }
+}
+
+function showNewUserModal() {
+    editingUserId = null;
+    document.getElementById('userModalTitle').textContent = 'مستخدم جديد';
+    document.getElementById('modalUserUsername').value = '';
+    document.getElementById('modalUserUsername').disabled = false;
+    document.getElementById('modalUserDisplay').value = '';
+    document.getElementById('modalUserPin').value = '';
+    document.getElementById('modalUserAdmin').checked = false;
+    document.getElementById('userModal').classList.add('active');
+}
+function closeUserModal() { document.getElementById('userModal').classList.remove('active'); }
+
+async function editUser(id) {
+    try {
+        const res = await authFetch('/api/admin/users');
+        const users = await res.json();
+        const u = users.find(x => x.id === id);
+        if (!u) return;
+        editingUserId = id;
+        document.getElementById('userModalTitle').textContent = 'تعديل: ' + u.display_name;
+        document.getElementById('modalUserUsername').value = u.username;
+        document.getElementById('modalUserUsername').disabled = true;
+        document.getElementById('modalUserDisplay').value = u.display_name;
+        document.getElementById('modalUserPin').value = '';
+        document.getElementById('modalUserAdmin').checked = u.is_admin;
+        document.getElementById('userModal').classList.add('active');
+    } catch(e) { showAlert('error', e.message); }
+}
+
+async function saveUser() {
+    const username = document.getElementById('modalUserUsername').value.trim();
+    const display_name = document.getElementById('modalUserDisplay').value.trim();
+    const pin = document.getElementById('modalUserPin').value;
+    const is_admin = document.getElementById('modalUserAdmin').checked;
+
+    if (!username || !display_name) return showAlert('error', 'الاسم والاسم المعروض مطلوبان');
+
+    try {
+        if (editingUserId) {
+            const body = { display_name, is_admin };
+            if (pin) body.pin = pin;
+            const res = await authFetch(`/api/admin/users/${editingUserId}`, {
+                method: 'PUT', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+            if (!res.ok) { const d = await res.json(); throw new Error(d.detail); }
+        } else {
+            if (!pin || pin.length !== 4) return showAlert('error', 'الرمز لازم 4 أرقام');
+            const res = await authFetch('/api/admin/users', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ username, display_name, pin, is_admin })
+            });
+            if (!res.ok) { const d = await res.json(); throw new Error(d.detail); }
+        }
+        closeUserModal();
+        showAlert('success', 'تم الحفظ');
+        loadUsers();
+    } catch(e) { showAlert('error', e.message); }
+}
+
+async function toggleUserActive(id, active) {
+    try {
+        const res = await authFetch(`/api/admin/users/${id}`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ is_active: active })
+        });
+        if (!res.ok) { const d = await res.json(); throw new Error(d.detail); }
+        showAlert('success', active ? 'تم التفعيل' : 'تم التعطيل');
+        loadUsers();
+    } catch(e) { showAlert('error', e.message); }
+}
+
+async function deleteUser(id) {
+    if (!confirm('هل تريد حذف هذا المستخدم؟')) return;
+    try {
+        const res = await authFetch(`/api/admin/users/${id}`, { method: 'DELETE' });
+        if (!res.ok) { const d = await res.json(); throw new Error(d.detail); }
+        showAlert('success', 'تم الحذف');
+        loadUsers();
+    } catch(e) { showAlert('error', e.message); }
+}
+
+// ===== Permissions =====
+function closePermModal() { document.getElementById('permModal').classList.remove('active'); }
+
+async function showPermModal(userId, displayName) {
+    permUserId = userId;
+    document.getElementById('permModalTitle').textContent = 'صلاحيات: ' + displayName;
+    const grid = document.getElementById('permGrid');
+    grid.innerHTML = '<span class="spinner spinner-dark"></span>';
+    document.getElementById('permModal').classList.add('active');
+
+    try {
+        const [permRes, recipesRes] = await Promise.all([
+            authFetch(`/api/admin/users/${userId}/permissions`).then(r => r.json()),
+            authFetch(`${API}/recipes`).then(r => r.json())
+        ]);
+        const allowed = new Set(permRes.recipe_ids);
+        grid.innerHTML = recipesRes.map(r => `
+            <label class="perm-item ${allowed.has(r.id) ? 'selected' : ''}" onclick="this.classList.toggle('selected')">
+                <input type="checkbox" value="${r.id}" ${allowed.has(r.id) ? 'checked' : ''}>
+                ${esc(r.name)}
+            </label>
+        `).join('');
+    } catch(e) { grid.innerHTML = '<div style="color:var(--danger);">خطأ في التحميل</div>'; }
+}
+
+function selectAllPerms() {
+    document.querySelectorAll('#permGrid .perm-item').forEach(el => {
+        el.classList.add('selected');
+        el.querySelector('input').checked = true;
+    });
+}
+function deselectAllPerms() {
+    document.querySelectorAll('#permGrid .perm-item').forEach(el => {
+        el.classList.remove('selected');
+        el.querySelector('input').checked = false;
+    });
+}
+
+async function savePermissions() {
+    const recipe_ids = [];
+    document.querySelectorAll('#permGrid input:checked').forEach(inp => {
+        recipe_ids.push(parseInt(inp.value));
+    });
+    try {
+        const res = await authFetch(`/api/admin/users/${permUserId}/permissions`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ recipe_ids })
+        });
+        if (!res.ok) { const d = await res.json(); throw new Error(d.detail); }
+        closePermModal();
+        showAlert('success', `تم تحديث الصلاحيات (${recipe_ids.length} وصفة)`);
+        loadUsers();
+    } catch(e) { showAlert('error', e.message); }
+}
+
 // ===== Init =====
 initTopicGrid();
-loadFolders();
-loadRecipes();
-loadHeaderStats();
-setInterval(loadHeaderStats, 15000);
+(async () => {
+    if (await checkAuth()) {
+        showApp();
+    }
+})();
+setInterval(() => { if (currentUser) loadHeaderStats(); }, 15000);
 
 // Responsive: make run form single column on mobile
 if (window.innerWidth <= 768) {
