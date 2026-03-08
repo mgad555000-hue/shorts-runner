@@ -294,14 +294,15 @@ def get_storage_stats() -> dict:
         failed_runs = db.query(Run).filter(Run.status == "failed").count()
         running_runs = db.query(Run).filter(Run.status == "running").count()
         cancelled_runs = db.query(Run).filter(Run.status == "cancelled").count()
-        output_path = Path(OUTPUT_ROOT)
         total_size = 0
         total_files = 0
-        if output_path.exists():
-            for f in output_path.rglob('*'):
-                if f.is_file():
-                    total_size += f.stat().st_size
-                    total_files += 1
+        for out_root in [OUTPUT_ROOT, LONGS_OUTPUT_ROOT]:
+            output_path = Path(out_root)
+            if output_path.exists():
+                for f in output_path.rglob('*'):
+                    if f.is_file():
+                        total_size += f.stat().st_size
+                        total_files += 1
         oldest_run = db.query(Run).order_by(Run.created_at.asc()).first()
         newest_run = db.query(Run).order_by(Run.created_at.desc()).first()
         return {

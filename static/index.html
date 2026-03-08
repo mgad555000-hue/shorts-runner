@@ -1959,7 +1959,7 @@ function collectTopicIds() {
     const ids = new Set();
     const from = parseInt(document.getElementById('topicFrom').value) || 0;
     const to = parseInt(document.getElementById('topicTo').value) || 0;
-    if (from > 0 && to >= from) {
+    if (from > 0 && to >= from && (to - from) < 10000) {
         for (let i = from; i <= to; i++) ids.add(i);
     }
     const cells = document.getElementById('topicGrid').querySelectorAll('input');
