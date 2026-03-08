@@ -266,7 +266,7 @@ def perform_cleanup(max_age_days: int = None, keep_last_n: int = None) -> dict:
         for i, run in enumerate(all_runs):
             if i < keep_last_n:
                 continue
-            if run.created_at < cutoff_date:
+            if run.created_at and run.created_at < cutoff_date:
                 try:
                     output_dir = get_run_output_dir(run.run_id, run.output_relpath)
                     if output_dir.exists():
@@ -309,8 +309,8 @@ def get_storage_stats() -> dict:
             "running_runs": running_runs, "cancelled_runs": cancelled_runs,
             "pending_runs": total_runs - completed_runs - failed_runs - running_runs - cancelled_runs,
             "total_files": total_files, "total_size_mb": round(total_size / (1024*1024), 2),
-            "oldest_run": oldest_run.created_at.isoformat() if oldest_run else None,
-            "newest_run": newest_run.created_at.isoformat() if newest_run else None,
+            "oldest_run": oldest_run.created_at.isoformat() if oldest_run and oldest_run.created_at else None,
+            "newest_run": newest_run.created_at.isoformat() if newest_run and newest_run.created_at else None,
             "max_concurrent_runs": get_dynamic_settings()["max_concurrent_runs"],
             "mock_mode": is_mock_mode(),
             "channels_count": len(get_channels()),
@@ -904,7 +904,9 @@ async def cancel_run(run_id: str, current_user: User = Depends(get_current_user)
 @app.get("/api/utilities/runs/{run_id}/log")
 async def get_run_log(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     run = db.query(Run).filter(Run.run_id == run_id).first()
-    log_path = get_run_output_dir(run_id, run.output_relpath if run else None) / "run_log.txt"
+    if not run:
+        raise HTTPException(status_code=404, detail="التشغيل غير موجود")
+    log_path = get_run_output_dir(run_id, run.output_relpath) / "run_log.txt"
     if not log_path.exists():
         return {"log": "لا يوجد سجل بعد"}
     try:
@@ -916,7 +918,9 @@ async def get_run_log(run_id: str, current_user: User = Depends(get_current_user
 @app.get("/api/utilities/runs/{run_id}/manifest")
 async def get_run_manifest(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     run = db.query(Run).filter(Run.run_id == run_id).first()
-    manifest_path = get_run_output_dir(run_id, run.output_relpath if run else None) / "result_manifest.json"
+    if not run:
+        raise HTTPException(status_code=404, detail="التشغيل غير موجود")
+    manifest_path = get_run_output_dir(run_id, run.output_relpath) / "result_manifest.json"
     if not manifest_path.exists():
         return {"manifest": None}
     return FileResponse(manifest_path, media_type="application/json")
@@ -925,7 +929,9 @@ async def get_run_manifest(run_id: str, current_user: User = Depends(get_current
 @app.get("/api/utilities/runs/{run_id}/files")
 async def list_run_files(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     run = db.query(Run).filter(Run.run_id == run_id).first()
-    output_dir = get_run_output_dir(run_id, run.output_relpath if run else None)
+    if not run:
+        raise HTTPException(status_code=404, detail="التشغيل غير موجود")
+    output_dir = get_run_output_dir(run_id, run.output_relpath)
     if not output_dir.exists():
         return {"files": []}
     files = [{"name": f.name, "size": f.stat().st_size, "path": f"/api/utilities/runs/{run_id}/files/{f.name}"} for f in output_dir.iterdir() if f.is_file()]
@@ -937,7 +943,9 @@ async def get_run_file(run_id: str, filename: str, current_user: User = Depends(
     if ".." in filename or "/" in filename or "\\" in filename:
         raise HTTPException(status_code=400, detail="اسم ملف غير صالح")
     run = db.query(Run).filter(Run.run_id == run_id).first()
-    file_path = get_run_output_dir(run_id, run.output_relpath if run else None) / filename
+    if not run:
+        raise HTTPException(status_code=404, detail="التشغيل غير موجود")
+    file_path = get_run_output_dir(run_id, run.output_relpath) / filename
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="الملف غير موجود")
     return FileResponse(file_path)
@@ -946,7 +954,9 @@ async def get_run_file(run_id: str, filename: str, current_user: User = Depends(
 @app.get("/api/utilities/runs/{run_id}/download")
 async def download_run_outputs(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     run = db.query(Run).filter(Run.run_id == run_id).first()
-    output_dir = get_run_output_dir(run_id, run.output_relpath if run else None)
+    if not run:
+        raise HTTPException(status_code=404, detail="التشغيل غير موجود")
+    output_dir = get_run_output_dir(run_id, run.output_relpath)
     if not output_dir.exists():
         raise HTTPException(status_code=404, detail="مجلد الإخراج غير موجود")
     zip_buffer = io.BytesIO()
