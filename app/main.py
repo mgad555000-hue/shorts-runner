@@ -447,9 +447,13 @@ async def set_permissions(user_id: int, data: PermissionUpdate, admin: User = De
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="المستخدم غير موجود")
-    # Replace all permissions
+    # Replace all permissions (deduplicate)
     db.query(UserPermission).filter(UserPermission.user_id == user_id).delete()
+    seen = set()
     for recipe_id in data.recipe_ids:
+        if recipe_id in seen:
+            continue
+        seen.add(recipe_id)
         db.add(UserPermission(user_id=user_id, recipe_id=recipe_id, created_at=datetime.utcnow()))
     db.commit()
     return {"message": "تم تحديث الصلاحيات", "recipe_ids": data.recipe_ids}

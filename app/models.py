@@ -1,7 +1,7 @@
 """
 نماذج Pydantic للـ API
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional, List
 
@@ -112,9 +112,9 @@ class LoginResponse(BaseModel):
     recipe_ids: List[int] = []
 
 class UserCreate(BaseModel):
-    username: str
-    display_name: str
-    pin: str
+    username: str = Field(..., max_length=50)
+    display_name: str = Field(..., max_length=100)
+    pin: str = Field(..., max_length=4)
     is_admin: bool = False
 
 class UserUpdate(BaseModel):
