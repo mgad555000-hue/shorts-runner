@@ -46,6 +46,30 @@ class Setting(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class User(Base):
+    """المستخدمين"""
+    __tablename__ = "auth_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, nullable=False, index=True)
+    display_name = Column(String, nullable=False)
+    pin_hash = Column(String, nullable=False)
+    is_admin = Column(Integer, default=0)  # 0/1
+    is_active = Column(Integer, default=1)  # 0/1
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UserPermission(Base):
+    """صلاحيات المستخدمين على الوصفات"""
+    __tablename__ = "auth_permissions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    recipe_id = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Run(Base):
     """سجل التشغيلات"""
     __tablename__ = "shorts_runs"
@@ -62,6 +86,7 @@ class Run(Base):
     execution_time_ms = Column(Integer, nullable=True)
     error_message = Column(Text, nullable=True)
     output_relpath = Column(String, nullable=False)
+    user_id = Column(Integer, nullable=True)
 
 
 def _migrate_db():
@@ -83,6 +108,12 @@ def _migrate_db():
         if "recipe_type" not in existing:
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE shorts_recipes ADD COLUMN recipe_type TEXT DEFAULT 'shorts'"))
+                conn.commit()
+    if insp.has_table("shorts_runs"):
+        existing = {col["name"] for col in insp.get_columns("shorts_runs")}
+        if "user_id" not in existing:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE shorts_runs ADD COLUMN user_id INTEGER"))
                 conn.commit()
 
 

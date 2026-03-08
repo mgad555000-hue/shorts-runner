@@ -25,14 +25,20 @@ import time
 import json
 from pathlib import Path
 from datetime import datetime, timedelta
+import threading
 
-from app.database import get_db, init_db, Recipe, Run, Setting, SessionLocal
+from app.database import get_db, init_db, Recipe, Run, Setting, User, UserPermission, SessionLocal
 from app.models import (
     RecipeCreate, RecipeUpdate, RecipeResponse,
     RunCreate, RunResponse, PathResponse, CleanupResponse,
-    SettingsResponse, SettingsUpdate
+    SettingsResponse, SettingsUpdate,
+    LoginRequest, LoginResponse, UserCreate, UserUpdate, UserResponse, PermissionUpdate
 )
 from app.sandbox import create_sandbox_container
+from app.auth import (
+    get_current_user, require_admin, hash_pin, verify_pin,
+    create_token, seed_admin_user
+)
 
 
 # ========== الإعدادات ==========
@@ -47,6 +53,7 @@ CHANNELS_ROOT = os.path.join(DATA_ROOT, "channels")
 OUTPUT_ROOT = os.getenv("OUTPUT_ROOT", "./shorts/out")
 LONGS_OUTPUT_ROOT = os.getenv("LONGS_OUTPUT_ROOT", "./longs/out")
 
+_env_lock = threading.Lock()
 Path(DATA_ROOT).mkdir(parents=True, exist_ok=True)
 Path(CHANNELS_ROOT).mkdir(parents=True, exist_ok=True)
 Path(OUTPUT_ROOT).mkdir(parents=True, exist_ok=True)
@@ -130,6 +137,7 @@ def cleanup_zombie_runs():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    seed_admin_user()
     cleanup_zombie_runs()
     cleanup_task = asyncio.create_task(cleanup_old_runs())
     print(f"[MG Ranner] Started on port 8001")
@@ -147,7 +155,7 @@ app = FastAPI(title="MG Ranner", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -306,10 +314,159 @@ def get_storage_stats() -> dict:
         db.close()
 
 
+# ========== Auth Helper ==========
+
+def get_user_recipe_ids(db: Session, user_id: int) -> list:
+    perms = db.query(UserPermission).filter(UserPermission.user_id == user_id).all()
+    return [p.recipe_id for p in perms]
+
+
+def user_to_response(db: Session, user: User) -> UserResponse:
+    recipe_ids = get_user_recipe_ids(db, user.id)
+    return UserResponse(
+        id=user.id, username=user.username, display_name=user.display_name,
+        is_admin=bool(user.is_admin), is_active=bool(user.is_active),
+        created_at=user.created_at, recipe_ids=recipe_ids
+    )
+
+
+# ========== API - Auth ==========
+
+# Rate limiting for login (simple in-memory)
+_login_attempts: dict = {}  # {username: (count, last_attempt_time)}
+
+@app.post("/api/auth/login", response_model=LoginResponse)
+async def login(req: LoginRequest, db: Session = Depends(get_db)):
+    # Rate limit: max 5 attempts per 60 seconds per username
+    now = time.time()
+    key = req.username.lower()
+    if key in _login_attempts:
+        count, last_time = _login_attempts[key]
+        if now - last_time < 60 and count >= 5:
+            raise HTTPException(status_code=429, detail="محاولات كتير — استنى دقيقة")
+        if now - last_time >= 60:
+            _login_attempts[key] = (0, now)
+
+    user = db.query(User).filter(User.username == req.username).first()
+    if not user or not verify_pin(req.pin, user.pin_hash):
+        # Track failed attempt
+        prev = _login_attempts.get(key, (0, now))
+        _login_attempts[key] = (prev[0] + 1, now)
+        raise HTTPException(status_code=401, detail="اسم المستخدم أو الرمز غلط")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="الحساب معطل")
+    # Clear rate limit on success
+    _login_attempts.pop(key, None)
+    token = create_token(user.id, user.username, bool(user.is_admin))
+    recipe_ids = get_user_recipe_ids(db, user.id)
+    return LoginResponse(
+        token=token, username=user.username, display_name=user.display_name,
+        is_admin=bool(user.is_admin), recipe_ids=recipe_ids
+    )
+
+
+@app.get("/api/auth/me")
+async def get_me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return user_to_response(db, current_user)
+
+
+# ========== API - Admin: User Management ==========
+
+@app.get("/api/admin/users", response_model=list[UserResponse])
+async def list_users(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    users = db.query(User).order_by(User.created_at.desc()).all()
+    return [user_to_response(db, u) for u in users]
+
+
+@app.post("/api/admin/users", response_model=UserResponse)
+async def create_user(data: UserCreate, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    if len(data.pin) != 4 or not data.pin.isdigit():
+        raise HTTPException(status_code=400, detail="الرمز لازم يكون 4 أرقام")
+    existing = db.query(User).filter(User.username == data.username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="اسم المستخدم موجود بالفعل")
+    user = User(
+        username=data.username, display_name=data.display_name,
+        pin_hash=hash_pin(data.pin), is_admin=1 if data.is_admin else 0,
+        is_active=1, created_at=datetime.utcnow(), updated_at=datetime.utcnow()
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user_to_response(db, user)
+
+
+@app.put("/api/admin/users/{user_id}", response_model=UserResponse)
+async def update_user(user_id: int, data: UserUpdate, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="المستخدم غير موجود")
+    if data.display_name is not None:
+        user.display_name = data.display_name
+    if data.pin is not None:
+        if len(data.pin) != 4 or not data.pin.isdigit():
+            raise HTTPException(status_code=400, detail="الرمز لازم يكون 4 أرقام")
+        user.pin_hash = hash_pin(data.pin)
+    if data.is_admin is not None:
+        # Prevent removing admin from last admin
+        if not data.is_admin and user.is_admin:
+            admin_count = db.query(User).filter(User.is_admin == 1, User.is_active == 1).count()
+            if admin_count <= 1:
+                raise HTTPException(status_code=400, detail="مينفعش تشيل صلاحية المدير من آخر مدير")
+        user.is_admin = 1 if data.is_admin else 0
+    if data.is_active is not None:
+        if not data.is_active and user.is_admin:
+            admin_count = db.query(User).filter(User.is_admin == 1, User.is_active == 1).count()
+            if admin_count <= 1:
+                raise HTTPException(status_code=400, detail="مينفعش تعطل آخر مدير")
+        user.is_active = 1 if data.is_active else 0
+    user.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(user)
+    return user_to_response(db, user)
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def delete_user(user_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="المستخدم غير موجود")
+    if user.is_admin:
+        admin_count = db.query(User).filter(User.is_admin == 1, User.is_active == 1).count()
+        if admin_count <= 1:
+            raise HTTPException(status_code=400, detail="مينفعش تحذف آخر مدير")
+    # Delete permissions
+    db.query(UserPermission).filter(UserPermission.user_id == user_id).delete()
+    db.delete(user)
+    db.commit()
+    return {"message": "تم حذف المستخدم"}
+
+
+@app.put("/api/admin/users/{user_id}/permissions")
+async def set_permissions(user_id: int, data: PermissionUpdate, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="المستخدم غير موجود")
+    # Replace all permissions
+    db.query(UserPermission).filter(UserPermission.user_id == user_id).delete()
+    for recipe_id in data.recipe_ids:
+        db.add(UserPermission(user_id=user_id, recipe_id=recipe_id, created_at=datetime.utcnow()))
+    db.commit()
+    return {"message": "تم تحديث الصلاحيات", "recipe_ids": data.recipe_ids}
+
+
+@app.get("/api/admin/users/{user_id}/permissions")
+async def get_permissions(user_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="المستخدم غير موجود")
+    return {"recipe_ids": get_user_recipe_ids(db, user_id)}
+
+
 # ========== API - القنوات ==========
 
 @app.get("/api/channels")
-async def list_channels():
+async def list_channels(current_user: User = Depends(get_current_user)):
     """قائمة القنوات المتاحة"""
     channels = get_channels()
     result = []
@@ -328,7 +485,7 @@ async def list_channels():
 
 
 @app.post("/api/channels")
-async def create_channel(name: str, db: Session = Depends(get_db)):
+async def create_channel(name: str, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     """إنشاء قناة جديدة"""
     safe_name = sanitize_folder_name(name)
     if not safe_name:
@@ -345,7 +502,7 @@ async def create_channel(name: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/channels/{channel}/tasks")
-async def list_channel_tasks(channel: str):
+async def list_channel_tasks(channel: str, current_user: User = Depends(get_current_user)):
     """قائمة مجلدات المهام في قناة"""
     ch_path = get_channel_path(channel)
     if not ch_path.exists():
@@ -365,14 +522,14 @@ async def list_channel_tasks(channel: str):
 # ========== API - المسارات (متوافق مع الواجهة القديمة) ==========
 
 @app.get("/api/utilities/paths", response_model=PathResponse)
-async def get_paths():
+async def get_paths(current_user: User = Depends(get_current_user)):
     """القنوات المتاحة كمجلدات"""
     channels = get_channels()
     return PathResponse(available_folders=channels, data_root=CHANNELS_ROOT)
 
 
 @app.post("/api/utilities/folders")
-async def create_folder(folder_name: str, db: Session = Depends(get_db)):
+async def create_folder(folder_name: str, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     """إنشاء قناة جديدة"""
     safe_name = sanitize_folder_name(folder_name)
     if not safe_name:
@@ -391,7 +548,7 @@ async def create_folder(folder_name: str, db: Session = Depends(get_db)):
 # ========== API - Recipes ==========
 
 @app.post("/api/utilities/recipes/{recipe_id}/create-folder")
-async def create_recipe_folders_for_all_channels(recipe_id: int, db: Session = Depends(get_db)):
+async def create_recipe_folders_for_all_channels(recipe_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     """إنشاء مجلدات الوصفة في كل القنوات"""
     recipe = db.query(Recipe).filter(Recipe.id == recipe_id).first()
     if not recipe:
@@ -410,7 +567,7 @@ async def create_recipe_folders_for_all_channels(recipe_id: int, db: Session = D
 
 
 @app.post("/api/utilities/create-all-recipe-folders")
-async def create_all_recipe_folders(db: Session = Depends(get_db)):
+async def create_all_recipe_folders(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     """إنشاء مجلدات كل الوصفات في كل القنوات"""
     recipes = db.query(Recipe).all()
     channels = get_channels()
@@ -430,7 +587,7 @@ async def create_all_recipe_folders(db: Session = Depends(get_db)):
 # ========== API - مسارات المجلدات ==========
 
 @app.get("/api/channels/{channel}/recipe-path/{recipe_name}")
-async def get_recipe_paths(channel: str, recipe_name: str):
+async def get_recipe_paths(channel: str, recipe_name: str, current_user: User = Depends(get_current_user)):
     """الحصول على مسارات input/output لوصفة في قناة"""
     input_path = get_recipe_input_path(channel, recipe_name)
     output_path = get_recipe_output_path(channel, recipe_name)
@@ -447,9 +604,17 @@ async def get_recipe_paths(channel: str, recipe_name: str):
 # ========== API - Runs ==========
 
 @app.post("/api/utilities/runs", response_model=RunResponse)
-async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     validate_path(run_data.input_folder)
     check_concurrency(db)
+
+    # Permission check for non-admin users
+    if not current_user.is_admin:
+        if not run_data.recipe_id:
+            raise HTTPException(status_code=403, detail="لازم تختار وصفة — التشغيل اليدوي للمدير بس")
+        allowed = get_user_recipe_ids(db, current_user.id)
+        if run_data.recipe_id not in allowed:
+            raise HTTPException(status_code=403, detail="مش مسموح لك تشغل الوصفة دي")
 
     run_id = str(uuid.uuid4())
     content_type = run_data.content_type or "shorts"
@@ -509,7 +674,8 @@ async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, db:
 
     db_run = Run(
         run_id=run_id, recipe_id=run_data.recipe_id, recipe_name=recipe_name,
-        input_folder=run_data.input_folder, status="pending", output_relpath=output_relpath
+        input_folder=run_data.input_folder, status="pending", output_relpath=output_relpath,
+        user_id=current_user.id
     )
     db.add(db_run)
     db.commit()
@@ -563,21 +729,23 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
         channel_root = str(get_channel_path(channel))
 
         # تمرير متغيرات بيئة (القناة + الموديل + مزود الصوت)
-        os.environ["CHANNEL_NAME"] = channel
-        os.environ["CHANNEL_ROOT"] = channel_root
-        os.environ["MODEL_NAME"] = model_name
-        os.environ["TTS_PROVIDER"] = tts_provider
-        os.environ["EXECUTION_MODE"] = execution_mode
-        os.environ["TOPIC_IDS"] = topic_ids
-        if actual_output_recipe:
-            os.environ["RECIPE_OUTPUT_DIR"] = actual_output_recipe
+        # Lock to prevent race condition with concurrent runs
+        with _env_lock:
+            os.environ["CHANNEL_NAME"] = channel
+            os.environ["CHANNEL_ROOT"] = channel_root
+            os.environ["MODEL_NAME"] = model_name
+            os.environ["TTS_PROVIDER"] = tts_provider
+            os.environ["EXECUTION_MODE"] = execution_mode
+            os.environ["TOPIC_IDS"] = topic_ids
+            if actual_output_recipe:
+                os.environ["RECIPE_OUTPUT_DIR"] = actual_output_recipe
 
-        if is_mock_mode():
-            success, output_path, error_msg = mock_execute(run_id, code, actual_input, content_type)
-        else:
-            success, output_path, error_msg = create_sandbox_container(
-                run_id=run_id, code=code, input_folder=actual_input
-            )
+            if is_mock_mode():
+                success, output_path, error_msg = mock_execute(run_id, code, actual_input, content_type)
+            else:
+                success, output_path, error_msg = create_sandbox_container(
+                    run_id=run_id, code=code, input_folder=actual_input
+                )
 
         execution_time_ms = int((time.time() - start_time) * 1000)
 
@@ -668,7 +836,7 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
 
 
 @app.get("/api/utilities/runs", response_model=List[RunResponse])
-async def list_runs(skip: int = 0, limit: int = 50, status: Optional[str] = Query(None), recipe_id: Optional[int] = Query(None), db: Session = Depends(get_db)):
+async def list_runs(skip: int = 0, limit: int = 50, status: Optional[str] = Query(None), recipe_id: Optional[int] = Query(None), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     query = db.query(Run)
     if status:
         query = query.filter(Run.status == status)
@@ -678,7 +846,7 @@ async def list_runs(skip: int = 0, limit: int = 50, status: Optional[str] = Quer
 
 
 @app.get("/api/utilities/runs/{run_id}", response_model=RunResponse)
-async def get_run(run_id: str, db: Session = Depends(get_db)):
+async def get_run(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     run = db.query(Run).filter(Run.run_id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="التشغيل غير موجود")
@@ -686,7 +854,7 @@ async def get_run(run_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/api/utilities/runs/{run_id}/cancel")
-async def cancel_run(run_id: str, db: Session = Depends(get_db)):
+async def cancel_run(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     run = db.query(Run).filter(Run.run_id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="التشغيل غير موجود")
@@ -699,7 +867,7 @@ async def cancel_run(run_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/utilities/runs/{run_id}/log")
-async def get_run_log(run_id: str, db: Session = Depends(get_db)):
+async def get_run_log(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     run = db.query(Run).filter(Run.run_id == run_id).first()
     log_path = get_run_output_dir(run_id, run.output_relpath if run else None) / "run_log.txt"
     if not log_path.exists():
@@ -711,7 +879,7 @@ async def get_run_log(run_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/utilities/runs/{run_id}/manifest")
-async def get_run_manifest(run_id: str, db: Session = Depends(get_db)):
+async def get_run_manifest(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     run = db.query(Run).filter(Run.run_id == run_id).first()
     manifest_path = get_run_output_dir(run_id, run.output_relpath if run else None) / "result_manifest.json"
     if not manifest_path.exists():
@@ -720,7 +888,7 @@ async def get_run_manifest(run_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/utilities/runs/{run_id}/files")
-async def list_run_files(run_id: str, db: Session = Depends(get_db)):
+async def list_run_files(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     run = db.query(Run).filter(Run.run_id == run_id).first()
     output_dir = get_run_output_dir(run_id, run.output_relpath if run else None)
     if not output_dir.exists():
@@ -730,7 +898,7 @@ async def list_run_files(run_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/utilities/runs/{run_id}/files/{filename}")
-async def get_run_file(run_id: str, filename: str, db: Session = Depends(get_db)):
+async def get_run_file(run_id: str, filename: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if ".." in filename or "/" in filename or "\\" in filename:
         raise HTTPException(status_code=400, detail="اسم ملف غير صالح")
     run = db.query(Run).filter(Run.run_id == run_id).first()
@@ -741,7 +909,7 @@ async def get_run_file(run_id: str, filename: str, db: Session = Depends(get_db)
 
 
 @app.get("/api/utilities/runs/{run_id}/download")
-async def download_run_outputs(run_id: str, db: Session = Depends(get_db)):
+async def download_run_outputs(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     run = db.query(Run).filter(Run.run_id == run_id).first()
     output_dir = get_run_output_dir(run_id, run.output_relpath if run else None)
     if not output_dir.exists():
@@ -756,17 +924,17 @@ async def download_run_outputs(run_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/utilities/stats")
-async def get_stats():
+async def get_stats(current_user: User = Depends(get_current_user)):
     return get_storage_stats()
 
 
 @app.post("/api/utilities/cleanup", response_model=CleanupResponse)
-async def trigger_cleanup(max_age_days: int = None, keep_last_n: int = None):
+async def trigger_cleanup(max_age_days: int = None, keep_last_n: int = None, admin: User = Depends(require_admin)):
     return CleanupResponse(**perform_cleanup(max_age_days, keep_last_n))
 
 
 @app.delete("/api/utilities/runs/{run_id}")
-async def delete_run(run_id: str, db: Session = Depends(get_db)):
+async def delete_run(run_id: str, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     run = db.query(Run).filter(Run.run_id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="التشغيل غير موجود")
@@ -781,7 +949,7 @@ async def delete_run(run_id: str, db: Session = Depends(get_db)):
 # ========== Recipes CRUD ==========
 
 @app.post("/api/utilities/recipes", response_model=RecipeResponse)
-async def create_recipe(recipe: RecipeCreate, db: Session = Depends(get_db)):
+async def create_recipe(recipe: RecipeCreate, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     db_recipe = Recipe(**recipe.model_dump())
     if not db_recipe.input_folder:
         db_recipe.input_folder = sanitize_folder_name(db_recipe.name).replace(' ', '_')
@@ -796,7 +964,7 @@ async def create_recipe(recipe: RecipeCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/api/utilities/recipes", response_model=List[RecipeResponse])
-async def list_recipes(recipe_type: Optional[str] = Query(None), db: Session = Depends(get_db)):
+async def list_recipes(recipe_type: Optional[str] = Query(None), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     query = db.query(Recipe)
     if recipe_type:
         query = query.filter((Recipe.recipe_type == recipe_type) | (Recipe.recipe_type == "both"))
@@ -804,7 +972,7 @@ async def list_recipes(recipe_type: Optional[str] = Query(None), db: Session = D
 
 
 @app.get("/api/utilities/recipes/{recipe_id}", response_model=RecipeResponse)
-async def get_recipe(recipe_id: int, db: Session = Depends(get_db)):
+async def get_recipe(recipe_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     recipe = db.query(Recipe).filter(Recipe.id == recipe_id).first()
     if not recipe:
         raise HTTPException(status_code=404, detail="الوصفة غير موجودة")
@@ -812,7 +980,7 @@ async def get_recipe(recipe_id: int, db: Session = Depends(get_db)):
 
 
 @app.put("/api/utilities/recipes/{recipe_id}", response_model=RecipeResponse)
-async def update_recipe(recipe_id: int, recipe_update: RecipeUpdate, db: Session = Depends(get_db)):
+async def update_recipe(recipe_id: int, recipe_update: RecipeUpdate, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     recipe = db.query(Recipe).filter(Recipe.id == recipe_id).first()
     if not recipe:
         raise HTTPException(status_code=404, detail="الوصفة غير موجودة")
@@ -824,7 +992,7 @@ async def update_recipe(recipe_id: int, recipe_update: RecipeUpdate, db: Session
 
 
 @app.delete("/api/utilities/recipes/{recipe_id}")
-async def delete_recipe(recipe_id: int, db: Session = Depends(get_db)):
+async def delete_recipe(recipe_id: int, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     recipe = db.query(Recipe).filter(Recipe.id == recipe_id).first()
     if not recipe:
         raise HTTPException(status_code=404, detail="الوصفة غير موجودة")
@@ -836,12 +1004,12 @@ async def delete_recipe(recipe_id: int, db: Session = Depends(get_db)):
 # ========== Settings ==========
 
 @app.get("/api/utilities/settings")
-async def get_settings():
+async def get_settings(admin: User = Depends(require_admin)):
     return get_dynamic_settings()
 
 
 @app.put("/api/utilities/settings")
-async def update_settings(updates: SettingsUpdate, db: Session = Depends(get_db)):
+async def update_settings(updates: SettingsUpdate, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     for key, value in updates.model_dump(exclude_unset=True).items():
         existing = db.query(Setting).filter(Setting.key == key).first()
         str_value = str(value).lower() if isinstance(value, bool) else str(value)
@@ -864,8 +1032,12 @@ def get_run_output_dir(run_id: str, output_relpath: str = None) -> Path:
 HOST_DATA_DIR = os.getenv("HOST_DATA_DIR", "C:/Users/w10/shorts-runner/data")
 
 @app.post("/api/open-folder")
-async def get_host_folder_path(docker_path: str):
+async def get_host_folder_path(docker_path: str, current_user: User = Depends(get_current_user)):
     """تحويل مسار Docker لمسار Windows وإنشاء المجلد"""
+    if not docker_path or ".." in docker_path:
+        raise HTTPException(status_code=400, detail="مسار غير صالح")
+    if not docker_path.startswith("/app/data/"):
+        raise HTTPException(status_code=400, detail="المسار لازم يبدأ بـ /app/data/")
     host_path = docker_path.replace("/app/data/", HOST_DATA_DIR + "/").replace("/", "\\")
     os.makedirs(docker_path, exist_ok=True)
     return {"success": True, "path": host_path}
@@ -878,11 +1050,11 @@ def get_output_root_for_content(content_type: str) -> str:
     return OUTPUT_ROOT
 
 
-# ========== Static ==========
-
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
-
-
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# ========== Static ==========
+
+app.mount("/", StaticFiles(directory="static", html=True), name="static")

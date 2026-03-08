@@ -35,6 +35,7 @@ services:
       - CLEANUP_INTERVAL_HOURS=6
       - CLEANUP_MAX_AGE_DAYS=7
       - CLEANUP_KEEP_LAST_N=50
+      - ADMIN_DEFAULT_PIN=1234
     depends_on:
       - sandbox-build
 

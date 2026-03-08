@@ -96,3 +96,41 @@ class SettingsUpdate(BaseModel):
     mock_mode: Optional[bool] = None
     cleanup_max_age_days: Optional[int] = None
     cleanup_keep_last_n: Optional[int] = None
+
+
+# ========== Auth Models ==========
+
+class LoginRequest(BaseModel):
+    username: str
+    pin: str
+
+class LoginResponse(BaseModel):
+    token: str
+    username: str
+    display_name: str
+    is_admin: bool
+    recipe_ids: List[int] = []
+
+class UserCreate(BaseModel):
+    username: str
+    display_name: str
+    pin: str
+    is_admin: bool = False
+
+class UserUpdate(BaseModel):
+    display_name: Optional[str] = None
+    pin: Optional[str] = None
+    is_admin: Optional[bool] = None
+    is_active: Optional[bool] = None
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    display_name: str
+    is_admin: bool
+    is_active: bool
+    created_at: datetime
+    recipe_ids: List[int] = []
+
+class PermissionUpdate(BaseModel):
+    recipe_ids: List[int]
