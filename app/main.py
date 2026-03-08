@@ -865,8 +865,8 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
                 db_run.completed_at = datetime.utcnow()
                 db_run.error_message = f"خطأ غير متوقع: {str(e)[:500]}"
                 db.commit()
-        except Exception:
-            pass
+        except Exception as e2:
+            print(f"[execute_run] فشل تحديث حالة الـ run: {e2}")
     finally:
         db.close()
 
