@@ -76,6 +76,12 @@ def get_channels() -> List[str]:
     return sorted(channels)
 
 
+def validate_channel_name(channel: str):
+    """التحقق من اسم القناة — منع path traversal"""
+    if not channel or ".." in channel or "/" in channel or "\\" in channel:
+        raise HTTPException(status_code=400, detail="اسم القناة غير صالح")
+
+
 def get_channel_path(channel: str) -> Path:
     """مسار مجلد القناة"""
     return Path(CHANNELS_ROOT) / channel
@@ -339,7 +345,12 @@ _login_attempts: dict = {}  # {username: (count, last_attempt_time)}
 async def login(req: LoginRequest, db: Session = Depends(get_db)):
     # Rate limit: max 5 attempts per 60 seconds per username
     now = time.time()
-    key = req.username.lower()
+    # Prune old entries to prevent memory growth
+    if len(_login_attempts) > 1000:
+        expired = [k for k, (c, t) in _login_attempts.items() if now - t > 120]
+        for k in expired:
+            _login_attempts.pop(k, None)
+    key = req.username[:100].lower()
     if key in _login_attempts:
         count, last_time = _login_attempts[key]
         if now - last_time < 60 and count >= 5:
@@ -447,6 +458,12 @@ async def set_permissions(user_id: int, data: PermissionUpdate, admin: User = De
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="المستخدم غير موجود")
+    # Validate recipe_ids exist
+    if data.recipe_ids:
+        valid_ids = {r.id for r in db.query(Recipe.id).filter(Recipe.id.in_(data.recipe_ids)).all()}
+        invalid = set(data.recipe_ids) - valid_ids
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"وصفات غير موجودة: {sorted(invalid)}")
     # Replace all permissions (deduplicate)
     db.query(UserPermission).filter(UserPermission.user_id == user_id).delete()
     seen = set()
@@ -508,6 +525,7 @@ async def create_channel(name: str, admin: User = Depends(require_admin), db: Se
 @app.get("/api/channels/{channel}/tasks")
 async def list_channel_tasks(channel: str, current_user: User = Depends(get_current_user)):
     """قائمة مجلدات المهام في قناة"""
+    validate_channel_name(channel)
     ch_path = get_channel_path(channel)
     if not ch_path.exists():
         raise HTTPException(status_code=404, detail="القناة غير موجودة")
@@ -593,6 +611,7 @@ async def create_all_recipe_folders(admin: User = Depends(require_admin), db: Se
 @app.get("/api/channels/{channel}/recipe-path/{recipe_name}")
 async def get_recipe_paths(channel: str, recipe_name: str, current_user: User = Depends(get_current_user)):
     """الحصول على مسارات input/output لوصفة في قناة"""
+    validate_channel_name(channel)
     input_path = get_recipe_input_path(channel, recipe_name)
     output_path = get_recipe_output_path(channel, recipe_name)
     input_path.mkdir(parents=True, exist_ok=True)
@@ -1000,6 +1019,8 @@ async def delete_recipe(recipe_id: int, admin: User = Depends(require_admin), db
     recipe = db.query(Recipe).filter(Recipe.id == recipe_id).first()
     if not recipe:
         raise HTTPException(status_code=404, detail="الوصفة غير موجودة")
+    # Clean up orphaned permissions
+    db.query(UserPermission).filter(UserPermission.recipe_id == recipe_id).delete()
     db.delete(recipe)
     db.commit()
     return {"message": "تم الحذف"}

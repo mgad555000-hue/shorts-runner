@@ -1061,6 +1061,12 @@ async function authFetch(url, options = {}) {
         doLogout();
         throw new Error('جلسة منتهية');
     }
+    if (res.status === 403) {
+        try {
+            const errData = await res.clone().json();
+            if (errData.detail === 'الحساب معطل') { doLogout(); throw new Error('الحساب معطل'); }
+        } catch(e) { if (e.message === 'الحساب معطل') throw e; }
+    }
     return res;
 }
 
@@ -1282,7 +1288,7 @@ async function loadRecipes(filterType) {
         const typeBadge = (type) => {
             const colors = { shorts: '#dbeafe;color:#1e40af', long: '#fce7f3;color:#9d174d', both: '#d1fae5;color:#065f46' };
             const labels = { shorts: 'شورتس', long: 'لونج', both: 'الاثنين' };
-            return `<span class="badge" style="background:${colors[type] || colors.shorts}">${labels[type] || type}</span>`;
+            return `<span class="badge" style="background:${colors[type] || colors.shorts}">${labels[type] || esc(type)}</span>`;
         };
 
         list.innerHTML = listRecipes.map(r => `

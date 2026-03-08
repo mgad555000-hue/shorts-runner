@@ -101,8 +101,8 @@ class SettingsUpdate(BaseModel):
 # ========== Auth Models ==========
 
 class LoginRequest(BaseModel):
-    username: str
-    pin: str
+    username: str = Field(..., max_length=50)
+    pin: str = Field(..., max_length=10)
 
 class LoginResponse(BaseModel):
     token: str
@@ -118,8 +118,8 @@ class UserCreate(BaseModel):
     is_admin: bool = False
 
 class UserUpdate(BaseModel):
-    display_name: Optional[str] = None
-    pin: Optional[str] = None
+    display_name: Optional[str] = Field(None, max_length=100)
+    pin: Optional[str] = Field(None, max_length=4)
     is_admin: Optional[bool] = None
     is_active: Optional[bool] = None
 
