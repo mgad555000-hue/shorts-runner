@@ -854,6 +854,18 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
             if error_msg:
                 db_run.error_message = error_msg[:2000]
             db.commit()
+    except Exception as e:
+        # Prevent stuck "running" runs on unexpected errors
+        print(f"[execute_run] خطأ غير متوقع: {e}")
+        try:
+            db_run = db.query(Run).filter(Run.run_id == run_id).first()
+            if db_run and db_run.status == "running":
+                db_run.status = "failed"
+                db_run.completed_at = datetime.utcnow()
+                db_run.error_message = f"خطأ غير متوقع: {str(e)[:500]}"
+                db.commit()
+        except Exception:
+            pass
     finally:
         db.close()
 
