@@ -773,6 +773,16 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
 
         execution_time_ms = int((time.time() - start_time) * 1000)
 
+        # تحديث الحالة في DB فوراً — قبل نسخ الملفات عشان الواجهة تتحدث بسرعة
+        db_run = db.query(Run).filter(Run.run_id == run_id).first()
+        if db_run and db_run.status != "cancelled":
+            db_run.status = "completed" if success else "failed"
+            db_run.completed_at = datetime.utcnow()
+            db_run.execution_time_ms = execution_time_ms
+            if error_msg:
+                db_run.error_message = error_msg[:2000]
+            db.commit()
+
         if output_path:
             output_dir = Path(output_path).resolve()
             print(f"[COPY] === بدء نسخ المخرجات ===")
@@ -847,14 +857,6 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
             else:
                 print(f"[COPY] تحذير: مجلد المصدر مش موجود: {output_dir}")
 
-        db_run = db.query(Run).filter(Run.run_id == run_id).first()
-        if db_run and db_run.status != "cancelled":
-            db_run.status = "completed" if success else "failed"
-            db_run.completed_at = datetime.utcnow()
-            db_run.execution_time_ms = execution_time_ms
-            if error_msg:
-                db_run.error_message = error_msg[:2000]
-            db.commit()
     except Exception as e:
         # Prevent stuck "running" runs on unexpected errors
         print(f"[execute_run] خطأ غير متوقع: {e}")
