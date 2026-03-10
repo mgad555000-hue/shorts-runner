@@ -1434,7 +1434,38 @@ async function refreshRunDetail(runId) {
             loadHeaderStats();
         }
 
-        document.getElementById('currentRunDetail').innerHTML = renderRunDetail(run, log, files);
+        const container = document.getElementById('currentRunDetail');
+        const logEl = container.querySelector('.log-display');
+
+        if (logEl && logEl.textContent.length > 0) {
+            // تحديث السجل فقط بدون إعادة بناء الصفحة — للحفاظ على scroll
+            const wasAtBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 30;
+            const newLog = log || '';
+            if (logEl.textContent !== newLog) {
+                logEl.textContent = newLog;
+            }
+            // لو كان في الأسفل — خليه في الأسفل
+            if (wasAtBottom) {
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+
+            // تحديث الـ status badge فقط
+            const badge = container.querySelector('.status-badge');
+            if (badge) {
+                const newBadge = document.createElement('div');
+                newBadge.innerHTML = statusBadge(run.status);
+                const newBadgeEl = newBadge.querySelector('.status-badge');
+                if (newBadgeEl && badge.textContent !== newBadgeEl.textContent) {
+                    badge.replaceWith(newBadgeEl);
+                }
+            }
+        } else {
+            // أول مرة — بناء كامل
+            container.innerHTML = renderRunDetail(run, log, files);
+            // Scroll للأسفل أول مرة
+            const newLogEl = container.querySelector('.log-display');
+            if (newLogEl) newLogEl.scrollTop = newLogEl.scrollHeight;
+        }
     } catch(e) {
         console.error('Refresh run detail error:', e);
     }

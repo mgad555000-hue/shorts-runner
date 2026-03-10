@@ -732,41 +732,35 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
 
     log(f"  رفع الطلبات إلى: {input_uri}")
 
-    # إنشاء الـ Batch Job باستخدام Vertex AI client (مطلوب مع GCS)
-    client = genai.Client(
-        vertexai=True,
-        project=project_id,
-        location=location,
-    )
+    # إنشاء الـ Batch Job — نجرب الـ location الأصلي، ولو NOT_FOUND نجرب global
     job_name = f"batch-{timestamp}"
+    locations_to_try = [location, "global"] if location != "global" else ["global"]
+    last_err = None
 
-    batch_job = client.batches.create(
-        model=model,
-        src=input_uri,  # GCS URI
-        config={'display_name': job_name},
-    )
+    for loc in locations_to_try:
+        try:
+            client = genai.Client(vertexai=True, project=project_id, location=loc)
+            batch_job = client.batches.create(model=model, src=input_uri, config={'display_name': job_name})
 
-    # استخراج معلومات المهمة
-    job_full_name = batch_job.name if hasattr(batch_job, 'name') else ""
-    job_id = job_full_name.split('/')[-1] if job_full_name else job_name
+            job_full_name = batch_job.name if hasattr(batch_job, 'name') else ""
+            job_id = job_full_name.split('/')[-1] if job_full_name else job_name
+            if loc != location:
+                log(f"  ✓ نجح مع location={loc}")
 
-    batch_info = BatchInfo(
-        provider="gemini",
-        model=model,
-        job_id=job_id,
-        job_name=job_full_name,
-        item_order=list(range(len(prompts))),
-        items_count=len(prompts),
-        created_at=datetime.now().isoformat(),
-        status="submitted",
-        extra={
-            "display_name": job_name,
-            "input_uri": input_uri,
-            "method": "sdk"
-        }
-    )
+            return BatchInfo(
+                provider="gemini", model=model, job_id=job_id, job_name=job_full_name,
+                item_order=list(range(len(prompts))), items_count=len(prompts),
+                created_at=datetime.now().isoformat(), status="submitted",
+                extra={"display_name": job_name, "input_uri": input_uri, "method": "sdk", "location": loc}
+            )
+        except Exception as e:
+            last_err = e
+            if "NOT_FOUND" in str(e) or "does not exist" in str(e):
+                log(f"  [!] الموديل غير متاح في location={loc}")
+                continue
+            raise
 
-    return batch_info
+    raise last_err
 
 
 def _batch_send_claude(prompts: list, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> BatchInfo:
@@ -1017,15 +1011,10 @@ def _batch_retrieve_gemini(batch_info: BatchInfo, api_key: str) -> list:
     import json
     from google import genai
 
-    # إعداد GCS
+    # إعداد GCS — استخدام الـ location المحفوظ من الإرسال
     project_id, location, bucket_name = _setup_gcs_credentials()
-
-    # استخدام Vertex AI client (مطلوب مع GCS)
-    client = genai.Client(
-        vertexai=True,
-        project=project_id,
-        location=location,
-    )
+    saved_location = batch_info.extra.get("location", location) if batch_info.extra else location
+    client = genai.Client(vertexai=True, project=project_id, location=saved_location)
 
     # استرجاع معلومات المهمة
     job_name = batch_info.job_name or batch_info.job_id
