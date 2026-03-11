@@ -28,9 +28,29 @@
       "label": "توليد القصص"
     },
     {
+      "id": "tashkeel_rules",
+      "action": "read_input",
+      "file": "tashkeel_instructions.txt",
+      "label": "قراءة تعليمات التشكيل"
+    },
+    {
+      "id": "tashkeel_prompt",
+      "action": "template",
+      "text": "{tashkeel_rules}\n\n---\n\nالنصوص المطلوب تشكيلها:\n\n{stories}",
+      "label": "تجميع برومبت التشكيل"
+    },
+    {
+      "id": "tashkeel_stories",
+      "action": "generate",
+      "input": "{tashkeel_prompt}",
+      "max_tokens": 32000,
+      "temperature": 0.3,
+      "label": "تشكيل القصص"
+    },
+    {
       "id": "formatted",
       "action": "format_text",
-      "input": "{stories}",
+      "input": "{tashkeel_stories}",
       "color_words": ["بس", "ده", "دي", "دى", "دول"],
       "spaces_after_punctuation": 5,
       "label": "تنسيق النص"

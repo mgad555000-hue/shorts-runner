@@ -42,9 +42,29 @@
       "label": "استخراج النصوص"
     },
     {
+      "id": "tashkeel_rules",
+      "action": "read_input",
+      "file": "tashkeel_instructions.txt",
+      "label": "قراءة تعليمات التشكيل"
+    },
+    {
+      "id": "tashkeel_prompt",
+      "action": "template",
+      "text": "{tashkeel_rules}\n\n---\n\nالنصوص المطلوب تشكيلها:\n\n{intros_raw}",
+      "label": "تجميع برومبت التشكيل"
+    },
+    {
+      "id": "tashkeel_intros",
+      "action": "generate",
+      "input": "{tashkeel_prompt}",
+      "max_tokens": 32000,
+      "temperature": 0.3,
+      "label": "تشكيل المقدمات"
+    },
+    {
       "id": "intros_formatted",
       "action": "format_text",
-      "input": "{intros_raw}",
+      "input": "{tashkeel_intros}",
       "color_words": ["بس", "ده", "دي", "دى", "دول"],
       "spaces_after_punctuation": 5,
       "label": "تنسيق المقدمات"

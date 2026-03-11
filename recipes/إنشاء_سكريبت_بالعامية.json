@@ -28,9 +28,29 @@
       "label": "توليد السكريبتات"
     },
     {
+      "id": "tashkeel_rules",
+      "action": "read_input",
+      "file": "tashkeel_instructions.txt",
+      "label": "قراءة تعليمات التشكيل"
+    },
+    {
+      "id": "tashkeel_prompt",
+      "action": "template",
+      "text": "{tashkeel_rules}\n\n---\n\nالنصوص المطلوب تشكيلها:\n\n{scripts}",
+      "label": "تجميع برومبت التشكيل"
+    },
+    {
+      "id": "tashkeel_scripts",
+      "action": "generate",
+      "input": "{tashkeel_prompt}",
+      "max_tokens": 32000,
+      "temperature": 0.3,
+      "label": "تشكيل السكريبتات"
+    },
+    {
       "id": "formatted",
       "action": "format_text",
-      "input": "{scripts}",
+      "input": "{tashkeel_scripts}",
       "color_words": ["بس", "ده", "دي", "دى", "دول"],
       "spaces_after_punctuation": 5,
       "label": "تنسيق النص"
