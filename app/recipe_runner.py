@@ -246,10 +246,11 @@ def action_tts_multi(step, ctx):
     - لونج (مع PART): كل موضوع → مجلد SCRIPT_N/ — كل جزء → WAV
 
     الضمانات الإلزامية:
-    1. كل ملف: TTS مع retry تلقائي (3 محاولات)
-    2. Whisper إلزامي بعد كل ملف — لو تطابق < min_match → إعادة TTS (3 مرات)
-    3. في النهاية: retry تلقائي على كل الفاشلين
-    4. لو فضل ناقص بعد كل ده → الوصفة تنهي بـ FAILED
+    1. كل ملف: TTS → Whisper إلزامي → لو تطابق < min_match → إعادة TTS
+    2. WAV الفاشل يُحذف فوراً قبل إعادة المحاولة (لا يبقى ملف سيئ على الديسك)
+    3. loop تلقائي على الفاشلين حتى max_passes جولات
+    4. كل ملف في المخرج = verified بـ Whisper بدون استثناء
+    5. لو فضل ناقص بعد max_passes → الوصفة تنهي بـ FAILED
     """
     import time as _time
     text = str(ctx.resolve(step["input"]))
@@ -257,11 +258,10 @@ def action_tts_multi(step, ctx):
     max_chars = step.get("max_chars")
     min_match = step.get("min_match", 0.7)
     language = step.get("language", "ar")
-    whisper_retries = step.get("whisper_retries", 3)  # محاولات إعادة TTS لو Whisper فشل
+    tts_retries = step.get("tts_retries", 3)    # محاولات TTS داخل كل جولة
+    max_passes = step.get("max_passes", 5)       # أقصى عدد جولات retry
 
-    # تقسيم النص بالماركرز <<<PREFIX_N>>>
     parts = re.split(rf'<<<{prefix}_(\d+)>>>', text)
-
     if len(parts) < 3:
         raise EngineError(
             f"لم يتم العثور على ماركرز <<<{prefix}_N>>> في النص",
@@ -276,7 +276,6 @@ def action_tts_multi(step, ctx):
         script_text = script_text.replace(f"<<<END_{prefix}>>>", "").strip()
         if not script_text:
             continue
-
         part_parts = re.split(r'<<<PART_(\d+)>>>', script_text)
         if len(part_parts) >= 3:
             topic_folder = f"{prefix}_{script_num}"
@@ -285,45 +284,50 @@ def action_tts_multi(step, ctx):
                 part_text = part_parts[j + 1] if j + 1 < len(part_parts) else ""
                 part_text = part_text.replace("<<<END_PART>>>", "").strip()
                 if part_text:
-                    all_items.append({"filename": f"{prefix}_{script_num}_{part_num}", "text": part_text, "subfolder": topic_folder, "mode": "long"})
+                    all_items.append({"filename": f"{prefix}_{script_num}_{part_num}", "text": part_text, "subfolder": topic_folder})
         else:
-            all_items.append({"filename": f"{prefix}_{script_num}", "text": script_text, "subfolder": "audio", "mode": "short"})
+            all_items.append({"filename": f"{prefix}_{script_num}", "text": script_text, "subfolder": "audio"})
 
     total = len(all_items)
     log(f"  إجمالي الملفات المطلوبة: {total}")
 
-    def process_item(item, pass_label=""):
-        """معالجة ملف واحد: TTS + Whisper + إعادة لو ضروري"""
-        filename = item["filename"]
-        text_content = item["text"]
+    def get_wav_path(item):
         subfolder = item["subfolder"]
-
         if subfolder:
             out_dir = os.path.join(ctx.output_dir, subfolder)
             os.makedirs(out_dir, exist_ok=True)
-            wav_path = os.path.join(out_dir, f"{filename}.wav")
-        else:
-            wav_path = ctx.output_path(f"{filename}.wav")
+            return os.path.join(out_dir, f"{item['filename']}.wav")
+        return ctx.output_path(f"{item['filename']}.wav")
 
-        log(f"  {filename}: TTS ({len(text_content)} حرف){pass_label}...")
+    def process_one(item, pass_num):
+        """TTS + Whisper لملف واحد. يحذف WAV لو فشل التحقق. ترجع (True, match_pct) أو (False, reason)"""
+        filename = item["filename"]
+        text_content = item["text"]
+        wav_path = get_wav_path(item)
 
-        for attempt in range(1, whisper_retries + 1):
-            # خطوة 1: TTS
-            ok, _ = _tts_and_save(text_content, filename, ctx, max_chars, subfolder=subfolder)
+        log(f"  {filename}: TTS ({len(text_content)} حرف) [جولة {pass_num}]...")
+
+        for attempt in range(1, tts_retries + 1):
+            # حذف أي WAV قديم/سيئ قبل البدء
+            if os.path.exists(wav_path):
+                os.remove(wav_path)
+
+            ok, _ = _tts_and_save(text_content, filename, ctx, max_chars, subfolder=item["subfolder"])
             if not ok:
-                if attempt < whisper_retries:
-                    log(f"  [!] {filename}: TTS فشل، محاولة {attempt}/{whisper_retries} — إعادة بعد 5s")
+                if attempt < tts_retries:
+                    log(f"  [!] {filename}: TTS فشل ({attempt}/{tts_retries}) — إعادة بعد 5s")
                     _time.sleep(5)
                     continue
                 return False, "tts_failed"
 
-            # خطوة 2: Whisper تحقق إلزامي
+            # Whisper تحقق إلزامي
             try:
                 w_result = transcribe(wav_path, language=language)
                 if not w_result.success:
-                    log(f"  [!] {filename}: Whisper فشل — {w_result.error}")
-                    if attempt < whisper_retries:
-                        log(f"  ↻ {filename}: إعادة TTS (محاولة {attempt+1}/{whisper_retries})")
+                    log(f"  [!] {filename}: Whisper فشل — {w_result.error} — إعادة TTS")
+                    if os.path.exists(wav_path):
+                        os.remove(wav_path)
+                    if attempt < tts_retries:
                         _time.sleep(3)
                         continue
                     return False, "whisper_failed"
@@ -335,64 +339,67 @@ def action_tts_multi(step, ctx):
                     log(f"  ✅ {filename}: Whisper {match_pct}%")
                     return True, match_pct
                 else:
-                    log(f"  ⚠️ {filename}: Whisper {match_pct}% < {int(min_match*100)}% — إعادة TTS ({attempt}/{whisper_retries})")
-                    if attempt < whisper_retries:
+                    log(f"  ⚠️ {filename}: Whisper {match_pct}% < {int(min_match*100)}% — حذف WAV وإعادة TTS ({attempt}/{tts_retries})")
+                    if os.path.exists(wav_path):
+                        os.remove(wav_path)
+                    if attempt < tts_retries:
                         _time.sleep(3)
                         continue
-                    log(f"  ✗ {filename}: فشل التحقق بعد {whisper_retries} محاولات (آخر تطابق: {match_pct}%)")
                     return False, f"low_match_{match_pct}"
 
             except Exception as e:
                 log(f"  [!] {filename}: خطأ Whisper — {str(e)[:100]}")
-                if attempt < whisper_retries:
+                if os.path.exists(wav_path):
+                    os.remove(wav_path)
+                if attempt < tts_retries:
                     _time.sleep(3)
                     continue
-                return False, f"whisper_error_{str(e)[:50]}"
+                return False, f"whisper_error"
 
-        return False, "max_retries_exceeded"
+        return False, "max_tts_retries"
 
-    # === الجولة الأولى: معالجة كل الملفات ===
+    # === loop تلقائي: حتى max_passes جولات ===
     success_count = 0
-    failed_items = []
+    pending = list(all_items)  # الملفات المتبقية
 
-    for item in all_items:
-        ok, reason = process_item(item)
-        if ok:
-            success_count += 1
-        else:
-            failed_items.append({**item, "reason": str(reason)})
+    for pass_num in range(1, max_passes + 1):
+        if not pending:
+            break
 
-    # === جولة retry تلقائية على الفاشلين ===
-    if failed_items:
-        log(f"  === جولة Retry تلقائية: {len(failed_items)} ملف فاشل ===")
-        still_failed = []
-        for item in failed_items:
-            _time.sleep(5)  # استنى شوية قبل retry
-            ok, reason = process_item(item, pass_label=" [RETRY]")
+        log(f"  === جولة {pass_num}/{max_passes}: {len(pending)} ملف ===")
+        still_pending = []
+
+        for item in pending:
+            ok, reason = process_one(item, pass_num)
             if ok:
                 success_count += 1
             else:
-                still_failed.append({**item, "reason": str(reason)})
-        failed_items = still_failed
+                still_pending.append({**item, "last_reason": str(reason)})
 
-    log(f"  === TTS Multi: {success_count} نجح | {len(failed_items)} فشل نهائي من {total} ===")
+        pending = still_pending
 
-    # حفظ الفاشلين النهائيين
-    if failed_items:
+        if pending and pass_num < max_passes:
+            wait = min(10 * pass_num, 60)  # انتظار متصاعد: 10s, 20s, 30s...
+            log(f"  ↻ {len(pending)} ملف فاشل — انتظار {wait}s قبل الجولة التالية...")
+            _time.sleep(wait)
+
+    log(f"  === TTS Multi: {success_count} نجح | {len(pending)} فشل نهائي من {total} ===")
+
+    if pending:
         failed_path = ctx.output_path("failed_tts.json")
         with open(failed_path, "w", encoding="utf-8") as f:
             import json as _json
-            _json.dump(failed_items, f, ensure_ascii=False, indent=2)
-        log(f"  [!] failed_tts.json: {len(failed_items)} ملف لم يُصلح")
+            _json.dump(pending, f, ensure_ascii=False, indent=2)
+        log(f"  ✗ failed_tts.json: {len(pending)} ملف فشل بعد {max_passes} جولات")
         raise EngineError(
-            f"الوصفة لم تكتمل — {len(failed_items)} ملف صوتي فاشل بعد كل المحاولات. راجع failed_tts.json",
+            f"الوصفة لم تكتمل — {len(pending)} ملف فاشل بعد {max_passes} جولات. راجع failed_tts.json",
             code="TTS_INCOMPLETE"
         )
 
     if success_count == 0:
         raise EngineError("فشل TTS لكل السكريبتات", code="TTS_MULTI_ALL_FAILED")
 
-    return f"تم تحويل {success_count} ملف صوتي — جميع الملفات تم التحقق منها ✅"
+    return f"تم تحويل {success_count} ملف صوتي — جميع الملفات تم التحقق منها بـ Whisper ✅"
 
 
 def action_transcribe(step, ctx):
