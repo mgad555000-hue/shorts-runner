@@ -803,8 +803,34 @@ def action_copy_videos(step, ctx):
         video_matches = re.findall(r'\((\d+)\)\s*\(\s*(مطابق|تقريبي)\s*\)', script_text)
 
         if not video_matches:
-            log(f"  [!] {prefix}_{script_num}: لم يتم العثور على أرقام فيديوهات")
-            continue
+            # fallback: استخراج أسماء الفيديوهات والبحث عنها في videos_list.xlsx
+            excel_file = step.get("excel_file")
+            if not excel_file:
+                excel_file = os.path.join(ctx.input_dir, "videos_list.xlsx")
+            if os.path.exists(excel_file):
+                try:
+                    import openpyxl
+                    wb = openpyxl.load_workbook(excel_file, read_only=True)
+                    ws = wb.active
+                    title_to_num = {}
+                    for row in ws.iter_rows(values_only=True):
+                        if row[0] and row[1] and str(row[0]).isdigit():
+                            title_to_num[str(row[1]).strip()] = str(row[0])
+                    wb.close()
+                    # استخراج أسماء الفيديوهات: (N) عنوان الفيديو (مطابق/تقريبي)
+                    name_matches = re.findall(r'\(?\d+\)\s+(.+?)\s*\(\s*(مطابق|تقريبي)\s*\)', script_text)
+                    for title, match_type in name_matches:
+                        title = title.strip()
+                        vid_num = title_to_num.get(title)
+                        if vid_num:
+                            video_matches.append((vid_num, match_type))
+                        else:
+                            log(f"  [!] {prefix}_{script_num}: مش لاقي رقم لـ '{title[:40]}'")
+                except Exception as e:
+                    log(f"  [!] {prefix}_{script_num}: فشل قراءة xlsx: {e}")
+            if not video_matches:
+                log(f"  [!] {prefix}_{script_num}: لم يتم العثور على أرقام فيديوهات")
+                continue
 
         # إنشاء مجلد للسكريبت
         script_folder = os.path.join(ctx.output_dir, f"{prefix}_{script_num}")
