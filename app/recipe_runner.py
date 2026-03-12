@@ -799,8 +799,8 @@ def action_copy_videos(step, ctx):
 
         script_count += 1
 
-        # استخراج أرقام الفيديوهات: (رقم) (مطابق/تقريبي) — يقبل مسافات داخل الأقواس
-        video_matches = re.findall(r'\((\d+)\)\s*\(\s*(مطابق|تقريبي)\s*\)', script_text)
+        # استخراج أرقام الفيديوهات: (رقم) (مطابق/تقريبي) — يقبل مسافات داخل وخارج الأقواس
+        video_matches = re.findall(r'\(\s*(\d+)\s*\)\s*\(\s*(مطابق|تقريبي)\s*\)', script_text)
 
         if not video_matches:
             # fallback: استخراج أسماء الفيديوهات والبحث عنها في videos_list.xlsx
