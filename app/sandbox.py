@@ -78,7 +78,7 @@ except Exception as e:
     print("Make sure Docker daemon is running and DOCKER_HOST is correct.")
 
 
-def create_sandbox_container(run_id: str, code: str, input_folder: str) -> Tuple[bool, str, Optional[str]]:
+def create_sandbox_container(run_id: str, code: str, input_folder: str, content_type: str = "shorts") -> Tuple[bool, str, Optional[str]]:
     """
     إنشاء وتشغيل حاوية sandbox لتنفيذ الكود
 
@@ -86,8 +86,9 @@ def create_sandbox_container(run_id: str, code: str, input_folder: str) -> Tuple
         (success, output_path, error_message)
     """
     try:
-        # إنشاء مجلد الإخراج
-        output_dir = Path(OUTPUT_ROOT) / run_id
+        # إنشاء مجلد الإخراج حسب نوع المحتوى
+        output_root = os.getenv("LONGS_OUTPUT_ROOT", "./longs/out") if content_type == "long" else OUTPUT_ROOT
+        output_dir = Path(output_root) / run_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # التأكد من وجود مجلد الإدخال

@@ -768,7 +768,7 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
                 success, output_path, error_msg = mock_execute(run_id, code, actual_input, content_type)
             else:
                 success, output_path, error_msg = create_sandbox_container(
-                    run_id=run_id, code=code, input_folder=actual_input
+                    run_id=run_id, code=code, input_folder=actual_input, content_type=content_type
                 )
 
         execution_time_ms = int((time.time() - start_time) * 1000)
