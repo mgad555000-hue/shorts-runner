@@ -832,8 +832,12 @@ def action_copy_videos(step, ctx):
                 log(f"  [!] {prefix}_{script_num}: لم يتم العثور على أرقام فيديوهات")
                 continue
 
-        # إنشاء مجلد للسكريبت
+        # إنشاء مجلد للسكريبت — حذف الفيديوهات القديمة أولاً لتجنب التراكم
         script_folder = os.path.join(ctx.output_dir, f"{prefix}_{script_num}")
+        if os.path.exists(script_folder):
+            for old_file in os.listdir(script_folder):
+                if old_file.endswith(".mp4"):
+                    os.remove(os.path.join(script_folder, old_file))
         os.makedirs(script_folder, exist_ok=True)
 
         for vid_num, match_type in video_matches:
