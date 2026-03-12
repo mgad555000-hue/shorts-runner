@@ -203,17 +203,10 @@ def action_tts(step, ctx):
     return wav_path
 
 
-def _tts_and_save(text, filename_base, ctx, max_chars=None, subfolder=None):
+def _tts_and_save(text, filename_base, ctx, max_chars=None, subfolder=None, max_retries=3):
     """دالة مساعدة: TTS لنص واحد + حفظ WAV — ترجع True لو نجح"""
     if max_chars and len(text) > max_chars:
         text = text[:max_chars]
-
-    result = tts(text)
-    if not result.success:
-        log(f"  [!] {filename_base}: فشل TTS — {result.error}")
-        return False
-
-    audio_data = result.data
 
     # تحديد مسار الحفظ (مع مجلد فرعي لو موجود)
     if subfolder:
@@ -223,11 +216,27 @@ def _tts_and_save(text, filename_base, ctx, max_chars=None, subfolder=None):
     else:
         wav_path = ctx.output_path(f"{filename_base}.wav")
 
-    with open(wav_path, "wb") as f:
-        f.write(audio_data)
+    for attempt in range(1, max_retries + 1):
+        result = tts(text)
+        if not result.success:
+            if attempt < max_retries:
+                log(f"  [!] {filename_base}: محاولة {attempt}/{max_retries} فشلت — {result.error} — إعادة بعد 3s")
+                import time as _time; _time.sleep(3)
+                continue
+            log(f"  [!] {filename_base}: فشل TTS بعد {max_retries} محاولات — {result.error}")
+            return False
 
-    log(f"  {filename_base}: OK ({len(audio_data)} bytes)")
-    return True
+        audio_data = result.data
+        with open(wav_path, "wb") as f:
+            f.write(audio_data)
+
+        if attempt > 1:
+            log(f"  {filename_base}: OK ({len(audio_data)} bytes) [نجح في المحاولة {attempt}]")
+        else:
+            log(f"  {filename_base}: OK ({len(audio_data)} bytes)")
+        return True
+
+    return False
 
 
 def action_tts_multi(step, ctx):
@@ -236,10 +245,16 @@ def action_tts_multi(step, ctx):
     يدعم الحالتين تلقائياً:
     - شورتس (بدون PART): كل سكريبت → ملف WAV واحد — كلهم في مجلد audio/
     - لونج (مع PART): كل موضوع في مجلد فرعي (SCRIPT_N/) — كل جزء → ملف WAV
+    خيارات إضافية:
+    - verify_whisper: true → تحقق بـ Whisper بعد كل ملف (اختياري)
+    - min_match: 0.7 → الحد الأدنى للتطابق في الـ Whisper
     """
     text = str(ctx.resolve(step["input"]))
     prefix = step.get("marker_prefix", "SCRIPT")
     max_chars = step.get("max_chars")
+    verify_whisper = step.get("verify_whisper", False)
+    min_match = step.get("min_match", 0.7)
+    language = step.get("language", "ar")
 
     # تقسيم النص بالماركرز <<<PREFIX_N>>>
     parts = re.split(rf'<<<{prefix}_(\d+)>>>', text)
@@ -252,6 +267,7 @@ def action_tts_multi(step, ctx):
 
     success_count = 0
     fail_count = 0
+    failed_files = []  # قائمة الملفات الفاشلة للحفظ في failed_tts.json
 
     for i in range(1, len(parts), 2):
         script_num = parts[i]
@@ -282,33 +298,71 @@ def action_tts_multi(step, ctx):
                 log(f"  {filename}: TTS ({len(part_text)} حرف)...")
 
                 try:
-                    if _tts_and_save(part_text, filename, ctx, max_chars, subfolder=topic_folder):
+                    ok = _tts_and_save(part_text, filename, ctx, max_chars, subfolder=topic_folder)
+                    if ok:
                         success_count += 1
+                        # Whisper verification (اختياري)
+                        if verify_whisper:
+                            wav_path = os.path.join(ctx.output_dir, topic_folder, f"{filename}.wav")
+                            _whisper_verify(wav_path, part_text, filename, min_match, language)
                     else:
                         fail_count += 1
+                        failed_files.append({"file": filename, "text": part_text, "subfolder": topic_folder})
                 except Exception as e:
                     log(f"  [!] {filename}: خطأ — {str(e)[:200]}")
                     fail_count += 1
+                    failed_files.append({"file": filename, "text": part_text, "subfolder": topic_folder, "error": str(e)[:200]})
         else:
             # === وضع شورتس: نص واحد — كل الملفات في مجلد فرعي "audio" ===
             filename = f"{prefix}_{script_num}"
             log(f"  {filename}: TTS شورتس ({len(script_text)} حرف)...")
 
             try:
-                if _tts_and_save(script_text, filename, ctx, max_chars, subfolder="audio"):
+                ok = _tts_and_save(script_text, filename, ctx, max_chars, subfolder="audio")
+                if ok:
                     success_count += 1
+                    if verify_whisper:
+                        wav_path = os.path.join(ctx.output_dir, "audio", f"{filename}.wav")
+                        _whisper_verify(wav_path, script_text, filename, min_match, language)
                 else:
                     fail_count += 1
+                    failed_files.append({"file": filename, "text": script_text, "subfolder": "audio"})
             except Exception as e:
                 log(f"  [!] {filename}: خطأ — {str(e)[:200]}")
                 fail_count += 1
+                failed_files.append({"file": filename, "text": script_text, "subfolder": "audio", "error": str(e)[:200]})
 
     log(f"  === TTS Multi: {success_count} نجح | {fail_count} فشل ===")
+
+    # حفظ قائمة الفاشلين في ملف لإعادة التشغيل لاحقاً
+    if failed_files:
+        failed_path = ctx.output_path("failed_tts.json")
+        with open(failed_path, "w", encoding="utf-8") as f:
+            import json as _json
+            _json.dump(failed_files, f, ensure_ascii=False, indent=2)
+        log(f"  [!] تم حفظ قائمة الفاشلين: failed_tts.json ({len(failed_files)} ملف)")
 
     if success_count == 0:
         raise EngineError("فشل TTS لكل السكريبتات", code="TTS_MULTI_ALL_FAILED")
 
     return f"تم تحويل {success_count} ملف صوتي"
+
+
+def _whisper_verify(wav_path, original_text, label, min_match=0.7, language="ar"):
+    """تحقق اختياري بـ Whisper من جودة الصوت"""
+    try:
+        result = transcribe(wav_path, language=language)
+        if result.success:
+            similarity = _calculate_text_similarity(original_text, result.data)
+            match_pct = round(similarity * 100, 1)
+            if similarity >= min_match:
+                log(f"  ✅ {label}: Whisper {match_pct}%")
+            else:
+                log(f"  ⚠️ {label}: Whisper {match_pct}% (أقل من {int(min_match*100)}%)")
+        else:
+            log(f"  [!] {label}: Whisper فشل — {result.error}")
+    except Exception as e:
+        log(f"  [!] {label}: Whisper خطأ — {str(e)[:100]}")
 
 
 def action_transcribe(step, ctx):

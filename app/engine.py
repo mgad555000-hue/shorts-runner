@@ -216,15 +216,11 @@ def _check_response_text(text: str, model: str) -> str:
 def _check_audio_data(data: bytes, source: str) -> bytes:
     """التأكد من أن بيانات الصوت مش فاضية"""
     if data is None or len(data) == 0:
-        raise EngineError(
-            f"ملف الصوت فاضي من {source}",
-            code="EMPTY_AUDIO_DATA"
-        )
+        # Exception عادية (مش EngineError) عشان _retry_call يعيد المحاولة
+        raise Exception(f"ملف الصوت فاضي من {source} — سيُعاد المحاولة")
     if len(data) < 100:
-        raise EngineError(
-            f"ملف الصوت صغير جداً ({len(data)} bytes) من {source} - غالباً فيه مشكلة",
-            code="AUDIO_TOO_SMALL"
-        )
+        # Exception عادية عشان _retry_call يعيد المحاولة (Vertex بترجع ملف صغير لما تكون مشغولة)
+        raise Exception(f"ملف الصوت صغير جداً ({len(data)} bytes) من {source} — سيُعاد المحاولة")
     return data
 
 
@@ -1501,12 +1497,9 @@ def tts_vertex(text: str, voice: str = "Achird", project_id: str = None, locatio
 
     try:
         audio_data = _retry_call(
-            lambda: _tts_vertex_impl(text, voice, project_id, location),
+            lambda: _check_audio_data(_tts_vertex_impl(text, voice, project_id, location), "Vertex AI"),
             max_retries=3, base_delay=3.0, description="Vertex AI TTS"
         )
-
-        # فحص الصوت
-        audio_data = _check_audio_data(audio_data, "Vertex AI")
 
         duration = int((time.time() - start_time) * 1000)
         log(f"<- TTS Vertex AI OK | {len(audio_data)} bytes | {duration}ms")
