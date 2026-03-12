@@ -1045,6 +1045,7 @@ const API = '/api/utilities';
 let currentRecipeId = null;
 let allRecipes = [];
 let refreshInterval = null;
+let modalRefreshInterval = null;
 let currentUser = null;
 let authToken = localStorage.getItem('auth_token');
 let editingUserId = null;
@@ -1606,24 +1607,44 @@ async function loadRuns() {
 }
 
 // ===== Run Detail Modal =====
-async function showRunDetailModal(runId) {
-    const modal = document.getElementById('runDetailModal');
+async function refreshModalDetail(runId) {
     const content = document.getElementById('runDetailContent');
-    modal.classList.add('active');
-    content.innerHTML = '<div style="text-align:center;padding:30px;"><span class="spinner spinner-dark"></span></div>';
-
     try {
         const [runRes, logRes, filesRes] = await Promise.all([
             authFetch(`${API}/runs/${runId}`).then(r => r.json()),
             authFetch(`${API}/runs/${runId}/log`).then(r => r.json()).catch(() => ({log:''})),
             authFetch(`${API}/runs/${runId}/files`).then(r => r.json()).catch(() => ({files:[]}))
         ]);
-        content.innerHTML = renderRunDetail(runRes, logRes.log || '', filesRes.files || []);
-    } catch(e) {
-        content.innerHTML = `<div class="alert alert-error active">${esc(e.message)}</div>`;
-    }
+        const run = runRes;
+        const log = logRes.log || '';
+        const logEl = content.querySelector('.log-display');
+        if (logEl && logEl.textContent.length > 0) {
+            const wasAtBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 30;
+            if (logEl.textContent !== log) logEl.textContent = log;
+            if (wasAtBottom) logEl.scrollTop = logEl.scrollHeight;
+        } else {
+            content.innerHTML = renderRunDetail(run, log, filesRes.files || []);
+            const newLogEl = content.querySelector('.log-display');
+            if (newLogEl) newLogEl.scrollTop = newLogEl.scrollHeight;
+        }
+        if (['completed', 'failed', 'cancelled'].includes(run.status)) {
+            if (modalRefreshInterval) { clearInterval(modalRefreshInterval); modalRefreshInterval = null; }
+        }
+    } catch(e) {}
 }
-function closeRunDetailModal() { document.getElementById('runDetailModal').classList.remove('active'); }
+async function showRunDetailModal(runId) {
+    const modal = document.getElementById('runDetailModal');
+    const content = document.getElementById('runDetailContent');
+    modal.classList.add('active');
+    content.innerHTML = '<div style="text-align:center;padding:30px;"><span class="spinner spinner-dark"></span></div>';
+    if (modalRefreshInterval) { clearInterval(modalRefreshInterval); modalRefreshInterval = null; }
+    modalRefreshInterval = setInterval(() => refreshModalDetail(runId), 1500);
+    await refreshModalDetail(runId);
+}
+function closeRunDetailModal() {
+    document.getElementById('runDetailModal').classList.remove('active');
+    if (modalRefreshInterval) { clearInterval(modalRefreshInterval); modalRefreshInterval = null; }
+}
 
 // ===== Cancel Run =====
 async function cancelRun(runId) {
