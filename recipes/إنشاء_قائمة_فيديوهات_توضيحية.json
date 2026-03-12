@@ -8,11 +8,10 @@
       "label": "قراءة التعليمات"
     },
     {
-      "id": "scripts",
-      "action": "read_docx",
-      "reconstruct_markers": true,
-      "marker_prefix": "SCRIPT",
-      "label": "قراءة السكريبتات من Word"
+      "id": "topics",
+      "action": "read_json",
+      "file": "topics.json",
+      "label": "قراءة السكريبتات"
     },
     {
       "id": "videos_list",
@@ -23,7 +22,7 @@
     {
       "id": "prompt",
       "action": "template",
-      "text": "{instructions}\n\n---\n\nقائمة الفيديوهات التوضيحية المتاحة:\n\n{videos_list}\n\n---\n\nالسكريبتات المطلوب عمل قوائم فيديوهات توضيحية لها:\n\n{scripts}",
+      "text": "{instructions}\n\n---\n\nقائمة الفيديوهات التوضيحية المتاحة:\n\n{videos_list}\n\n---\n\nالسكريبت المطلوب عمل قائمة فيديوهات توضيحية له:\n\n{topics}",
       "label": "تجميع البرومبت"
     },
     {

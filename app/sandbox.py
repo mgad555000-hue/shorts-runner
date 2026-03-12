@@ -173,23 +173,41 @@ run_pipeline(config)
                     pids_limit=200,  # زيادة عدد العمليات
                     tmpfs={"/tmp": "size=500m"},  # زيادة مساحة /tmp
                     detach=True,
-                    remove=True,  # حذف الحاوية بعد الانتهاء
+                    remove=False,  # لا نحذف تلقائياً — نحتاج نقرأ اللوج أولاً
                     working_dir="/mnt/output",
                 )
 
-                # انتظار انتهاء التنفيذ (10 دقائق للمهام الطويلة مع AI)
-                result = container.wait(timeout=21600)  # 6 ساعات
-
-                # قراءة السجلات
-                logs = container.logs().decode("utf-8", errors="ignore")
-
-                # كتابة السجلات في run_log.txt
+                # كتابة header اللوج فوراً + stream اللوج في real-time
                 with open(log_path, "w", encoding="utf-8") as f:
                     f.write(f"=== Run ID: {run_id} ===\n")
                     f.write(f"Input Folder: {input_folder}\n")
-                    f.write(f"Status Code: {result['StatusCode']}\n\n")
+                    f.write(f"Exit Code: running...\n\n")
                     f.write("=== Execution Logs ===\n")
-                    f.write(logs)
+
+                logs_lines = []
+                with open(log_path, "a", encoding="utf-8") as f:
+                    for chunk in container.logs(stream=True, follow=True):
+                        line = chunk.decode("utf-8", errors="ignore")
+                        logs_lines.append(line)
+                        f.write(line)
+                        f.flush()
+
+                # انتظار انتهاء التنفيذ والحصول على exit code
+                result = container.wait(timeout=21600)  # 6 ساعات
+                logs = "".join(logs_lines)
+
+                # تحديث header بـ exit code النهائي
+                with open(log_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                content = content.replace("Exit Code: running...", f"Exit Code: {result['StatusCode']}", 1)
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+
+                # حذف الكونتينر بعد الانتهاء
+                try:
+                    container.remove()
+                except Exception:
+                    pass
 
                 # إنشاء manifest
                 exit_code = result["StatusCode"]
