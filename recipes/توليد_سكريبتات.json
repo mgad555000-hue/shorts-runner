@@ -84,6 +84,14 @@
       "save_as": "texts_output.docx",
       "font_size": 14,
       "label": "حفظ النصوص"
+    },
+    {
+      "id": "topics_json",
+      "action": "scripts_to_topics_json",
+      "input": "{texts_raw}",
+      "marker_prefix": "SCRIPT",
+      "save_as": "topics.json",
+      "label": "تصدير topics.json للوصفات الجاية"
     }
   ]
 }

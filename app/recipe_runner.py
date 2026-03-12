@@ -2008,6 +2008,32 @@ def action_split_script(step, ctx):
     return "\n\n".join(result_parts)
 
 
+def action_scripts_to_topics_json(step, ctx):
+    """تحويل نص MG Ranner (<<<SCRIPT_N>>>...<<<END_SCRIPT>>>) إلى topics.json
+    الناتج: [{id: N, title: "نص السكريبت"}, ...]
+    يُستخدم لجعل مخرجات توليد_سكريبتات صالحة مباشرةً كمدخلات لوصفات الباتش."""
+    text = str(ctx.resolve(step["input"]))
+    prefix = step.get("marker_prefix", "SCRIPT")
+    save_as = step.get("save_as", "topics.json")
+
+    pattern = rf'<<<{prefix}_(\d+)>>>(.*?)<<<END_{prefix}>>>'
+    topics = []
+    for match in re.finditer(pattern, text, re.DOTALL):
+        topic_id = int(match.group(1))
+        content = match.group(2).strip()
+        topics.append({"id": topic_id, "title": content})
+
+    topics.sort(key=lambda x: x["id"])
+    output = {"total_count": len(topics), "titles": topics}
+
+    save_path = ctx.output_path(save_as)
+    with open(save_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
+
+    log(f"  scripts_to_topics_json: {len(topics)} موضوع → {save_path}")
+    return save_path
+
+
 # ========== Thumbnail Generation ==========
 
 THUMBNAILS_CONFIG_PATH = "/app/data/thumbnails/thumbnails_config.json"
@@ -2234,6 +2260,7 @@ ACTIONS = {
     "montage_short": action_montage_short,
     "remove_tashkeel": action_remove_tashkeel,
     "split_script": action_split_script,
+    "scripts_to_topics_json": action_scripts_to_topics_json,
     "draw_thumbnail": action_draw_thumbnail,
 }
 
@@ -2260,6 +2287,7 @@ REQUIRED_PARAMS = {
     "montage_short": ["input", "screen_texts"],
     "remove_tashkeel": ["input"],
     "split_script": ["input", "part"],
+    "scripts_to_topics_json": ["input"],
     "draw_thumbnail": ["input"],
 }
 
