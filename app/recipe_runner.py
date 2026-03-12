@@ -2008,6 +2008,39 @@ def action_split_script(step, ctx):
     return "\n\n".join(result_parts)
 
 
+def action_topics_to_markers(step, ctx):
+    """تحويل topics.json إلى نص بتنسيق MG Ranner (<<<SCRIPT_N>>>...<<<END_SCRIPT>>>)
+    المدخل: قيمة JSON (string أو list أو dict بفيه titles)
+    المخرج: نص بماركرز جاهز لـ tts_multi أو أي أكشن تاني"""
+    import json as _json
+    raw = ctx.resolve(step["input"])
+    prefix = step.get("marker_prefix", "SCRIPT")
+
+    if isinstance(raw, str):
+        try:
+            raw = _json.loads(raw)
+        except Exception:
+            pass
+
+    topics = []
+    if isinstance(raw, dict) and "titles" in raw:
+        topics = raw["titles"]
+    elif isinstance(raw, list):
+        topics = raw
+
+    topics.sort(key=lambda x: int(x.get("id", 0)))
+
+    parts = []
+    for t in topics:
+        tid = t.get("id", 0)
+        title = t.get("title", "").strip()
+        parts.append(f"<<<{prefix}_{tid}>>>\n{title}\n<<<END_{prefix}>>>")
+
+    result = "\n\n".join(parts)
+    log(f"  topics_to_markers: {len(topics)} موضوع → تنسيق MG Ranner")
+    return result
+
+
 def action_scripts_to_topics_json(step, ctx):
     """تحويل نص MG Ranner (<<<SCRIPT_N>>>...<<<END_SCRIPT>>>) إلى topics.json
     الناتج: [{id: N, title: "نص السكريبت"}, ...]
@@ -2261,6 +2294,7 @@ ACTIONS = {
     "remove_tashkeel": action_remove_tashkeel,
     "split_script": action_split_script,
     "scripts_to_topics_json": action_scripts_to_topics_json,
+    "topics_to_markers": action_topics_to_markers,
     "draw_thumbnail": action_draw_thumbnail,
 }
 
@@ -2288,6 +2322,7 @@ REQUIRED_PARAMS = {
     "remove_tashkeel": ["input"],
     "split_script": ["input", "part"],
     "scripts_to_topics_json": ["input"],
+    "topics_to_markers": ["input"],
     "draw_thumbnail": ["input"],
 }
 

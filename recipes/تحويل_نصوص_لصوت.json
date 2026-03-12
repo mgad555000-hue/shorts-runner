@@ -2,11 +2,17 @@
   "name": "تحويل نصوص لصوت",
   "steps": [
     {
+      "id": "topics",
+      "action": "read_json",
+      "file": "topics.json",
+      "label": "قراءة السكريبتات من topics.json"
+    },
+    {
       "id": "scripts",
-      "action": "read_docx",
-      "reconstruct_markers": true,
+      "action": "topics_to_markers",
+      "input": "{topics}",
       "marker_prefix": "SCRIPT",
-      "label": "قراءة السكريبتات من Word"
+      "label": "تحويل topics.json لتنسيق MG Ranner"
     },
     {
       "id": "audio",
