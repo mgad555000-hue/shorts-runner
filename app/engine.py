@@ -75,9 +75,9 @@ def log(msg: str):
     """تسجيل رسالة مع الوقت"""
     timestamp = datetime.now().strftime("%H:%M:%S")
     try:
-        print(f"[{timestamp}] [ENGINE] {msg}")
+        print(f"[{timestamp}] [ENGINE] {msg}", flush=True)
     except UnicodeEncodeError:
-        print(f"[{timestamp}] [ENGINE] {msg.encode('utf-8', errors='replace').decode('utf-8')}")
+        print(f"[{timestamp}] [ENGINE] {msg.encode('utf-8', errors='replace').decode('utf-8')}", flush=True)
 
 
 # ========== فحوصات ما قبل الإرسال ==========
