@@ -142,21 +142,22 @@ def action_generate(step, ctx):
     max_tokens = step.get("max_tokens", None)
     prompt_str = str(prompt)
 
-    result = generate(
-        prompt=prompt_str,
-        model=ctx.model,
-        system_prompt=system_prompt,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-
-    if not result.success:
-        raise EngineError(f"فشل التوليد: {result.error}", code="GENERATE_FAILED")
-
-    text = result.data
-
-    # === تحقق من اكتمال الماركرز وإعادة توليد الناقص ===
-    text = _verify_and_complete_markers(prompt_str, text, ctx, system_prompt, temperature, max_tokens)
+    # === لو المدخل فيه أكتر من ماركر → توليد كل واحد لوحده بالتوازي ===
+    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens)
+    if per_marker_result is not None:
+        text = per_marker_result
+    else:
+        # مدخل عادي (ماركر واحد أو بدون) → توليد عادي
+        result = generate(
+            prompt=prompt_str,
+            model=ctx.model,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        if not result.success:
+            raise EngineError(f"فشل التوليد: {result.error}", code="GENERATE_FAILED")
+        text = result.data
 
     # حفظ لو محدد
     if step.get("save_as"):
@@ -168,14 +169,13 @@ def action_generate(step, ctx):
     return text
 
 
-def _verify_and_complete_markers(prompt_str, output, ctx, system_prompt, temperature, max_tokens):
+def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens):
     """
-    تتحقق إن كل ماركرز SCRIPT/INTRO في المدخل موجودة في المخرج.
-    لو فيه ماركرز ناقصة → تستخرج المقاطع الناقصة من المدخل وتعيد توليدها في دفعات.
+    لو المدخل فيه أكتر من ماركر SCRIPT/INTRO → يقسّمه ويولّد كل واحد لوحده بالتوازي.
+    بيرجع None لو المدخل مش multi-marker (يعني استخدم generate العادي).
     """
     MARKER_PAT = r'<<<((?:SCRIPT|INTRO)_\d+)>>>'
-    CHUNK_SIZE = 15
-    MAX_RETRY_PER_CHUNK = 2
+    MAX_WORKERS = 5
 
     # --- استخراج ماركرز المدخل (بالترتيب بدون تكرار) ---
     seen = set()
@@ -186,70 +186,76 @@ def _verify_and_complete_markers(prompt_str, output, ctx, system_prompt, tempera
             input_markers.append(m)
 
     if len(input_markers) <= 1:
-        return output  # مش multi-marker — مفيش حاجة نتحقق منها
+        return None  # مش multi-marker — الـ caller يستخدم generate العادي
 
-    # --- مقارنة ---
-    output_markers = set(re.findall(MARKER_PAT, output))
-    missing = [m for m in input_markers if m not in output_markers]
+    # --- استخراج التعليمات (كل شيء قبل أول ماركر) ---
+    first_match = re.search(MARKER_PAT, prompt_str)
+    instructions_part = prompt_str[:first_match.start()]
 
-    if not missing:
-        log(f"  ✓ كل الماركرز موجودة ({len(input_markers)}/{len(input_markers)})")
-        return output
+    # --- استخراج كل مقطع ---
+    sections = {}
+    for marker in input_markers:
+        escaped = re.escape(f'<<<{marker}>>>')
+        pattern = rf'({escaped}.*?)(?=<<<(?:SCRIPT|INTRO)_\d+>>>|\Z)'
+        match = re.search(pattern, prompt_str, re.DOTALL)
+        if match:
+            sections[marker] = match.group(1).strip()
 
-    log(f"  [!] {len(missing)} ماركر ناقص من {len(input_markers)} — إعادة توليد...")
+    log(f"  [*] {len(input_markers)} ماركر — توليد كل واحد منفصلاً ({MAX_WORKERS} بالتوازي)...")
 
-    # --- استخراج جزء التعليمات (كل شيء قبل أول ماركر) ---
-    first_marker_match = re.search(MARKER_PAT, prompt_str)
-    if not first_marker_match:
-        return output
-    instructions_part = prompt_str[:first_marker_match.start()]
+    # --- توليد كل واحد بالتوازي ---
+    def _gen_one(marker):
+        section = sections.get(marker)
+        if not section:
+            return marker, None
+        single_prompt = instructions_part + section
+        result = generate(
+            prompt=single_prompt,
+            model=ctx.model,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return marker, result.data if result.success else None
 
-    # --- إعادة التوليد في دفعات ---
-    for chunk_start in range(0, len(missing), CHUNK_SIZE):
-        chunk = missing[chunk_start:chunk_start + CHUNK_SIZE]
-
-        # استخراج المقاطع الناقصة من المدخل الأصلي
-        sections = []
-        for marker in chunk:
-            escaped = re.escape(f'<<<{marker}>>>')
-            pattern = rf'({escaped}.*?)(?=<<<(?:SCRIPT|INTRO)_\d+>>>|\Z)'
-            match = re.search(pattern, prompt_str, re.DOTALL)
-            if match:
-                sections.append(match.group(1).strip())
-
-        if not sections:
-            continue
-
-        retry_prompt = instructions_part + "\n".join(sections)
-        chunk_num = chunk_start // CHUNK_SIZE + 1
-        log(f"  → إعادة توليد {len(chunk)} ماركر ناقص (دفعة {chunk_num})...")
-
-        for attempt in range(MAX_RETRY_PER_CHUNK):
-            retry_result = generate(
-                prompt=retry_prompt,
-                model=ctx.model,
-                system_prompt=system_prompt,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            if retry_result.success:
-                new_markers = set(re.findall(MARKER_PAT, retry_result.data))
-                got = [m for m in chunk if m in new_markers]
-                log(f"  ✓ تم استرجاع {len(got)}/{len(chunk)} ماركر")
-                output = output.rstrip() + "\n" + retry_result.data
-                break
+    results = {}
+    failed = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(_gen_one, m): m for m in input_markers}
+        done_count = 0
+        for future in as_completed(futures):
+            marker, data = future.result()
+            done_count += 1
+            if data:
+                results[marker] = data
+                log(f"  ✓ {marker} ({done_count}/{len(input_markers)})")
             else:
-                log(f"  [!] فشل المحاولة {attempt + 1}: {retry_result.error}")
+                failed.append(marker)
+                log(f"  [!] فشل {marker} ({done_count}/{len(input_markers)})")
 
-    # --- فحص نهائي ---
-    final_markers = set(re.findall(MARKER_PAT, output))
-    still_missing = [m for m in input_markers if m not in final_markers]
-    if still_missing:
-        log(f"  [!!] لسه {len(still_missing)} ماركر ناقص بعد الإعادة: {still_missing[:10]}")
-    else:
-        log(f"  ✓ تم استكمال كل الماركرز بنجاح ({len(input_markers)}/{len(input_markers)})")
+    # --- إعادة محاولة الفاشلين (مرة واحدة) ---
+    if failed:
+        log(f"  → إعادة محاولة {len(failed)} ماركر فاشل...")
+        for marker in failed:
+            _, data = _gen_one(marker)
+            if data:
+                results[marker] = data
+                log(f"  ✓ {marker} (إعادة)")
+            else:
+                log(f"  [!!] فشل نهائي: {marker}")
 
-    return output
+    # --- تجميع بالترتيب الأصلي ---
+    combined = []
+    for marker in input_markers:
+        if marker in results:
+            combined.append(results[marker])
+
+    log(f"  تم توليد {len(results)}/{len(input_markers)} ماركر بنجاح")
+
+    if not combined:
+        raise EngineError(f"فشل توليد كل الماركرز", code="GENERATE_ALL_FAILED")
+
+    return "\n".join(combined)
 
 
 def action_tts(step, ctx):
