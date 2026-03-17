@@ -711,9 +711,6 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
                 "temperature": temperature,
                 "topP": 0.95,
                 "maxOutputTokens": max_tokens,
-                "thinkingConfig": {
-                    "thinkingBudget": 16000
-                }
             }
         }
         if system_prompt:
