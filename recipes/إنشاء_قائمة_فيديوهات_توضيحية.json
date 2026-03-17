@@ -31,6 +31,7 @@
       "input": "{prompt}",
       "max_tokens": 32000,
       "temperature": 0.3,
+      "thinking_budget": 0,
       "label": "توليد قوائم الفيديوهات التوضيحية"
     },
     {

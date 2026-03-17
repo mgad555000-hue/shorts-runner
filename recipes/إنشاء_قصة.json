@@ -25,6 +25,7 @@
       "input": "{prompt}",
       "max_tokens": 16000,
       "temperature": 0.7,
+      "thinking_budget": 0,
       "label": "توليد القصص"
     },
     {
@@ -45,6 +46,7 @@
       "input": "{tashkeel_prompt}",
       "max_tokens": 32000,
       "temperature": 0.3,
+      "thinking_budget": 1024,
       "label": "تشكيل القصص"
     },
     {

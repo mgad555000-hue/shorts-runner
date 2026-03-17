@@ -25,6 +25,7 @@
       "input": "{prompt}",
       "max_tokens": 8000,
       "temperature": 0.3,
+      "thinking_budget": 0,
       "label": "توليد المقدمات"
     },
     {

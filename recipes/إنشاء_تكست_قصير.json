@@ -25,6 +25,7 @@
       "input": "{prompt}",
       "temperature": 0.7,
       "max_tokens": 16000,
+      "thinking_budget": 0,
       "label": "توليد التكست"
     },
     {
