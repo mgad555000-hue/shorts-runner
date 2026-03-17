@@ -2137,11 +2137,25 @@ def action_split_script(step, ctx):
                 else:
                     section = content[sep_idx + len(separator):].strip()
 
-        # لو مفيش فاصل خالص — تخطي مع تحذير
+        # الطريقة الثالثة: لو مفيش أي فاصل — أول فقرة = مقدمة، الباقي = نصوص
         if section is None:
-            log(f"  [!] SCRIPT_{script_num}: لا يوجد فاصل (PART_1 أو '{separator}') — تخطي")
-            skipped += 1
-            continue
+            # نقسم على أول سطر فاضي (فقرة فاضية)
+            paragraphs = re.split(r'\n\s*\n', content.strip(), maxsplit=1)
+            if len(paragraphs) >= 2:
+                if part == "intros":
+                    section = paragraphs[0].strip()
+                else:
+                    section = paragraphs[1].strip()
+                log(f"  [~] SCRIPT_{script_num}: fallback فقرات (مفيش PART_1 ولا separator)")
+            else:
+                # فقرة واحدة بس — للنصوص ناخدها كلها، للمقدمات نتخطى
+                if part == "texts":
+                    section = content.strip()
+                    log(f"  [~] SCRIPT_{script_num}: فقرة واحدة — أخذت كنص كامل")
+                else:
+                    log(f"  [!] SCRIPT_{script_num}: فقرة واحدة بدون فاصل — تخطي المقدمة")
+                    skipped += 1
+                    continue
 
         # لو المقدمة فاضية — تخطي مع تحذير
         if part == "intros" and not section:
@@ -2719,7 +2733,12 @@ def _reassemble_batch_results(results, topics, marker_prefix):
 
         if topic_id in result_by_topic_id:
             # لقينا النتيجة بالماركر الصح
-            combined_parts.append(result_by_topic_id[topic_id])
+            text = result_by_topic_id[topic_id]
+            # تأكد إن END marker موجود — لو الـ AI نسيه نضيفه
+            if end_marker not in text:
+                text = text.rstrip() + f"\n{end_marker}"
+                log(f"  [~] موضوع {topic_id}: تم إضافة {end_marker} (الـ AI نسيه)")
+            combined_parts.append(text)
         elif unmatched_idx < len(unmatched_results):
             # مفيش ماركر — نستخدم أول نتيجة متاحة ونلفها بالماركر الصح
             text = unmatched_results[unmatched_idx]
