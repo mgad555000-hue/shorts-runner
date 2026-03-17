@@ -2879,7 +2879,15 @@ def _retry_truncated_batch_results(batch_results, topics, marker_prefix, config,
     max_tokens = gen_step.get("max_tokens", 8192)
 
     retry_count = 0
-    max_retries = 2
+    max_retries = 3
+
+    # Thinking models (مثل gemini-3.1-pro-preview) بتستهلك التوكنز في التفكير.
+    # الريتراي لازم يستخدم max_tokens أعلى عشان يوفّر مساحة كافية للمخرج.
+    retry_max_tokens_levels = [
+        min(max_tokens * 2, 65536),   # محاولة 1: ضعف
+        min(max_tokens * 2, 65536),   # محاولة 2: ضعف (random seed مختلف)
+        min(max_tokens * 4, 131072),  # محاولة 3: 4 أضعاف
+    ]
 
     for topic_id in truncated_topic_ids:
         prompt_idx = topic_id_to_prompt_idx.get(topic_id)
@@ -2902,14 +2910,15 @@ def _retry_truncated_batch_results(batch_results, topics, marker_prefix, config,
 
         success = False
         for attempt in range(max_retries):
+            retry_tokens = retry_max_tokens_levels[attempt]
             try:
-                log(f"  → إعادة توليد SCRIPT_{topic_id} (محاولة {attempt + 1}/{max_retries})...")
+                log(f"  → إعادة توليد SCRIPT_{topic_id} (محاولة {attempt + 1}/{max_retries}, max_tokens={retry_tokens})...")
                 result = generate(
                     prompt=prompts[prompt_idx],
                     model=ctx.model,
                     system_prompt=system_prompt,
                     temperature=temperature,
-                    max_tokens=max_tokens
+                    max_tokens=retry_tokens
                 )
 
                 if result.success and result.data:
@@ -2927,7 +2936,7 @@ def _retry_truncated_batch_results(batch_results, topics, marker_prefix, config,
                         success = True
                         break
                     else:
-                        log(f"  [!] SCRIPT_{topic_id}: النتيجة الجديدة بدون END marker ({new_len} حرف)")
+                        log(f"  [!] SCRIPT_{topic_id}: بدون END marker ({new_len} حرف, max_tokens={retry_tokens})")
                 else:
                     log(f"  [!] SCRIPT_{topic_id}: فشل التوليد — {getattr(result, 'error', '?')}")
             except Exception as e:
