@@ -2695,6 +2695,157 @@ def _build_batch_prompts(config, ctx, topics, marker_prefix):
     return prompts
 
 
+def _retry_truncated_batch_results(batch_results, topics, marker_prefix, config, ctx, metadata):
+    """كشف السكريبتات المقطوعة (MAX_TOKENS) وإعادة توليدها عبر API عادي.
+
+    السبب: موديلات thinking (مثل gemini-3.1-pro-preview) ممكن تستهلك
+    معظم الـ token budget في التفكير، ويتبقى مساحة قليلة للكتابة.
+    الباتش API بيرجع finishReason=MAX_TOKENS في الحالة دي.
+
+    الحل: نعيد توليد السكريبتات المقطوعة واحد واحد عبر API العادي
+    (اللي بيتعامل مع الـ thinking budget أحسن).
+    """
+    # الخطوة 1: كشف المقطوعات — نقرأ الـ predictions.jsonl مباشرة من GCS
+    truncated_indices = []
+    try:
+        batch_info_path = metadata.get("batch_info_path", "")
+        if batch_info_path:
+            with open(batch_info_path, 'r') as f:
+                batch_info_data = json.load(f)
+
+            # اكتشاف الموفر
+            provider = batch_info_data.get("provider", "")
+            if provider == "gemini":
+                from engine import _download_from_gcs
+
+                # تحميل النتائج الخام
+                job_name = batch_info_data.get("job_name", "")
+                extra = batch_info_data.get("extra", {})
+
+                from google import genai
+                from engine import _setup_gcs_credentials
+                project_id, location, bucket_name = _setup_gcs_credentials()
+                saved_location = extra.get("location", location)
+                client = genai.Client(vertexai=True, project=project_id, location=saved_location)
+
+                batch_job = client.batches.get(name=job_name)
+                if hasattr(batch_job, 'dest') and hasattr(batch_job.dest, 'gcs_uri'):
+                    jsonl_content = _download_from_gcs(batch_job.dest.gcs_uri)
+
+                    for line_idx, line in enumerate(jsonl_content.strip().split('\n')):
+                        if line:
+                            try:
+                                data = json.loads(line)
+                                finish = data['response']['candidates'][0].get('finishReason', 'UNKNOWN')
+                                if finish == 'MAX_TOKENS':
+                                    truncated_indices.append(line_idx)
+                            except (KeyError, IndexError, json.JSONDecodeError):
+                                pass
+    except Exception as e:
+        log(f"  [!] فشل كشف المقطوعات: {str(e)[:200]}")
+
+    if not truncated_indices:
+        return batch_results
+
+    log(f"  [!] تم كشف {len(truncated_indices)} سكريبت مقطوع (MAX_TOKENS) — إعادة توليد...")
+
+    # الخطوة 2: تحديد الـ topic ID لكل نتيجة مقطوعة من الـ SCRIPT marker
+    truncated_topic_ids = []
+    for batch_idx in truncated_indices:
+        if batch_idx >= len(batch_results):
+            continue
+        text = batch_results[batch_idx]
+        marker_match = re.search(rf'<<<{marker_prefix}_(\d+)>>>', text)
+        if marker_match:
+            topic_id = int(marker_match.group(1))
+            truncated_topic_ids.append(topic_id)
+        else:
+            log(f"  [!] نتيجة مقطوعة في index {batch_idx} بدون marker — تخطي")
+
+    if not truncated_topic_ids:
+        return batch_results
+
+    # الخطوة 3: بناء prompts لكل المواضيع (بنفس ترتيب topics)
+    prompts = _build_batch_prompts(config, ctx, topics, marker_prefix)
+    if not prompts:
+        log(f"  [!] فشل بناء البرومبتات للـ retry")
+        return batch_results
+
+    # بناء خريطة topic_id → prompt_index
+    topic_id_to_prompt_idx = {}
+    for idx, topic in enumerate(topics):
+        topic_id_to_prompt_idx[topic.get("id", 0)] = idx
+
+    # الخطوة 4: إعادة توليد عبر API العادي
+    gen_step_idx = metadata.get("generate_step_index", 0)
+    steps = config["steps"]
+    gen_step = steps[gen_step_idx]
+    system_prompt = ctx.resolve(gen_step.get("system_prompt", "")) if gen_step.get("system_prompt") else ""
+    temperature = gen_step.get("temperature", 0.7)
+    max_tokens = gen_step.get("max_tokens", 8192)
+
+    retry_count = 0
+    max_retries = 2
+
+    for topic_id in truncated_topic_ids:
+        prompt_idx = topic_id_to_prompt_idx.get(topic_id)
+        if prompt_idx is None:
+            log(f"  [!] SCRIPT_{topic_id}: لا يوجد prompt مطابق — تخطي")
+            continue
+
+        # إيجاد النتيجة المقطوعة في batch_results
+        batch_idx = None
+        for bi in truncated_indices:
+            if bi < len(batch_results):
+                m = re.search(rf'<<<{marker_prefix}_{topic_id}>>>', batch_results[bi])
+                if m:
+                    batch_idx = bi
+                    break
+
+        if batch_idx is None:
+            log(f"  [!] SCRIPT_{topic_id}: لم يتم العثور على النتيجة المقطوعة — تخطي")
+            continue
+
+        success = False
+        for attempt in range(max_retries):
+            try:
+                log(f"  → إعادة توليد SCRIPT_{topic_id} (محاولة {attempt + 1}/{max_retries})...")
+                result = generate(
+                    prompt=prompts[prompt_idx],
+                    model=ctx.model,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+
+                if result.success and result.data:
+                    new_text = result.data.strip()
+                    old_len = len(batch_results[batch_idx])
+                    new_len = len(new_text)
+
+                    end_marker = f"<<<END_{marker_prefix}>>>"
+                    has_end = end_marker in new_text
+
+                    if has_end:
+                        batch_results[batch_idx] = new_text
+                        log(f"  ✓ SCRIPT_{topic_id}: {old_len} → {new_len} حرف | END=True")
+                        retry_count += 1
+                        success = True
+                        break
+                    else:
+                        log(f"  [!] SCRIPT_{topic_id}: النتيجة الجديدة بدون END marker ({new_len} حرف)")
+                else:
+                    log(f"  [!] SCRIPT_{topic_id}: فشل التوليد — {getattr(result, 'error', '?')}")
+            except Exception as e:
+                log(f"  [!] SCRIPT_{topic_id}: خطأ — {str(e)[:200]}")
+
+        if not success:
+            log(f"  [!] SCRIPT_{topic_id}: فشلت كل المحاولات — استخدام النتيجة المقطوعة")
+
+    log(f"  تم إصلاح {retry_count}/{len(truncated_topic_ids)} سكريبت مقطوع")
+    return batch_results
+
+
 def _reassemble_batch_results(results, topics, marker_prefix):
     """تجميع نتائج الباتش في نص واحد بالماركرز الصحيحة
 
@@ -2904,6 +3055,11 @@ def _run_mode_receive_only(config, ctx, steps):
                 continue
             raise
 
+    # كشف وإعادة توليد السكريبتات المقطوعة (MAX_TOKENS)
+    batch_results = _retry_truncated_batch_results(
+        batch_results, topics, marker_prefix, config, ctx, metadata
+    )
+
     # تجميع النتائج
     combined = _reassemble_batch_results(batch_results, topics, marker_prefix)
     ctx.results[gen_step_id] = combined
@@ -2988,6 +3144,21 @@ def _run_mode_batch_auto(config, ctx, steps):
                 time.sleep(poll_interval)
                 continue
             raise
+
+    # حفظ metadata للـ retry
+    metadata = {
+        "generate_step_id": gen_step["id"],
+        "generate_step_index": gen_idx,
+        "marker_prefix": marker_prefix,
+        "topics": topics,
+        "batch_info_path": save_path,
+        "pre_results": {k: v for k, v in ctx.results.items() if isinstance(v, str)},
+    }
+
+    # كشف وإعادة توليد السكريبتات المقطوعة (MAX_TOKENS)
+    batch_results = _retry_truncated_batch_results(
+        batch_results, topics, marker_prefix, config, ctx, metadata
+    )
 
     # تجميع النتائج
     combined = _reassemble_batch_results(batch_results, topics, marker_prefix)

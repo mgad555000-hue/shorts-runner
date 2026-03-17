@@ -711,6 +711,9 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
                 "temperature": temperature,
                 "topP": 0.95,
                 "maxOutputTokens": max_tokens,
+                "thinkingConfig": {
+                    "thinkingBudget": 16000
+                }
             }
         }
         if system_prompt:
@@ -1033,8 +1036,9 @@ def _batch_retrieve_gemini(batch_info: BatchInfo, api_key: str) -> list:
             code="BATCH_JOB_NOT_READY"
         )
 
-    # استخراج النتائج
-    results = []
+    # استخراج النتائج مع finishReason
+    results = []       # النصوص
+    finish_reasons = [] # أسباب الإنهاء
 
     # طريقة 1: من GCS output (الطريقة الأساسية)
     if hasattr(batch_job, 'dest') and hasattr(batch_job.dest, 'gcs_uri'):
@@ -1049,11 +1053,15 @@ def _batch_retrieve_gemini(batch_info: BatchInfo, api_key: str) -> list:
             if line:
                 try:
                     data = json.loads(line)
-                    text = data['response']['candidates'][0]['content']['parts'][0]['text']
+                    candidate = data['response']['candidates'][0]
+                    text = candidate['content']['parts'][0]['text']
+                    finish = candidate.get('finishReason', 'UNKNOWN')
                     results.append(text)
+                    finish_reasons.append(finish)
                 except (KeyError, IndexError, json.JSONDecodeError) as e:
                     log(f"[!] فشل استخراج نتيجة من GCS: {str(e)}")
                     results.append("")
+                    finish_reasons.append("ERROR")
 
     # طريقة 2: من inlined_responses (fallback)
     elif hasattr(batch_job, 'dest') and hasattr(batch_job.dest, 'inlined_responses'):
@@ -1061,12 +1069,24 @@ def _batch_retrieve_gemini(batch_info: BatchInfo, api_key: str) -> list:
         for response in batch_job.dest.inlined_responses:
             try:
                 text = response.response.candidates[0].content.parts[0].text
+                finish = getattr(response.response.candidates[0], 'finish_reason', 'UNKNOWN')
                 results.append(text)
+                finish_reasons.append(str(finish))
             except (AttributeError, IndexError) as e:
                 log(f"[!] فشل استخراج نتيجة: {str(e)}")
                 results.append("")
+                finish_reasons.append("ERROR")
     else:
         log(f"[!] تحذير: لم يتم العثور على نتائج في batch_job.dest")
+
+    # تسجيل إحصائيات finishReason
+    truncated = [i for i, r in enumerate(finish_reasons) if r == 'MAX_TOKENS']
+    if truncated:
+        log(f"  [!] {len(truncated)} نتيجة مقطوعة (MAX_TOKENS) من {len(results)}")
+
+    # حفظ finish_reasons في batch_info للاستخدام لاحقاً
+    if not hasattr(batch_info, '_finish_reasons'):
+        batch_info._finish_reasons = finish_reasons
 
     return results
 
