@@ -173,16 +173,9 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
     """
     لو المدخل فيه أكتر من ماركر SCRIPT/INTRO → يقسّمه ويولّد كل واحد لوحده بالتوازي.
     بيرجع None لو المدخل مش multi-marker (يعني استخدم generate العادي).
-
-    ضمانات:
-    - كل ماركر يتولّد لوحده (مفيش truncation بسبب تجميع)
-    - max_tokens أعلى (65536) عشان thinking models
-    - تحقق من اكتمال المخرج: لو المخرج أقصر من المدخل بكتير → إعادة بـ tokens أعلى
     """
     MARKER_PAT = r'<<<((?:SCRIPT|INTRO)_\d+)>>>'
     MAX_WORKERS = 5
-    # Thinking models بتستهلك tokens في التفكير — لازم budget أعلى
-    SAFE_MAX_TOKENS = max(max_tokens or 0, 65536)
 
     # --- استخراج ماركرز المدخل (بالترتيب بدون تكرار) ---
     seen = set()
@@ -199,21 +192,19 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
     first_match = re.search(MARKER_PAT, prompt_str)
     instructions_part = prompt_str[:first_match.start()]
 
-    # --- استخراج كل مقطع + حساب طوله ---
+    # --- استخراج كل مقطع ---
     sections = {}
-    section_lengths = {}
     for marker in input_markers:
         escaped = re.escape(f'<<<{marker}>>>')
         pattern = rf'({escaped}.*?)(?=<<<(?:SCRIPT|INTRO)_\d+>>>|\Z)'
         match = re.search(pattern, prompt_str, re.DOTALL)
         if match:
             sections[marker] = match.group(1).strip()
-            section_lengths[marker] = len(sections[marker])
 
-    log(f"  [*] {len(input_markers)} ماركر — توليد كل واحد منفصلاً ({MAX_WORKERS} بالتوازي, max_tokens={SAFE_MAX_TOKENS})...")
+    log(f"  [*] {len(input_markers)} ماركر — توليد كل واحد منفصلاً ({MAX_WORKERS} بالتوازي)...")
 
     # --- توليد كل واحد بالتوازي ---
-    def _gen_one(marker, tokens=SAFE_MAX_TOKENS):
+    def _gen_one(marker):
         section = sections.get(marker)
         if not section:
             return marker, None
@@ -223,7 +214,7 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
             model=ctx.model,
             system_prompt=system_prompt,
             temperature=temperature,
-            max_tokens=tokens,
+            max_tokens=max_tokens,
         )
         return marker, result.data if result.success else None
 
@@ -242,7 +233,7 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
                 failed.append(marker)
                 log(f"  [!] فشل {marker} ({done_count}/{len(input_markers)})")
 
-    # --- إعادة محاولة الفاشلين ---
+    # --- إعادة محاولة الفاشلين (مرة واحدة) ---
     if failed:
         log(f"  → إعادة محاولة {len(failed)} ماركر فاشل...")
         for marker in failed:
@@ -252,34 +243,6 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
                 log(f"  ✓ {marker} (إعادة)")
             else:
                 log(f"  [!!] فشل نهائي: {marker}")
-
-    # --- كشف المقطوع: لو المخرج أقصر من 70% من المدخل → مقطوع ---
-    truncated = []
-    for marker in input_markers:
-        if marker in results and marker in section_lengths:
-            input_len = section_lengths[marker]
-            output_len = len(results[marker])
-            # التشكيل بيزوّد الطول عادةً — لو المخرج أقصر من 70% من المدخل فهو مقطوع
-            if input_len > 200 and output_len < input_len * 0.7:
-                truncated.append(marker)
-                log(f"  [!] {marker}: مخرج مقطوع ({output_len} حرف < 70% من {input_len} حرف)")
-
-    # --- إعادة توليد المقطوعين بـ tokens أعلى ---
-    if truncated:
-        HIGHER_TOKENS = min(SAFE_MAX_TOKENS * 2, 131072)
-        log(f"  → إعادة توليد {len(truncated)} ماركر مقطوع بـ max_tokens={HIGHER_TOKENS}...")
-        for marker in truncated:
-            _, data = _gen_one(marker, tokens=HIGHER_TOKENS)
-            if data:
-                new_len = len(data)
-                old_len = len(results[marker])
-                if new_len > old_len:
-                    results[marker] = data
-                    log(f"  ✓ {marker}: {old_len} → {new_len} حرف")
-                else:
-                    log(f"  [~] {marker}: الإعادة أقصر ({new_len} حرف) — الاحتفاظ بالأصل")
-            else:
-                log(f"  [!] {marker}: فشل الإعادة")
 
     # --- تجميع بالترتيب الأصلي ---
     combined = []
