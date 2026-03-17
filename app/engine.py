@@ -37,6 +37,7 @@ class EngineResult:
     provider: str = ""         # المزود (gemini, openai, claude, glm, elevenlabs, vertex, whisper)
     attempts: int = 0          # عدد المحاولات
     duration_ms: int = 0       # مدة التنفيذ
+    truncated: bool = False    # True لو finish_reason=MAX_TOKENS (مقطوع أكيد)
 
 
 @dataclass
@@ -343,7 +344,7 @@ def _get_api_key_for_provider(provider: str) -> str:
 
 # ========== الدوال الستة الرئيسية (هيكل فارغ - يتملأ في المراحل التالية) ==========
 
-def generate(prompt: str, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = None) -> EngineResult:
+def generate(prompt: str, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = None, thinking_budget: int = None) -> EngineResult:
     """
     الدالة 1: توليد نص من برومبت
     تدعم: Gemini, OpenAI, Claude, GLM, Vertex AI
@@ -362,12 +363,18 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
 
     log(f"-> generate | model: {model} | provider: {provider} | prompt: {len(prompt)} chars")
 
+    truncated = False
     try:
         if provider == "gemini":
-            text = _retry_call(
-                lambda: _generate_gemini(prompt, model, api_key, system_prompt, temperature, max_tokens),
+            gen_result = _retry_call(
+                lambda: _generate_gemini(prompt, model, api_key, system_prompt, temperature, max_tokens, thinking_budget),
                 max_retries=3, base_delay=3.0, description=f"Gemini {model}"
             )
+            # _generate_gemini بترجع tuple (text, is_truncated)
+            if isinstance(gen_result, tuple):
+                text, truncated = gen_result
+            else:
+                text = gen_result
         elif provider == "vertex":
             # استخرج اسم الموديل الفعلي (بعد "vertex:")
             actual_model = model.split(":", 1)[1] if ":" in model else model
@@ -399,9 +406,11 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
         duration = int((time.time() - start_time) * 1000)
         log(f"<- generate OK | {len(text)} chars | {duration}ms")
 
+        if truncated:
+            log(f"  [!] finish_reason=MAX_TOKENS — المخرج مقطوع أكيد")
         return EngineResult(
             success=True, data=text, model=model, provider=provider,
-            duration_ms=duration
+            duration_ms=duration, truncated=truncated
         )
 
     except EngineError:
@@ -416,8 +425,11 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
 
 # ========== دوال الربط الفعلية (منسوخة من الكود المجرب) ==========
 
-def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
-    """ربط Gemini عبر google.genai SDK الجديدة"""
+def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None) -> tuple:
+    """ربط Gemini عبر google.genai SDK الجديدة.
+    بترجع tuple: (text, is_truncated)
+    thinking_budget: لو محدد، يحد ميزانية التفكير — مفيد للمهام الميكانيكية زي التشكيل
+    """
     from google import genai
     from google.genai import types
 
@@ -426,6 +438,11 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
     config_params = {"temperature": temperature, "top_p": 0.95}
     if max_tokens:
         config_params["max_output_tokens"] = max_tokens
+
+    # تحكم في ميزانية التفكير — للمهام الميكانيكية (تشكيل وغيره) نحد التفكير
+    if thinking_budget is not None:
+        config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
+
     config = types.GenerateContentConfig(**config_params)
     if system_prompt:
         config.system_instruction = system_prompt
@@ -439,7 +456,14 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
     if not response or not response.text:
         raise ValueError("Gemini returned empty response")
 
-    return response.text
+    # فحص finish_reason — لو MAX_TOKENS يبقى المخرج مقطوع أكيد
+    is_truncated = False
+    if response.candidates and len(response.candidates) > 0:
+        fr = response.candidates[0].finish_reason
+        if fr and str(fr) == "MAX_TOKENS":
+            is_truncated = True
+
+    return response.text, is_truncated
 
 
 def _generate_openai(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
