@@ -140,10 +140,11 @@ def action_generate(step, ctx):
     system_prompt = ctx.resolve(step.get("system_prompt", "")) if step.get("system_prompt") else ""
     temperature = step.get("temperature", 0.7)
     max_tokens = step.get("max_tokens", None)
+    thinking_budget = step.get("thinking_budget", None)  # None = الموديل يقرر، 0 = بدون تفكير
     prompt_str = str(prompt)
 
     # === لو المدخل فيه أكتر من ماركر → توليد كل واحد لوحده بالتوازي ===
-    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens)
+    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget)
     if per_marker_result is not None:
         text = per_marker_result
     else:
@@ -154,6 +155,7 @@ def action_generate(step, ctx):
             system_prompt=system_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
+            thinking_budget=thinking_budget,
         )
         if not result.success:
             raise EngineError(f"فشل التوليد: {result.error}", code="GENERATE_FAILED")
@@ -169,7 +171,7 @@ def action_generate(step, ctx):
     return text
 
 
-def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens):
+def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget=None):
     """
     لو المدخل فيه أكتر من ماركر SCRIPT/INTRO → يقسّمه ويولّد كل واحد لوحده بالتوازي.
     بيرجع None لو المدخل مش multi-marker (يعني استخدم generate العادي).
@@ -215,6 +217,7 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
             system_prompt=system_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
+            thinking_budget=thinking_budget,
         )
         return marker, result.data if result.success else None
 
@@ -524,6 +527,7 @@ def action_batch_send(step, ctx):
     system_prompt = ctx.resolve(step.get("system_prompt", "")) if step.get("system_prompt") else ""
     temperature = step.get("temperature", 0.7)
     max_tokens = step.get("max_tokens", 8192)
+    thinking_budget = step.get("thinking_budget", None)
 
     save_path = None
     if step.get("save_as"):
@@ -536,6 +540,7 @@ def action_batch_send(step, ctx):
         temperature=temperature,
         max_tokens=max_tokens,
         save_path=save_path,
+        thinking_budget=thinking_budget,
     )
 
     if not result.success:
@@ -3093,6 +3098,7 @@ def _run_mode_send_only(config, ctx, steps):
     system_prompt = ctx.resolve(gen_step.get("system_prompt", "")) if gen_step.get("system_prompt") else ""
     temperature = gen_step.get("temperature", 0.7)
     max_tokens = gen_step.get("max_tokens", 8192)
+    thinking_budget = gen_step.get("thinking_budget", None)
 
     save_path = ctx.output_path("batch_job_info.json")
 
@@ -3104,6 +3110,7 @@ def _run_mode_send_only(config, ctx, steps):
         temperature=temperature,
         max_tokens=max_tokens,
         save_path=save_path,
+        thinking_budget=thinking_budget,
     )
 
     if not result.success:
@@ -3204,6 +3211,7 @@ def _run_mode_batch_auto(config, ctx, steps):
     system_prompt = ctx.resolve(gen_step.get("system_prompt", "")) if gen_step.get("system_prompt") else ""
     temperature = gen_step.get("temperature", 0.7)
     max_tokens = gen_step.get("max_tokens", 8192)
+    thinking_budget = gen_step.get("thinking_budget", None)
 
     save_path = ctx.output_path("batch_job_info.json")
 
@@ -3215,6 +3223,7 @@ def _run_mode_batch_auto(config, ctx, steps):
         temperature=temperature,
         max_tokens=max_tokens,
         save_path=save_path,
+        thinking_budget=thinking_budget,
     )
 
     if not send_result.success:

@@ -343,7 +343,7 @@ def _get_api_key_for_provider(provider: str) -> str:
 
 # ========== الدوال الستة الرئيسية (هيكل فارغ - يتملأ في المراحل التالية) ==========
 
-def generate(prompt: str, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = None) -> EngineResult:
+def generate(prompt: str, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = None, thinking_budget: int = None) -> EngineResult:
     """
     الدالة 1: توليد نص من برومبت
     تدعم: Gemini, OpenAI, Claude, GLM, Vertex AI
@@ -365,7 +365,7 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
     try:
         if provider == "gemini":
             text = _retry_call(
-                lambda: _generate_gemini(prompt, model, api_key, system_prompt, temperature, max_tokens),
+                lambda: _generate_gemini(prompt, model, api_key, system_prompt, temperature, max_tokens, thinking_budget),
                 max_retries=3, base_delay=3.0, description=f"Gemini {model}"
             )
         elif provider == "vertex":
@@ -416,7 +416,7 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
 
 # ========== دوال الربط الفعلية (منسوخة من الكود المجرب) ==========
 
-def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None) -> str:
     """ربط Gemini عبر google.genai SDK الجديدة"""
     from google import genai
     from google.genai import types
@@ -426,6 +426,9 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
     config_params = {"temperature": temperature, "top_p": 0.95}
     if max_tokens:
         config_params["max_output_tokens"] = max_tokens
+    # تحكم في ميزانية التفكير — thinking_budget=0 يلغي التفكير تماماً
+    if thinking_budget is not None:
+        config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
     config = types.GenerateContentConfig(**config_params)
     if system_prompt:
         config.system_instruction = system_prompt
@@ -438,6 +441,15 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
 
     if not response or not response.text:
         raise ValueError("Gemini returned empty response")
+
+    # تسجيل استهلاك التوكنز
+    if hasattr(response, 'usage_metadata') and response.usage_metadata:
+        um = response.usage_metadata
+        inp = getattr(um, 'prompt_token_count', 0) or 0
+        out = getattr(um, 'candidates_token_count', 0) or 0
+        think = getattr(um, 'thoughts_token_count', 0) or 0
+        total = getattr(um, 'total_token_count', 0) or 0
+        log(f"  [tokens] input={inp} output={out} thinking={think} total={total}")
 
     # كشف القطع — لو finish_reason=MAX_TOKENS يبقى المخرج ناقص أكيد
     if response.candidates and response.candidates[0].finish_reason:
@@ -700,7 +712,7 @@ def _download_from_gcs(gcs_uri: str) -> str:
     return "\n".join(all_content)
 
 
-def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> BatchInfo:
+def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None) -> BatchInfo:
     """إرسال دفعة عبر Gemini Batch API (يحتاج GCS)"""
     import json
     from google import genai
@@ -719,6 +731,9 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
                 "maxOutputTokens": max_tokens,
             }
         }
+        # تحكم في ميزانية التفكير للباتش
+        if thinking_budget is not None:
+            request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": thinking_budget}
         if system_prompt:
             request["systemInstruction"] = {"parts": [{"text": system_prompt}]}
 
@@ -807,7 +822,7 @@ def _batch_send_claude(prompts: list, model: str, api_key: str, system_prompt: s
     return batch_info
 
 
-def _batch_send_gemini_rest(prompts: list, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> BatchInfo:
+def _batch_send_gemini_rest(prompts: list, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None) -> BatchInfo:
     """إرسال دفعة عبر Gemini REST API (من الوثيقة - طريقة 4)"""
     import httpx
 
@@ -823,6 +838,8 @@ def _batch_send_gemini_rest(prompts: list, model: str, api_key: str, system_prom
                 "maxOutputTokens": max_tokens,
             }
         }
+        if thinking_budget is not None:
+            request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": thinking_budget}
         if system_prompt:
             request["systemInstruction"] = {"parts": [{"text": system_prompt}]}
 
@@ -865,7 +882,7 @@ def _batch_send_gemini_rest(prompts: list, model: str, api_key: str, system_prom
     return batch_info
 
 
-def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperature: float, max_tokens: int) -> BatchInfo:
+def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None) -> BatchInfo:
     """إرسال دفعة عبر Vertex AI Batch Prediction (من الوثيقة - طريقة 7)"""
     import json
     from google.cloud import aiplatform
@@ -886,6 +903,8 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
                 "maxOutputTokens": max_tokens,
             }
         }
+        if thinking_budget is not None:
+            request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": thinking_budget}
         if system_prompt:
             request["systemInstruction"] = {"parts": [{"text": system_prompt}]}
 
@@ -929,7 +948,7 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
     return batch_info
 
 
-def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = 8192, save_path: str = None, method: str = "sdk") -> EngineResult:
+def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = 8192, save_path: str = None, method: str = "sdk", thinking_budget: int = None) -> EngineResult:
     """
     الدالة 2: إرسال دفعة برومبتات
     تدعم: Gemini Batch (SDK/REST), Claude Batch, Vertex AI Batch
@@ -951,19 +970,19 @@ def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: 
     try:
         if provider == "gemini" and method == "sdk":
             batch_info = _retry_call(
-                lambda: _batch_send_gemini(prompts, model, api_key, system_prompt, temperature, max_tokens),
+                lambda: _batch_send_gemini(prompts, model, api_key, system_prompt, temperature, max_tokens, thinking_budget),
                 max_retries=3, base_delay=3.0, description=f"Gemini Batch SDK {model}"
             )
         elif provider == "gemini" and method == "rest":
             batch_info = _retry_call(
-                lambda: _batch_send_gemini_rest(prompts, model, api_key, system_prompt, temperature, max_tokens),
+                lambda: _batch_send_gemini_rest(prompts, model, api_key, system_prompt, temperature, max_tokens, thinking_budget),
                 max_retries=3, base_delay=3.0, description=f"Gemini Batch REST {model}"
             )
         elif (provider == "gemini" or provider == "vertex") and method == "vertex":
             # Vertex AI Batch Prediction
             actual_model = model.split(":", 1)[1] if ":" in model else model
             batch_info = _retry_call(
-                lambda: _batch_send_vertex(prompts, actual_model, system_prompt, temperature, max_tokens),
+                lambda: _batch_send_vertex(prompts, actual_model, system_prompt, temperature, max_tokens, thinking_budget),
                 max_retries=3, base_delay=3.0, description=f"Vertex AI Batch {actual_model}"
             )
         elif provider == "claude":
@@ -1042,6 +1061,7 @@ def _batch_retrieve_gemini(batch_info: BatchInfo, api_key: str) -> list:
     # استخراج النتائج مع finishReason
     results = []       # النصوص
     finish_reasons = [] # أسباب الإنهاء
+    token_totals = {"input": 0, "output": 0, "thinking": 0, "total": 0}
 
     # طريقة 1: من GCS output (الطريقة الأساسية)
     if hasattr(batch_job, 'dest') and hasattr(batch_job.dest, 'gcs_uri'):
@@ -1061,6 +1081,13 @@ def _batch_retrieve_gemini(batch_info: BatchInfo, api_key: str) -> list:
                     finish = candidate.get('finishReason', 'UNKNOWN')
                     results.append(text)
                     finish_reasons.append(finish)
+                    # استخراج التوكنز
+                    usage = data.get('response', {}).get('usageMetadata', {})
+                    if usage:
+                        token_totals["input"] += usage.get('promptTokenCount', 0)
+                        token_totals["output"] += usage.get('candidatesTokenCount', 0)
+                        token_totals["thinking"] += usage.get('thoughtsTokenCount', 0)
+                        token_totals["total"] += usage.get('totalTokenCount', 0)
                 except (KeyError, IndexError, json.JSONDecodeError) as e:
                     log(f"[!] فشل استخراج نتيجة من GCS: {str(e)}")
                     results.append("")
@@ -1087,9 +1114,14 @@ def _batch_retrieve_gemini(batch_info: BatchInfo, api_key: str) -> list:
     if truncated:
         log(f"  [!] {len(truncated)} نتيجة مقطوعة (MAX_TOKENS) من {len(results)}")
 
+    # تسجيل إحصائيات التوكنز الإجمالية
+    if token_totals["total"] > 0:
+        log(f"  [tokens] إجمالي الباتش: input={token_totals['input']} output={token_totals['output']} thinking={token_totals['thinking']} total={token_totals['total']}")
+
     # حفظ finish_reasons في batch_info للاستخدام لاحقاً
     if not hasattr(batch_info, '_finish_reasons'):
         batch_info._finish_reasons = finish_reasons
+    batch_info._token_totals = token_totals
 
     return results
 
