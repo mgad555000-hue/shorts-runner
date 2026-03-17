@@ -799,6 +799,17 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
                     recipe_out.mkdir(parents=True, exist_ok=True)
                     print(f"[COPY] الوجهة: {recipe_out} (exists={recipe_out.exists()})")
 
+                    def _validate_wav(filepath):
+                        """Check if a .wav file is too small (likely corrupt) and delete it."""
+                        if filepath.suffix.lower() == '.wav' and filepath.exists():
+                            fsize = filepath.stat().st_size
+                            if fsize < 10240:
+                                print(f"[COPY] ⚠ WAV file too small ({fsize} bytes): {filepath.name} — likely corrupt")
+                                try:
+                                    filepath.unlink()
+                                except Exception as del_e:
+                                    print(f"[COPY] خطأ في حذف WAV فاسد {filepath.name}: {del_e}")
+
                     copied_count = 0
                     for f in all_files:
                         if f.is_file() and f.name not in skip_files:
@@ -816,6 +827,7 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
                                 print(f"[COPY] OK: {f.name} ({f.stat().st_size} bytes) -> {dest}")
                                 if dest.exists():
                                     print(f"[COPY] تأكيد: {dest.name} موجود ({dest.stat().st_size} bytes)")
+                                    _validate_wav(dest)
                                 else:
                                     print(f"[COPY] تحذير: {dest.name} مش موجود بعد النسخ!")
                             except Exception as e:
@@ -826,6 +838,7 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
                                         dst.write(src.read())
                                     copied_count += 1
                                     print(f"[COPY] OK (محاولة تانية): {f.name}")
+                                    _validate_wav(dest)
                                 except Exception as e2:
                                     # محاولة ثالثة: حفظ باسم جديد (timestamp)
                                     from datetime import datetime as _dt
@@ -838,6 +851,7 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
                                         shutil.copy2(str(f), str(alt_dest))
                                         copied_count += 1
                                         print(f"[COPY] OK (اسم بديل): {f.name} -> {alt_name} ({alt_dest.stat().st_size} bytes)")
+                                        _validate_wav(alt_dest)
                                     except Exception as e3:
                                         print(f"[COPY] فشل نهائي: {f.name}: {e2} | بديل: {e3}")
 

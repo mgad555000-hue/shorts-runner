@@ -608,6 +608,27 @@ def action_save_docx(step, ctx):
     sections = re.split(rf'<<<{prefix}_\d+>>>', text)
     titles = re.findall(rf'<<<{prefix}_(\d+)>>>', text)
 
+    def _add_text_to_doc(doc, content, line_spacing):
+        """إضافة نص لملف Word مع معالجة <r> tags"""
+        para = doc.add_paragraph()
+        para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        _set_paragraph_rtl(para)
+        para.paragraph_format.line_spacing = Pt(line_spacing)
+
+        parts = re.split(r'(<r>.*?</r>)', content)
+        for part in parts:
+            m = re.match(r'<r>(.*?)</r>', part)
+            if m:
+                run = para.add_run(m.group(1))
+                run.font.color.rgb = RGBColor(255, 0, 0)
+                _set_run_rtl(run)
+            else:
+                if part:
+                    run = para.add_run(part)
+                    _set_run_rtl(run)
+
+    line_spacing = step.get("line_spacing", 28)
+
     for idx, section in enumerate(sections):
         section = section.replace(f"<<<END_{prefix}>>>", "").strip()
         if not section:
@@ -619,24 +640,29 @@ def action_save_docx(step, ctx):
             heading.alignment = WD_ALIGN_PARAGRAPH.RIGHT
             _set_paragraph_rtl(heading)
 
-        # إنشاء paragraph
-        para = doc.add_paragraph()
-        para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        _set_paragraph_rtl(para)
-        para.paragraph_format.line_spacing = Pt(step.get("line_spacing", 28))
+        # معالجة PART markers لو موجودة
+        part_sections = re.split(r'<<<PART_(\d+)>>>', section)
+        if len(part_sections) > 1:
+            # فيه PART markers — نعالجها
+            # أول قطعة قبل أي PART (لو فيها محتوى)
+            pre_part = part_sections[0].replace("<<<END_PART>>>", "").strip()
+            if pre_part:
+                _add_text_to_doc(doc, pre_part, line_spacing)
 
-        # تحليل النص: فصل <r>...</r> عن النص العادي
-        parts = re.split(r'(<r>.*?</r>)', section)
-        for part in parts:
-            match = re.match(r'<r>(.*?)</r>', part)
-            if match:
-                run = para.add_run(match.group(1))
-                run.font.color.rgb = RGBColor(255, 0, 0)
-                _set_run_rtl(run)
-            else:
-                if part:
-                    run = para.add_run(part)
-                    _set_run_rtl(run)
+            for pi in range(1, len(part_sections), 2):
+                part_num = part_sections[pi]
+                part_content = part_sections[pi + 1].replace("<<<END_PART>>>", "").strip() if pi + 1 < len(part_sections) else ""
+
+                # عنوان الجزء
+                part_heading = doc.add_heading(f"Part {part_num}", level=3)
+                part_heading.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                _set_paragraph_rtl(part_heading)
+
+                if part_content:
+                    _add_text_to_doc(doc, part_content, line_spacing)
+        else:
+            # مفيش PART markers — نص عادي
+            _add_text_to_doc(doc, section, line_spacing)
 
     doc.save(filepath)
     log(f"  تم حفظ Word: {filepath}")
@@ -666,29 +692,60 @@ def _read_single_docx(filepath, reconstruct_markers, prefix):
         text = "\n".join([p.text for p in doc.paragraphs])
         return text
 
-    # إعادة بناء الماركرز من headings "Script N"
-    sections = []
+    # إعادة بناء الماركرز من headings "Script N" و "Part N"
+    # الخطوة 1: تجميع كل paragraphs في بلوكات حسب الـ headings
+    blocks = []  # [(type, num, lines), ...] — type: "script" أو "part"
+    current_type = None
     current_num = None
     current_lines = []
 
     for p in doc.paragraphs:
         is_heading = p.style.name.startswith("Heading")
-        heading_match = re.match(r'Script\s+(\d+)', p.text) if is_heading else None
+        script_match = re.match(r'Script\s+(\d+)', p.text) if is_heading else None
+        part_match = re.match(r'Part\s+(\d+)', p.text) if is_heading else None
 
-        if heading_match:
-            # إغلاق القسم السابق
-            if current_num is not None:
-                body = "\n".join(current_lines).strip()
-                sections.append(f"<<<{prefix}_{current_num}>>>\n{body}\n<<<END_{prefix}>>>")
-            current_num = heading_match.group(1)
+        if script_match:
+            if current_type:
+                blocks.append((current_type, current_num, current_lines))
+            current_type = "script"
+            current_num = script_match.group(1)
+            current_lines = []
+        elif part_match:
+            if current_type:
+                blocks.append((current_type, current_num, current_lines))
+            current_type = "part"
+            current_num = part_match.group(1)
             current_lines = []
         else:
             current_lines.append(p.text)
 
-    # إغلاق آخر قسم
-    if current_num is not None:
-        body = "\n".join(current_lines).strip()
-        sections.append(f"<<<{prefix}_{current_num}>>>\n{body}\n<<<END_{prefix}>>>")
+    if current_type:
+        blocks.append((current_type, current_num, current_lines))
+
+    # الخطوة 2: بناء الماركرز — تجميع الأجزاء تحت السكريبتات
+    sections = []
+    i = 0
+    while i < len(blocks):
+        btype, bnum, blines = blocks[i]
+        if btype == "script":
+            body_parts = []
+            body_text = "\n".join(blines).strip()
+            if body_text:
+                body_parts.append(body_text)
+
+            # نشوف لو اللي بعده parts تابعة لنفس السكريبت
+            j = i + 1
+            while j < len(blocks) and blocks[j][0] == "part":
+                pt, pn, pl = blocks[j]
+                part_body = "\n".join(pl).strip()
+                body_parts.append(f"<<<PART_{pn}>>>\n{part_body}\n<<<END_PART>>>")
+                j += 1
+
+            full_body = "\n".join(body_parts)
+            sections.append(f"<<<{prefix}_{bnum}>>>\n{full_body}\n<<<END_{prefix}>>>")
+            i = j
+        else:
+            i += 1
 
     result = "\n\n".join(sections)
     log(f"  تم إعادة بناء {len(sections)} ماركر من headings")
@@ -1519,6 +1576,7 @@ def action_montage_short(step, ctx):
                 log(f"  [!] {prefix}_{script_num}: creator.jpg غير موجود — تخطي")
                 return (script_num, False)
 
+            # --- محاولة 1: ملفات صوت مقسمة (seg_01.wav, seg_02.wav) ---
             audio_dir = None
             for sd in search_dirs:
                 candidate_dir = os.path.join(sd, "audio", script_folder)
@@ -1526,22 +1584,54 @@ def action_montage_short(step, ctx):
                     audio_dir = candidate_dir
                     break
 
-            if not audio_dir:
-                log(f"  [!] {prefix}_{script_num}: مجلد الصوت غير موجود — تخطي")
-                return (script_num, False)
+            if audio_dir:
+                log(f"  {prefix}_{script_num}: وضع TTS (ملفات مقسمة)")
+                for seg in segments:
+                    wav = os.path.join(audio_dir, f"seg_{seg['num']:02d}.wav")
+                    if os.path.exists(wav):
+                        dur = _get_audio_duration(wav)
+                        seg_durations.append(dur)
+                        audio_files.append(wav)
+                        log(f"    بند {seg['num']}: {dur:.1f}s | فيديو {seg['video_num']}")
+                    else:
+                        log(f"  [!] بند {seg['num']}: ملف صوت غير موجود: {wav}")
+                        seg_durations.append(3.0)
+                        audio_files.append(None)
+            else:
+                # --- محاولة 2: ملف صوت واحد من tts_multi (SCRIPT_N.wav/mp3) ---
+                single_audio = None
+                for sd in search_dirs:
+                    for ext in ['wav', 'mp3', 'm4a']:
+                        candidate = os.path.join(sd, f"{prefix}_{script_num}.{ext}")
+                        if os.path.exists(candidate):
+                            single_audio = candidate
+                            break
+                    if single_audio:
+                        break
 
-            log(f"  {prefix}_{script_num}: وضع TTS")
-            for seg in segments:
-                wav = os.path.join(audio_dir, f"seg_{seg['num']:02d}.wav")
-                if os.path.exists(wav):
-                    dur = _get_audio_duration(wav)
-                    seg_durations.append(dur)
-                    audio_files.append(wav)
-                    log(f"    بند {seg['num']}: {dur:.1f}s | فيديو {seg['video_num']}")
+                if not single_audio:
+                    log(f"  [!] {prefix}_{script_num}: لا يوجد مصدر صوت TTS — تخطي")
+                    return (script_num, False)
+
+                log(f"  {prefix}_{script_num}: وضع TTS (ملف واحد + Whisper)")
+                total_dur = _get_audio_duration(single_audio)
+                if total_dur <= 0:
+                    log(f"  [!] {prefix}_{script_num}: فشل قياس مدة الصوت — تخطي")
+                    return (script_num, False)
+
+                # تحويل لـ WAV لو مش WAV (Whisper محتاج WAV)
+                if not single_audio.endswith('.wav'):
+                    temp_audio = os.path.join(ctx.output_dir, f"_temp_audio_{script_num}.wav")
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", single_audio, "-acodec", "pcm_s16le",
+                         "-ar", "16000", "-ac", "1", temp_audio],
+                        capture_output=True, timeout=120
+                    )
+                    full_audio = temp_audio
                 else:
-                    log(f"  [!] بند {seg['num']}: ملف صوت غير موجود: {wav}")
-                    seg_durations.append(3.0)
-                    audio_files.append(None)
+                    full_audio = single_audio
+
+                seg_durations = _calc_segment_durations_whisper(full_audio, segments, total_dur)
 
         else:
             log(f"  [!] {prefix}_{script_num}: لا يوجد مصدر صوت — تخطي")
@@ -2010,7 +2100,10 @@ def action_remove_tashkeel(step, ctx):
 
 
 def action_split_script(step, ctx):
-    """تقسيم السكريبت إلى مقدمات ونصوص"""
+    """تقسيم السكريبت إلى مقدمات ونصوص.
+    الطريقة الأساسية: <<<PART_1>>> كفاصل (deterministic — مش بيعتمد على الـ AI).
+    الطريقة الاحتياطية: كلمة "النصوص" كفاصل نصي.
+    """
     text = str(ctx.resolve(step["input"]))
     part = step.get("part", "intros")  # "intros" or "texts"
     separator = step.get("separator", "النصوص")
@@ -2018,23 +2111,48 @@ def action_split_script(step, ctx):
     pattern = r'(<<<SCRIPT_(\d+)>>>)(.*?)(<<<END_SCRIPT>>>)'
 
     result_parts = []
+    skipped = 0
     for match in re.finditer(pattern, text, re.DOTALL):
         marker_start = match.group(1)
+        script_num = match.group(2)
         content = match.group(3)
         marker_end = match.group(4)
 
-        if separator in content:
-            sep_idx = content.index(separator)
+        section = None
+
+        # الطريقة الأساسية: تقسيم بـ <<<PART_1>>> (الأدق)
+        part1_match = re.search(r'<<<PART_1>>>', content)
+        if part1_match:
             if part == "intros":
-                section = content[:sep_idx].strip()
+                section = content[:part1_match.start()].strip()
             else:
-                section = content[sep_idx + len(separator):].strip()
+                # النصوص = من <<<PART_1>>> لحد الآخر (بما فيها الماركرز)
+                section = content[part1_match.start():].strip()
         else:
-            section = content.strip()
+            # الطريقة الاحتياطية: كلمة الفاصل النصي
+            if separator in content:
+                sep_idx = content.index(separator)
+                if part == "intros":
+                    section = content[:sep_idx].strip()
+                else:
+                    section = content[sep_idx + len(separator):].strip()
+
+        # لو مفيش فاصل خالص — تخطي مع تحذير
+        if section is None:
+            log(f"  [!] SCRIPT_{script_num}: لا يوجد فاصل (PART_1 أو '{separator}') — تخطي")
+            skipped += 1
+            continue
+
+        # لو المقدمة فاضية — تخطي مع تحذير
+        if part == "intros" and not section:
+            log(f"  [!] SCRIPT_{script_num}: مقدمة فاضية — تخطي")
+            skipped += 1
+            continue
 
         result_parts.append(f"{marker_start}\n{section}\n{marker_end}")
 
-    log(f"  split_script: استخرجت {len(result_parts)} بلوك ({part})")
+    log(f"  split_script: استخرجت {len(result_parts)} بلوك ({part})" +
+        (f" | تحذير: {skipped} تم تخطيهم" if skipped else ""))
     return "\n\n".join(result_parts)
 
 

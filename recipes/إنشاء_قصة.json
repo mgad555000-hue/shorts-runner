@@ -62,6 +62,14 @@
       "save_as": "stories_output.docx",
       "font_size": 14,
       "label": "حفظ ملف Word"
+    },
+    {
+      "id": "topics_json",
+      "action": "scripts_to_topics_json",
+      "input": "{tashkeel_stories}",
+      "marker_prefix": "SCRIPT",
+      "save_as": "topics.json",
+      "label": "تصدير topics.json للوصفات الجاية"
     }
   ]
 }

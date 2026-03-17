@@ -35,6 +35,14 @@
       "save_as": "scripts_output.docx",
       "font_size": 14,
       "label": "حفظ Word"
+    },
+    {
+      "id": "topics_json",
+      "action": "scripts_to_topics_json",
+      "input": "{scripts}",
+      "marker_prefix": "SCRIPT",
+      "save_as": "topics.json",
+      "label": "تصدير topics.json للوصفات الجاية"
     }
   ]
 }
