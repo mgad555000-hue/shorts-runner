@@ -439,6 +439,12 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
     if not response or not response.text:
         raise ValueError("Gemini returned empty response")
 
+    # كشف القطع — لو finish_reason=MAX_TOKENS يبقى المخرج ناقص أكيد
+    if response.candidates and response.candidates[0].finish_reason:
+        fr = str(response.candidates[0].finish_reason)
+        if fr == "MAX_TOKENS":
+            raise ValueError(f"Gemini truncated (MAX_TOKENS) — {len(response.text)} chars returned")
+
     return response.text
 
 
