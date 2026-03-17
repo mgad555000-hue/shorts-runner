@@ -174,18 +174,15 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
     لو المدخل فيه أكتر من ماركر SCRIPT/INTRO → يقسّمه ويولّد كل واحد لوحده بالتوازي.
     بيرجع None لو المدخل مش multi-marker (يعني استخدم generate العادي).
 
-    الحل الجذري للقطع:
-    1. thinking_budget=1024 → التشكيل مهمة ميكانيكية، مش محتاجة تفكير عميق.
-       بدل ما الموديل يصرف آلاف التوكينز في التفكير (زي Script 195 اللي أخد 262 ثانية)،
-       نحدد التفكير بحد أدنى فتروح كل التوكينز للمخرج الفعلي.
-    2. finish_reason=MAX_TOKENS → كشف القطع من الـ API مباشرة (مش تخمين بالنسب).
-    3. إعادة تلقائية بدون تفكير نهائياً (thinking_budget=0) لو لسه مقطوع.
+    ضمانات:
+    - كل ماركر يتولّد لوحده (مفيش truncation بسبب تجميع)
+    - max_tokens أعلى (65536) عشان thinking models
+    - تحقق من اكتمال المخرج: لو المخرج أقصر من المدخل بكتير → إعادة بـ tokens أعلى
     """
     MARKER_PAT = r'<<<((?:SCRIPT|INTRO)_\d+)>>>'
     MAX_WORKERS = 5
-    # التشكيل مهمة ميكانيكية — نحد التفكير لأدنى حد (1024 توكين)
-    # كده معظم الـ budget بيروح للمخرج الفعلي مش للتفكير الداخلي
-    THINKING_BUDGET = 1024
+    # Thinking models بتستهلك tokens في التفكير — لازم budget أعلى
+    SAFE_MAX_TOKENS = max(max_tokens or 0, 65536)
 
     # --- استخراج ماركرز المدخل (بالترتيب بدون تكرار) ---
     seen = set()
@@ -202,51 +199,45 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
     first_match = re.search(MARKER_PAT, prompt_str)
     instructions_part = prompt_str[:first_match.start()]
 
-    # --- استخراج كل مقطع ---
+    # --- استخراج كل مقطع + حساب طوله ---
     sections = {}
+    section_lengths = {}
     for marker in input_markers:
         escaped = re.escape(f'<<<{marker}>>>')
         pattern = rf'({escaped}.*?)(?=<<<(?:SCRIPT|INTRO)_\d+>>>|\Z)'
         match = re.search(pattern, prompt_str, re.DOTALL)
         if match:
             sections[marker] = match.group(1).strip()
+            section_lengths[marker] = len(sections[marker])
 
-    log(f"  [*] {len(input_markers)} ماركر — توليد كل واحد منفصلاً ({MAX_WORKERS} بالتوازي, thinking_budget={THINKING_BUDGET})...")
+    log(f"  [*] {len(input_markers)} ماركر — توليد كل واحد منفصلاً ({MAX_WORKERS} بالتوازي, max_tokens={SAFE_MAX_TOKENS})...")
 
     # --- توليد كل واحد بالتوازي ---
-    def _gen_one(marker, thinking_bgt=THINKING_BUDGET):
+    def _gen_one(marker, tokens=SAFE_MAX_TOKENS):
         section = sections.get(marker)
         if not section:
-            return marker, None, False
+            return marker, None
         single_prompt = instructions_part + section
         result = generate(
             prompt=single_prompt,
             model=ctx.model,
             system_prompt=system_prompt,
             temperature=temperature,
-            max_tokens=max_tokens,
-            thinking_budget=thinking_bgt,
+            max_tokens=tokens,
         )
-        if result.success:
-            return marker, result.data, result.truncated
-        return marker, None, False
+        return marker, result.data if result.success else None
 
     results = {}
-    truncated_markers = []
     failed = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(_gen_one, m): m for m in input_markers}
         done_count = 0
         for future in as_completed(futures):
-            marker, data, is_truncated = future.result()
+            marker, data = future.result()
             done_count += 1
             if data:
                 results[marker] = data
-                if is_truncated:
-                    truncated_markers.append(marker)
-                    log(f"  [!] {marker} ({done_count}/{len(input_markers)}) — finish_reason=MAX_TOKENS مقطوع!")
-                else:
-                    log(f"  ✓ {marker} ({done_count}/{len(input_markers)})")
+                log(f"  ✓ {marker} ({done_count}/{len(input_markers)})")
             else:
                 failed.append(marker)
                 log(f"  [!] فشل {marker} ({done_count}/{len(input_markers)})")
@@ -255,27 +246,36 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
     if failed:
         log(f"  → إعادة محاولة {len(failed)} ماركر فاشل...")
         for marker in failed:
-            _, data, is_truncated = _gen_one(marker)
+            _, data = _gen_one(marker)
             if data:
                 results[marker] = data
-                if is_truncated:
-                    truncated_markers.append(marker)
                 log(f"  ✓ {marker} (إعادة)")
             else:
                 log(f"  [!!] فشل نهائي: {marker}")
 
-    # --- إعادة توليد المقطوعين بدون تفكير نهائياً (thinking_budget=0) ---
-    if truncated_markers:
-        log(f"  → {len(truncated_markers)} ماركر مقطوع — إعادة بـ thinking_budget=0 (كل التوكينز للمخرج)...")
-        for marker in truncated_markers:
-            old_len = len(results.get(marker, ""))
-            _, data, still_truncated = _gen_one(marker, thinking_bgt=0)
+    # --- كشف المقطوع: لو المخرج أقصر من 70% من المدخل → مقطوع ---
+    truncated = []
+    for marker in input_markers:
+        if marker in results and marker in section_lengths:
+            input_len = section_lengths[marker]
+            output_len = len(results[marker])
+            # التشكيل بيزوّد الطول عادةً — لو المخرج أقصر من 70% من المدخل فهو مقطوع
+            if input_len > 200 and output_len < input_len * 0.7:
+                truncated.append(marker)
+                log(f"  [!] {marker}: مخرج مقطوع ({output_len} حرف < 70% من {input_len} حرف)")
+
+    # --- إعادة توليد المقطوعين بـ tokens أعلى ---
+    if truncated:
+        HIGHER_TOKENS = min(SAFE_MAX_TOKENS * 2, 131072)
+        log(f"  → إعادة توليد {len(truncated)} ماركر مقطوع بـ max_tokens={HIGHER_TOKENS}...")
+        for marker in truncated:
+            _, data = _gen_one(marker, tokens=HIGHER_TOKENS)
             if data:
                 new_len = len(data)
+                old_len = len(results[marker])
                 if new_len > old_len:
                     results[marker] = data
-                    status = "مقطوع" if still_truncated else "كامل"
-                    log(f"  ✓ {marker}: {old_len} → {new_len} حرف ({status})")
+                    log(f"  ✓ {marker}: {old_len} → {new_len} حرف")
                 else:
                     log(f"  [~] {marker}: الإعادة أقصر ({new_len} حرف) — الاحتفاظ بالأصل")
             else:
