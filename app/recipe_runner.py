@@ -140,9 +140,10 @@ def action_generate(step, ctx):
     system_prompt = ctx.resolve(step.get("system_prompt", "")) if step.get("system_prompt") else ""
     temperature = step.get("temperature", 0.7)
     max_tokens = step.get("max_tokens", None)
+    prompt_str = str(prompt)
 
     result = generate(
-        prompt=str(prompt),
+        prompt=prompt_str,
         model=ctx.model,
         system_prompt=system_prompt,
         temperature=temperature,
@@ -154,6 +155,9 @@ def action_generate(step, ctx):
 
     text = result.data
 
+    # === تحقق من اكتمال الماركرز وإعادة توليد الناقص ===
+    text = _verify_and_complete_markers(prompt_str, text, ctx, system_prompt, temperature, max_tokens)
+
     # حفظ لو محدد
     if step.get("save_as"):
         save_path = ctx.output_path(step["save_as"])
@@ -162,6 +166,90 @@ def action_generate(step, ctx):
         log(f"  تم حفظ النص في: {save_path}")
 
     return text
+
+
+def _verify_and_complete_markers(prompt_str, output, ctx, system_prompt, temperature, max_tokens):
+    """
+    تتحقق إن كل ماركرز SCRIPT/INTRO في المدخل موجودة في المخرج.
+    لو فيه ماركرز ناقصة → تستخرج المقاطع الناقصة من المدخل وتعيد توليدها في دفعات.
+    """
+    MARKER_PAT = r'<<<((?:SCRIPT|INTRO)_\d+)>>>'
+    CHUNK_SIZE = 15
+    MAX_RETRY_PER_CHUNK = 2
+
+    # --- استخراج ماركرز المدخل (بالترتيب بدون تكرار) ---
+    seen = set()
+    input_markers = []
+    for m in re.findall(MARKER_PAT, prompt_str):
+        if m not in seen:
+            seen.add(m)
+            input_markers.append(m)
+
+    if len(input_markers) <= 1:
+        return output  # مش multi-marker — مفيش حاجة نتحقق منها
+
+    # --- مقارنة ---
+    output_markers = set(re.findall(MARKER_PAT, output))
+    missing = [m for m in input_markers if m not in output_markers]
+
+    if not missing:
+        log(f"  ✓ كل الماركرز موجودة ({len(input_markers)}/{len(input_markers)})")
+        return output
+
+    log(f"  [!] {len(missing)} ماركر ناقص من {len(input_markers)} — إعادة توليد...")
+
+    # --- استخراج جزء التعليمات (كل شيء قبل أول ماركر) ---
+    first_marker_match = re.search(MARKER_PAT, prompt_str)
+    if not first_marker_match:
+        return output
+    instructions_part = prompt_str[:first_marker_match.start()]
+
+    # --- إعادة التوليد في دفعات ---
+    for chunk_start in range(0, len(missing), CHUNK_SIZE):
+        chunk = missing[chunk_start:chunk_start + CHUNK_SIZE]
+
+        # استخراج المقاطع الناقصة من المدخل الأصلي
+        sections = []
+        for marker in chunk:
+            escaped = re.escape(f'<<<{marker}>>>')
+            pattern = rf'({escaped}.*?)(?=<<<(?:SCRIPT|INTRO)_\d+>>>|\Z)'
+            match = re.search(pattern, prompt_str, re.DOTALL)
+            if match:
+                sections.append(match.group(1).strip())
+
+        if not sections:
+            continue
+
+        retry_prompt = instructions_part + "\n".join(sections)
+        chunk_num = chunk_start // CHUNK_SIZE + 1
+        log(f"  → إعادة توليد {len(chunk)} ماركر ناقص (دفعة {chunk_num})...")
+
+        for attempt in range(MAX_RETRY_PER_CHUNK):
+            retry_result = generate(
+                prompt=retry_prompt,
+                model=ctx.model,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            if retry_result.success:
+                new_markers = set(re.findall(MARKER_PAT, retry_result.data))
+                got = [m for m in chunk if m in new_markers]
+                log(f"  ✓ تم استرجاع {len(got)}/{len(chunk)} ماركر")
+                output = output.rstrip() + "\n" + retry_result.data
+                break
+            else:
+                log(f"  [!] فشل المحاولة {attempt + 1}: {retry_result.error}")
+
+    # --- فحص نهائي ---
+    final_markers = set(re.findall(MARKER_PAT, output))
+    still_missing = [m for m in input_markers if m not in final_markers]
+    if still_missing:
+        log(f"  [!!] لسه {len(still_missing)} ماركر ناقص بعد الإعادة: {still_missing[:10]}")
+    else:
+        log(f"  ✓ تم استكمال كل الماركرز بنجاح ({len(input_markers)}/{len(input_markers)})")
+
+    return output
 
 
 def action_tts(step, ctx):
