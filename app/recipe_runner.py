@@ -2802,7 +2802,7 @@ def _build_batch_prompts(config, ctx, topics, marker_prefix):
 def _retry_truncated_batch_results(batch_results, topics, marker_prefix, config, ctx, metadata):
     """كشف السكريبتات المقطوعة (MAX_TOKENS) وإعادة توليدها عبر API عادي.
 
-    السبب: موديلات thinking (مثل gemini-3-flash-preview) ممكن تستهلك
+    السبب: موديلات thinking (مثل gemini-3.1-pro-preview) ممكن تستهلك
     معظم الـ token budget في التفكير، ويتبقى مساحة قليلة للكتابة.
     الباتش API بيرجع finishReason=MAX_TOKENS في الحالة دي.
 
@@ -2891,7 +2891,7 @@ def _retry_truncated_batch_results(batch_results, topics, marker_prefix, config,
     retry_count = 0
     max_retries = 3
 
-    # Thinking models (مثل gemini-3-flash-preview) بتستهلك التوكنز في التفكير.
+    # Thinking models (مثل gemini-3.1-pro-preview) بتستهلك التوكنز في التفكير.
     # الريتراي لازم يستخدم max_tokens أعلى عشان يوفّر مساحة كافية للمخرج.
     retry_max_tokens_levels = [
         min(max_tokens * 2, 65536),   # محاولة 1: ضعف
