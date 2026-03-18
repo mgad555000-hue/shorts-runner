@@ -141,10 +141,11 @@ def action_generate(step, ctx):
     temperature = step.get("temperature", 0.7)
     max_tokens = step.get("max_tokens", None)
     thinking_budget = step.get("thinking_budget", None)  # None = الموديل يقرر، 0 = بدون تفكير
+    thinking_level = step.get("thinking_level", None)  # "low", "medium", "high" — أولوية أعلى من thinking_budget
     prompt_str = str(prompt)
 
     # === لو المدخل فيه أكتر من ماركر → توليد كل واحد لوحده بالتوازي ===
-    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget)
+    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget, thinking_level)
     if per_marker_result is not None:
         text = per_marker_result
     else:
@@ -156,6 +157,7 @@ def action_generate(step, ctx):
             temperature=temperature,
             max_tokens=max_tokens,
             thinking_budget=thinking_budget,
+            thinking_level=thinking_level,
         )
         if not result.success:
             raise EngineError(f"فشل التوليد: {result.error}", code="GENERATE_FAILED")
@@ -171,7 +173,7 @@ def action_generate(step, ctx):
     return text
 
 
-def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget=None):
+def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget=None, thinking_level=None):
     """
     لو المدخل فيه أكتر من ماركر SCRIPT/INTRO → يقسّمه ويولّد كل واحد لوحده بالتوازي.
     بيرجع None لو المدخل مش multi-marker (يعني استخدم generate العادي).
@@ -218,6 +220,7 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
             temperature=temperature,
             max_tokens=max_tokens,
             thinking_budget=thinking_budget,
+            thinking_level=thinking_level,
         )
         return marker, result.data if result.success else None
 
@@ -528,6 +531,7 @@ def action_batch_send(step, ctx):
     temperature = step.get("temperature", 0.7)
     max_tokens = step.get("max_tokens", 8192)
     thinking_budget = step.get("thinking_budget", None)
+    thinking_level = step.get("thinking_level", None)
 
     save_path = None
     if step.get("save_as"):
@@ -541,6 +545,7 @@ def action_batch_send(step, ctx):
         max_tokens=max_tokens,
         save_path=save_path,
         thinking_budget=thinking_budget,
+        thinking_level=thinking_level,
     )
 
     if not result.success:
@@ -2797,7 +2802,7 @@ def _build_batch_prompts(config, ctx, topics, marker_prefix):
 def _retry_truncated_batch_results(batch_results, topics, marker_prefix, config, ctx, metadata):
     """كشف السكريبتات المقطوعة (MAX_TOKENS) وإعادة توليدها عبر API عادي.
 
-    السبب: موديلات thinking (مثل gemini-3.1-pro-preview) ممكن تستهلك
+    السبب: موديلات thinking (مثل gemini-3-flash-preview) ممكن تستهلك
     معظم الـ token budget في التفكير، ويتبقى مساحة قليلة للكتابة.
     الباتش API بيرجع finishReason=MAX_TOKENS في الحالة دي.
 
@@ -2886,7 +2891,7 @@ def _retry_truncated_batch_results(batch_results, topics, marker_prefix, config,
     retry_count = 0
     max_retries = 3
 
-    # Thinking models (مثل gemini-3.1-pro-preview) بتستهلك التوكنز في التفكير.
+    # Thinking models (مثل gemini-3-flash-preview) بتستهلك التوكنز في التفكير.
     # الريتراي لازم يستخدم max_tokens أعلى عشان يوفّر مساحة كافية للمخرج.
     retry_max_tokens_levels = [
         min(max_tokens * 2, 65536),   # محاولة 1: ضعف
@@ -3099,6 +3104,7 @@ def _run_mode_send_only(config, ctx, steps):
     temperature = gen_step.get("temperature", 0.7)
     max_tokens = gen_step.get("max_tokens", 8192)
     thinking_budget = gen_step.get("thinking_budget", None)
+    thinking_level = gen_step.get("thinking_level", None)
 
     save_path = ctx.output_path("batch_job_info.json")
 
@@ -3111,6 +3117,7 @@ def _run_mode_send_only(config, ctx, steps):
         max_tokens=max_tokens,
         save_path=save_path,
         thinking_budget=thinking_budget,
+        thinking_level=thinking_level,
     )
 
     if not result.success:
@@ -3212,6 +3219,7 @@ def _run_mode_batch_auto(config, ctx, steps):
     temperature = gen_step.get("temperature", 0.7)
     max_tokens = gen_step.get("max_tokens", 8192)
     thinking_budget = gen_step.get("thinking_budget", None)
+    thinking_level = gen_step.get("thinking_level", None)
 
     save_path = ctx.output_path("batch_job_info.json")
 
@@ -3224,6 +3232,7 @@ def _run_mode_batch_auto(config, ctx, steps):
         max_tokens=max_tokens,
         save_path=save_path,
         thinking_budget=thinking_budget,
+        thinking_level=thinking_level,
     )
 
     if not send_result.success:
