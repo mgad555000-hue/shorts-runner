@@ -142,17 +142,22 @@ def action_generate(step, ctx):
     max_tokens = step.get("max_tokens", None)
     thinking_budget = step.get("thinking_budget", None)  # None = الموديل يقرر، 0 = بدون تفكير
     thinking_level = step.get("thinking_level", None)  # "low", "medium", "high" — أولوية أعلى من thinking_budget
+    step_model = step.get("model", None)  # موديل خاص بالخطوة — لو None يستخدم ctx.model
+    effective_model = step_model or ctx.model
     prompt_str = str(prompt)
 
+    if step_model:
+        log(f"  [model override] {step_model}")
+
     # === لو المدخل فيه أكتر من ماركر → توليد كل واحد لوحده بالتوازي ===
-    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget, thinking_level)
+    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, effective_model)
     if per_marker_result is not None:
         text = per_marker_result
     else:
         # مدخل عادي (ماركر واحد أو بدون) → توليد عادي
         result = generate(
             prompt=prompt_str,
-            model=ctx.model,
+            model=effective_model,
             system_prompt=system_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -173,11 +178,12 @@ def action_generate(step, ctx):
     return text
 
 
-def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget=None, thinking_level=None):
+def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget=None, thinking_level=None, effective_model=None):
     """
     لو المدخل فيه أكتر من ماركر SCRIPT/INTRO → يقسّمه ويولّد كل واحد لوحده بالتوازي.
     بيرجع None لو المدخل مش multi-marker (يعني استخدم generate العادي).
     """
+    model_to_use = effective_model or ctx.model
     MARKER_PAT = r'<<<((?:SCRIPT|INTRO)_\d+)>>>'
     MAX_WORKERS = 5
 
@@ -215,7 +221,7 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
         single_prompt = instructions_part + section
         result = generate(
             prompt=single_prompt,
-            model=ctx.model,
+            model=model_to_use,
             system_prompt=system_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -532,6 +538,11 @@ def action_batch_send(step, ctx):
     max_tokens = step.get("max_tokens", 8192)
     thinking_budget = step.get("thinking_budget", None)
     thinking_level = step.get("thinking_level", None)
+    step_model = step.get("model", None)
+    effective_model = step_model or ctx.model
+
+    if step_model:
+        log(f"  [model override] {step_model}")
 
     save_path = None
     if step.get("save_as"):
@@ -539,7 +550,7 @@ def action_batch_send(step, ctx):
 
     result = batch_send(
         prompts=prompts,
-        model=ctx.model,
+        model=effective_model,
         system_prompt=system_prompt,
         temperature=temperature,
         max_tokens=max_tokens,
