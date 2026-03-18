@@ -60,7 +60,7 @@
       "input": "{tashkeel_prompt}",
       "max_tokens": 32000,
       "temperature": 0.3,
-      "thinking_level": "medium",
+      "thinking_level": "high",
       "label": "تشكيل المقدمات"
     },
     {

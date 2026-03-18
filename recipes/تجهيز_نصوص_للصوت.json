@@ -24,7 +24,7 @@
       "input": "{prompt}",
       "max_tokens": 32000,
       "temperature": 0.3,
-      "thinking_budget": 1024,
+      "thinking_level": "low",
       "label": "تشكيل النصوص"
     },
     {
