@@ -59,9 +59,10 @@
       "id": "tashkeel_intros",
       "action": "generate",
       "input": "{tashkeel_prompt}",
+      "model": "gemini-3.1-pro-preview",
       "max_tokens": 32000,
       "temperature": 0.3,
-      "thinking_level": "high",
+      "thinking_level": "low",
       "label": "تشكيل المقدمات"
     },
     {

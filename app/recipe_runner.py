@@ -187,10 +187,17 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
     MARKER_PAT = r'<<<((?:SCRIPT|INTRO)_\d+)>>>'
     MAX_WORKERS = 5
 
-    # --- استخراج ماركرز المدخل (بالترتيب بدون تكرار) ---
+    # --- استخراج ماركرز المدخل من قسم المحتوى فقط (بعد آخر ---) ---
+    # التعليمات (instructions.txt) ممكن تحتوي ماركرز مثال — نتجاهلها
+    separator = "\n---\n"
+    if separator in prompt_str:
+        content_section = prompt_str[prompt_str.rfind(separator) + len(separator):]
+    else:
+        content_section = prompt_str
+
     seen = set()
     input_markers = []
-    for m in re.findall(MARKER_PAT, prompt_str):
+    for m in re.findall(MARKER_PAT, content_section):
         if m not in seen:
             seen.add(m)
             input_markers.append(m)
@@ -198,16 +205,20 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
     if len(input_markers) <= 1:
         return None  # مش multi-marker — الـ caller يستخدم generate العادي
 
-    # --- استخراج التعليمات (كل شيء قبل أول ماركر) ---
-    first_match = re.search(MARKER_PAT, prompt_str)
-    instructions_part = prompt_str[:first_match.start()]
+    # --- استخراج التعليمات (كل شيء قبل أول ماركر في المحتوى) ---
+    content_start = prompt_str.rfind(separator) + len(separator) if separator in prompt_str else 0
+    first_match_in_content = re.search(MARKER_PAT, content_section)
+    if not first_match_in_content:
+        return None
+    instructions_part = prompt_str[:content_start + first_match_in_content.start()]
 
-    # --- استخراج كل مقطع ---
+    # --- استخراج كل مقطع (من قسم المحتوى فقط) ---
+    content_with_markers = prompt_str[content_start:]
     sections = {}
     for marker in input_markers:
         escaped = re.escape(f'<<<{marker}>>>')
         pattern = rf'({escaped}.*?)(?=<<<(?:SCRIPT|INTRO)_\d+>>>|\Z)'
-        match = re.search(pattern, prompt_str, re.DOTALL)
+        match = re.search(pattern, content_with_markers, re.DOTALL)
         if match:
             sections[marker] = match.group(1).strip()
 
@@ -2712,11 +2723,16 @@ def _run_steps(steps, ctx, start=0, end=None):
 # ========== Batch Mode Helpers ==========
 
 def _find_generate_step_index(steps):
-    """إيجاد index خطوة generate في الـ pipeline"""
+    """إيجاد index أول خطوة generate في الـ pipeline"""
     for i, step in enumerate(steps):
         if step["action"] == "generate":
             return i
     return None
+
+
+def _find_all_generate_step_indices(steps):
+    """إيجاد indices كل خطوات generate في الـ pipeline"""
+    return [i for i, step in enumerate(steps) if step["action"] == "generate"]
 
 
 def _extract_topics_from_context(ctx):
@@ -3119,10 +3135,14 @@ def _run_mode_send_only(config, ctx, steps):
 
     save_path = ctx.output_path("batch_job_info.json")
 
+    effective_model = gen_step.get("model") or ctx.model
+    if gen_step.get("model"):
+        log(f"  [model override] {gen_step['model']}")
+
     log(f"--- إرسال باتش: {len(prompts)} طلب ---")
     result = batch_send(
         prompts=prompts,
-        model=ctx.model,
+        model=effective_model,
         system_prompt=system_prompt,
         temperature=temperature,
         max_tokens=max_tokens,
@@ -3141,7 +3161,7 @@ def _run_mode_send_only(config, ctx, steps):
 
 
 def _run_mode_receive_only(config, ctx, steps):
-    """وضع استقبال فقط: تحميل metadata → استقبال نتائج → تجميع → خطوات بعد generate"""
+    """وضع استقبال فقط: تحميل metadata → استقبال نتائج → باقي الخطوات (generate الإضافية = باتش)"""
     # تحميل metadata
     metadata = _load_batch_metadata(ctx)
 
@@ -3194,50 +3214,74 @@ def _run_mode_receive_only(config, ctx, steps):
 
     log(f"  تم تجميع النتائج ({len(combined)} حرف)")
 
-    # تنفيذ الخطوات بعد generate
-    _run_steps(steps, ctx, start=gen_idx + 1)
+    # تنفيذ الخطوات بعد generate — مع باتش لأي generate إضافية
+    remaining_gen_indices = [i for i in _find_all_generate_step_indices(steps) if i > gen_idx]
+
+    if not remaining_gen_indices:
+        # مفيش generate تانية — تشغيل عادي
+        _run_steps(steps, ctx, start=gen_idx + 1)
+    else:
+        # فيه generate إضافية — نشغلهم باتش
+        prev_end = gen_idx + 1
+        for next_gen_idx in remaining_gen_indices:
+            # تنفيذ الخطوات بين الـ generate السابقة والجاية
+            if prev_end < next_gen_idx:
+                _run_steps(steps, ctx, start=prev_end, end=next_gen_idx)
+
+            # تشغيل الـ generate كباتش
+            next_gen_step = steps[next_gen_idx]
+            step_label = next_gen_step.get("label", next_gen_step["id"])
+            log(f"--- الخطوة {next_gen_idx + 1}/{len(steps)}: {step_label} [BATCH] ---")
+            _batch_single_generate(next_gen_step, next_gen_idx, config, ctx, steps, is_primary=False)
+
+            prev_end = next_gen_idx + 1
+
+        # تنفيذ الخطوات بعد آخر generate
+        if prev_end < len(steps):
+            _run_steps(steps, ctx, start=prev_end)
 
 
-def _run_mode_batch_auto(config, ctx, steps):
-    """وضع باتش أوتوماتيك: إرسال + انتظار + استقبال + تجميع + إكمال — في run واحد"""
-    gen_idx = _find_generate_step_index(steps)
-    if gen_idx is None:
-        log("[!] لا توجد خطوة generate — تشغيل فوري")
-        _run_steps(steps, ctx)
-        return
-
-    # تنفيذ الخطوات قبل generate
-    _run_steps(steps, ctx, start=0, end=gen_idx)
-
-    # استخراج المواضيع
-    topics = _extract_topics_from_context(ctx)
-    if topics is None:
-        log("[!] لم يتم العثور على مواضيع — fallback لوضع فوري")
-        _run_steps(steps, ctx, start=gen_idx)
-        return
-
-    marker_prefix = _detect_marker_prefix(config)
-    prompts = _build_batch_prompts(config, ctx, topics, marker_prefix)
-
-    if not prompts:
-        log("[!] فشل بناء البرومبتات — fallback لوضع فوري")
-        _run_steps(steps, ctx, start=gen_idx)
-        return
-
-    # إرسال الباتش
-    gen_step = steps[gen_idx]
+def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=False):
+    """إرسال خطوة generate واحدة كباتش — مع polling واستقبال النتائج"""
     system_prompt = ctx.resolve(gen_step.get("system_prompt", "")) if gen_step.get("system_prompt") else ""
     temperature = gen_step.get("temperature", 0.7)
     max_tokens = gen_step.get("max_tokens", 8192)
     thinking_budget = gen_step.get("thinking_budget", None)
     thinking_level = gen_step.get("thinking_level", None)
+    effective_model = gen_step.get("model") or ctx.model
 
-    save_path = ctx.output_path("batch_job_info.json")
+    if gen_step.get("model"):
+        log(f"  [model override] {gen_step['model']}")
 
-    log(f"--- إرسال باتش: {len(prompts)} طلب ---")
+    # بناء البرومبتات
+    topics = None
+    marker_prefix = None
+
+    if is_primary:
+        # الخطوة الأساسية — محاولة تقسيم حسب المواضيع
+        topics = _extract_topics_from_context(ctx)
+        if topics and len(topics) > 1:
+            marker_prefix = _detect_marker_prefix(config)
+            prompts = _build_batch_prompts(config, ctx, topics, marker_prefix)
+            if prompts:
+                log(f"  [batch] تقسيم حسب المواضيع: {len(prompts)} طلب")
+            else:
+                topics = None  # fallback لبرومبت واحد
+        else:
+            topics = None  # موضوع واحد أو أقل — برومبت واحد
+
+    if topics is None:
+        # برومبت واحد — نحل المدخل من ctx ونبعته كباتش
+        prompt_str = str(ctx.resolve(gen_step["input"]))
+        prompts = [prompt_str]
+        log(f"  [batch] برومبت واحد")
+
+    save_path = ctx.output_path(f"batch_{gen_step['id']}.json")
+
+    log(f"--- إرسال باتش: {len(prompts)} طلب (model: {effective_model}) ---")
     send_result = batch_send(
         prompts=prompts,
-        model=ctx.model,
+        model=effective_model,
         system_prompt=system_prompt,
         temperature=temperature,
         max_tokens=max_tokens,
@@ -3250,7 +3294,7 @@ def _run_mode_batch_auto(config, ctx, steps):
         raise EngineError(f"فشل إرسال الباتش: {send_result.error}", code="BATCH_SEND_FAILED")
 
     # انتظار واستقبال النتائج
-    log(f"--- انتظار نتائج الباتش ---")
+    log(f"--- انتظار نتائج الباتش ({gen_step['id']}) ---")
     poll_interval = 30
     max_wait = 3600
     start_time = time.time()
@@ -3277,29 +3321,61 @@ def _run_mode_batch_auto(config, ctx, steps):
                 continue
             raise
 
-    # حفظ metadata للـ retry
-    metadata = {
-        "generate_step_id": gen_step["id"],
-        "generate_step_index": gen_idx,
-        "marker_prefix": marker_prefix,
-        "topics": topics,
-        "batch_info_path": save_path,
-        "pre_results": {k: v for k, v in ctx.results.items() if isinstance(v, str)},
-    }
+    # لو كان تقسيم حسب المواضيع → تجميع + retry المقطوعة
+    if topics and len(topics) > 1 and marker_prefix:
+        metadata = {
+            "generate_step_id": gen_step["id"],
+            "generate_step_index": gen_idx,
+            "marker_prefix": marker_prefix,
+            "topics": topics,
+            "batch_info_path": save_path,
+            "pre_results": {k: v for k, v in ctx.results.items() if isinstance(v, str)},
+        }
 
-    # كشف وإعادة توليد السكريبتات المقطوعة (MAX_TOKENS)
-    batch_results = _retry_truncated_batch_results(
-        batch_results, topics, marker_prefix, config, ctx, metadata
-    )
+        batch_results = _retry_truncated_batch_results(
+            batch_results, topics, marker_prefix, config, ctx, metadata
+        )
 
-    # تجميع النتائج
-    combined = _reassemble_batch_results(batch_results, topics, marker_prefix)
-    ctx.results[gen_step["id"]] = combined
+        combined = _reassemble_batch_results(batch_results, topics, marker_prefix)
+        ctx.results[gen_step["id"]] = combined
+        log(f"  تم تجميع النتائج ({len(combined)} حرف)")
+    else:
+        # برومبت واحد — النتيجة مباشرة
+        text = batch_results[0] if batch_results else ""
+        ctx.results[gen_step["id"]] = text
+        log(f"  النتيجة: {text[:100]}..." if len(text) > 100 else f"  النتيجة: {text}")
 
-    log(f"  تم تجميع النتائج ({len(combined)} حرف)")
 
-    # تنفيذ الخطوات بعد generate
-    _run_steps(steps, ctx, start=gen_idx + 1)
+def _run_mode_batch_auto(config, ctx, steps):
+    """وضع باتش أوتوماتيك: كل خطوات generate تشتغل باتش — في run واحد"""
+    gen_indices = _find_all_generate_step_indices(steps)
+
+    if not gen_indices:
+        log("[!] لا توجد خطوة generate — تشغيل فوري")
+        _run_steps(steps, ctx)
+        return
+
+    log(f"  [batch_auto] {len(gen_indices)} خطوة generate هتشتغل باتش")
+
+    prev_end = 0
+    for step_num, gen_idx in enumerate(gen_indices):
+        # تنفيذ الخطوات قبل هذه الـ generate (فوري)
+        if prev_end < gen_idx:
+            _run_steps(steps, ctx, start=prev_end, end=gen_idx)
+
+        # تنفيذ خطوة generate كـ batch
+        gen_step = steps[gen_idx]
+        step_label = gen_step.get("label", gen_step["id"])
+        log(f"--- الخطوة {gen_idx + 1}/{len(steps)}: {step_label} [BATCH] ---")
+
+        is_primary = (step_num == 0)  # أول generate = الأساسية (تقسيم حسب المواضيع)
+        _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=is_primary)
+
+        prev_end = gen_idx + 1
+
+    # تنفيذ الخطوات بعد آخر generate
+    if prev_end < len(steps):
+        _run_steps(steps, ctx, start=prev_end)
 
 
 # ========== Pipeline Runner ==========
