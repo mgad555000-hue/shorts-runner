@@ -3132,6 +3132,29 @@ def _load_batch_metadata(ctx):
                 alt_job = os.path.join(recipe_output, "batch_job_info.json")
                 if os.path.exists(alt_job):
                     shutil.copy2(alt_job, ctx.output_path("batch_job_info.json"))
+    # Fallback 2: البحث في آخر تشغيلة send_only في longs/out
+    if not os.path.exists(metadata_path):
+        longs_out = os.path.join(os.path.dirname(ctx.output_dir))  # longs/out/
+        if os.path.isdir(longs_out):
+            candidates = []
+            for d in os.listdir(longs_out):
+                meta = os.path.join(longs_out, d, "batch_metadata.json")
+                if os.path.exists(meta) and d != os.path.basename(ctx.output_dir):
+                    mtime = os.path.getmtime(meta)
+                    candidates.append((mtime, d, meta))
+            if candidates:
+                candidates.sort(reverse=True)
+                latest_mtime, latest_dir, latest_meta = candidates[0]
+                log(f"  تم العثور على batch_metadata من تشغيلة سابقة: {latest_dir}")
+                import shutil
+                shutil.copy2(latest_meta, metadata_path)
+                alt_job = os.path.join(longs_out, latest_dir, "batch_job_info.json")
+                if os.path.exists(alt_job):
+                    shutil.copy2(alt_job, ctx.output_path("batch_job_info.json"))
+                # نسخ batch_tashkeel لو موجود
+                for extra in os.listdir(os.path.join(longs_out, latest_dir)):
+                    if extra.startswith("batch_") and extra.endswith(".json") and extra not in ("batch_metadata.json", "batch_job_info.json"):
+                        shutil.copy2(os.path.join(longs_out, latest_dir, extra), ctx.output_path(extra))
     if not os.path.exists(metadata_path):
         raise EngineError(
             f"ملف batch_metadata.json غير موجود في {ctx.output_dir}. شغّل 'إرسال فقط' الأول.",

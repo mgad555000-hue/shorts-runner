@@ -819,6 +819,11 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
                     print(f"[COPY]   - {item.name} ({'dir' if item.is_dir() else f'{item.stat().st_size} bytes'})")
 
                 skip_files = {"script.py", "result_manifest.json", "run_log.txt"}
+                # لو التشغيلة فشلت — منمسحش ملفات الباتش (batch_metadata.json, batch_job_info.json)
+                # عشان receive_only يقدر يلاقيها بعدين
+                batch_protect_files = {"batch_metadata.json", "batch_job_info.json", "batch_tashkeel_intros.json"}
+                if not success:
+                    skip_files = skip_files | batch_protect_files
                 if actual_output_recipe:
                     recipe_out = Path(actual_output_recipe).resolve()
                     recipe_out.mkdir(parents=True, exist_ok=True)
