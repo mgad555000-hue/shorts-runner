@@ -202,6 +202,17 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
             seen.add(m)
             input_markers.append(m)
 
+    # فلترة الماركرز حسب TOPIC_IDS (لو محدد)
+    if ctx.topic_ids and input_markers:
+        filtered_markers = []
+        for m in input_markers:
+            id_match = re.search(r'_(\d+)', m)
+            if id_match and int(id_match.group(1)) in ctx.topic_ids:
+                filtered_markers.append(m)
+        if filtered_markers:
+            log(f"  [filter] فلترة الماركرز: {len(filtered_markers)} من {len(input_markers)} (TOPIC_IDS)")
+            input_markers = filtered_markers
+
     if len(input_markers) <= 1:
         return None  # مش multi-marker — الـ caller يستخدم generate العادي
 
@@ -2215,6 +2226,31 @@ def _filter_topics_by_ids(content, topic_ids):
     return json.dumps(filtered, ensure_ascii=False, indent=2)
 
 
+def _filter_combined_by_topic_ids(combined, topic_ids):
+    """فلترة نص مجمّع (بماركرز SCRIPT/INTRO) حسب topic_ids.
+
+    بيشيل أي بلوك مش موجود في topic_ids.
+    مثال: لو topic_ids={204, 211} — بيرجع بس البلوكات اللي فيها SCRIPT_204 و SCRIPT_211.
+    """
+    # كشف كل البلوكات بالماركرز
+    pattern = r'(<<<(?:SCRIPT|INTRO)_(\d+)>>>.*?<<<END_(?:SCRIPT|INTRO)>>>)'
+    blocks = re.findall(pattern, combined, re.DOTALL)
+
+    if not blocks:
+        return combined  # مفيش ماركرز — رجّع النص كما هو
+
+    filtered = []
+    for block_text, block_id in blocks:
+        if int(block_id) in topic_ids:
+            filtered.append(block_text)
+
+    original_count = len(blocks)
+    filtered_count = len(filtered)
+    log(f"  [filter] فلترة النتائج: {filtered_count} من {original_count} (TOPIC_IDS: {sorted(topic_ids)})")
+
+    return "\n\n".join(filtered)
+
+
 def action_remove_tashkeel(step, ctx):
     """إزالة التشكيل من النص باستخدام regex"""
     text = str(ctx.resolve(step["input"]))
@@ -3219,6 +3255,11 @@ def _run_mode_receive_only(config, ctx, steps):
 
     # تجميع النتائج
     combined = _reassemble_batch_results(batch_results, topics, marker_prefix)
+
+    # فلترة النتائج حسب TOPIC_IDS (لو محدد أرقام مختلفة عن الإرسال الأصلي)
+    if ctx.topic_ids:
+        combined = _filter_combined_by_topic_ids(combined, ctx.topic_ids)
+
     ctx.results[gen_step_id] = combined
 
     log(f"  تم تجميع النتائج ({len(combined)} حرف)")
@@ -3416,6 +3457,17 @@ def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=Fal
             if m not in seen:
                 seen.add(m)
                 input_markers.append(m)
+
+        # فلترة الماركرز حسب TOPIC_IDS (لو محدد)
+        if ctx.topic_ids and input_markers:
+            filtered_markers = []
+            for m in input_markers:
+                id_match = re.search(r'_(\d+)', m)
+                if id_match and int(id_match.group(1)) in ctx.topic_ids:
+                    filtered_markers.append(m)
+            if filtered_markers:
+                log(f"  [batch] فلترة الماركرز: {len(filtered_markers)} من {len(input_markers)} (TOPIC_IDS)")
+                input_markers = filtered_markers
 
         if len(input_markers) > 1:
             # تقسيم حسب الماركرز — كل ماركر في طلب لوحده
