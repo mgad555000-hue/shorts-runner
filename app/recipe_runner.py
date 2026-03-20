@@ -3246,7 +3246,7 @@ def _run_mode_receive_only(config, ctx, steps):
     # استقبال نتائج الباتش مع polling
     log(f"--- استقبال نتائج الباتش ---")
     poll_interval = 30
-    max_wait = 3600
+    max_wait = 7200  # ساعتين
     start_time = time.time()
 
     batch_results = None
@@ -3533,7 +3533,7 @@ def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=Fal
     # انتظار واستقبال النتائج
     log(f"--- انتظار نتائج الباتش ({gen_step['id']}) ---")
     poll_interval = 30
-    max_wait = 3600
+    max_wait = 7200  # ساعتين — التشكيل بياخد وقت أطول
     start_time = time.time()
 
     batch_results = None
