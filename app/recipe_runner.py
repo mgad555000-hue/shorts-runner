@@ -3270,11 +3270,47 @@ def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=Fal
         else:
             topics = None  # موضوع واحد أو أقل — برومبت واحد
 
+    marker_split_mode = False  # هل تم التقسيم حسب الماركرز؟
+
     if topics is None:
-        # برومبت واحد — نحل المدخل من ctx ونبعته كباتش
+        # نحل المدخل من ctx
         prompt_str = str(ctx.resolve(gen_step["input"]))
-        prompts = [prompt_str]
-        log(f"  [batch] برومبت واحد")
+
+        # محاولة تقسيم حسب الماركرز (SCRIPT/INTRO) — لتشكيل وغيره
+        MARKER_PAT = r'<<<((?:SCRIPT|INTRO)_\d+)>>>'
+        separator = "\n---\n"
+        if separator in prompt_str:
+            content_section = prompt_str[prompt_str.rfind(separator) + len(separator):]
+        else:
+            content_section = prompt_str
+
+        seen = set()
+        input_markers = []
+        for m in re.findall(MARKER_PAT, content_section):
+            if m not in seen:
+                seen.add(m)
+                input_markers.append(m)
+
+        if len(input_markers) > 1:
+            # تقسيم حسب الماركرز — كل ماركر في طلب لوحده
+            content_start = prompt_str.rfind(separator) + len(separator) if separator in prompt_str else 0
+            first_match = re.search(MARKER_PAT, content_section)
+            instructions_part = prompt_str[:content_start + first_match.start()] if first_match else prompt_str
+            content_with_markers = prompt_str[content_start:]
+
+            prompts = []
+            for marker in input_markers:
+                escaped = re.escape(f'<<<{marker}>>>')
+                pat = rf'({escaped}.*?)(?=<<<(?:SCRIPT|INTRO)_\d+>>>|\Z)'
+                match = re.search(pat, content_with_markers, re.DOTALL)
+                if match:
+                    prompts.append(instructions_part + match.group(1).strip())
+
+            marker_split_mode = True
+            log(f"  [batch] تقسيم حسب الماركرز: {len(prompts)} طلب")
+        else:
+            prompts = [prompt_str]
+            log(f"  [batch] برومبت واحد")
 
     save_path = ctx.output_path(f"batch_{gen_step['id']}.json")
 
@@ -3339,6 +3375,11 @@ def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=Fal
         combined = _reassemble_batch_results(batch_results, topics, marker_prefix)
         ctx.results[gen_step["id"]] = combined
         log(f"  تم تجميع النتائج ({len(combined)} حرف)")
+    elif marker_split_mode:
+        # تقسيم حسب الماركرز — تجميع النتائج بالترتيب
+        combined = "\n\n".join(batch_results)
+        ctx.results[gen_step["id"]] = combined
+        log(f"  تم تجميع {len(batch_results)} نتيجة ماركرز ({len(combined)} حرف)")
     else:
         # برومبت واحد — النتيجة مباشرة
         text = batch_results[0] if batch_results else ""

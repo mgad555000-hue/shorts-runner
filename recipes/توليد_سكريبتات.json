@@ -82,9 +82,25 @@
       "label": "حفظ المقدمات"
     },
     {
+      "id": "tashkeel_texts_prompt",
+      "action": "template",
+      "text": "{tashkeel_rules}\n\n---\n\nالنصوص المطلوب تشكيلها:\n\n{texts_raw}",
+      "label": "تجميع برومبت تشكيل النصوص"
+    },
+    {
+      "id": "tashkeel_texts",
+      "action": "generate",
+      "input": "{tashkeel_texts_prompt}",
+      "model": "gemini-3.1-pro-preview",
+      "max_tokens": 32000,
+      "temperature": 0.3,
+      "thinking_level": "low",
+      "label": "تشكيل النصوص"
+    },
+    {
       "id": "docx_texts",
       "action": "save_docx",
-      "input": "{texts_raw}",
+      "input": "{tashkeel_texts}",
       "save_as": "texts_output.docx",
       "font_size": 14,
       "label": "حفظ النصوص"
