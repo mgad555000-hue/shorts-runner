@@ -2274,14 +2274,20 @@ def action_split_script(step, ctx):
                     section = paragraphs[1].strip()
                 log(f"  [~] SCRIPT_{script_num}: fallback فقرات (مفيش PART_1 ولا separator)")
             else:
-                # فقرة واحدة بس — للنصوص ناخدها كلها، للمقدمات نتخطى
+                # فقرة واحدة بس — للنصوص ناخدها كلها، للمقدمات ناخد أول جملة
                 if part == "texts":
                     section = content.strip()
                     log(f"  [~] SCRIPT_{script_num}: فقرة واحدة — أخذت كنص كامل")
                 else:
-                    log(f"  [!] SCRIPT_{script_num}: فقرة واحدة بدون فاصل — تخطي المقدمة")
-                    skipped += 1
-                    continue
+                    # أول جملة (لحد أول نقطة أو فاصلة منقوطة أو سطر جديد)
+                    first_sentence = re.split(r'[.\u060C\u061B\n]', content.strip(), maxsplit=1)[0].strip()
+                    if first_sentence:
+                        section = first_sentence
+                        log(f"  [~] SCRIPT_{script_num}: فقرة واحدة — أول جملة كمقدمة")
+                    else:
+                        log(f"  [!] SCRIPT_{script_num}: فقرة واحدة فاضية — تخطي المقدمة")
+                        skipped += 1
+                        continue
 
         # لو المقدمة فاضية — تخطي مع تحذير
         if part == "intros" and not section:
@@ -3376,10 +3382,22 @@ def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=Fal
         ctx.results[gen_step["id"]] = combined
         log(f"  تم تجميع النتائج ({len(combined)} حرف)")
     elif marker_split_mode:
-        # تقسيم حسب الماركرز — تجميع النتائج بالترتيب
-        combined = "\n\n".join(batch_results)
+        # تقسيم حسب الماركرز — تجميع النتائج بالـ ID (الباتش مش بيضمن الترتيب)
+        MARKER_PAT_RE = re.compile(r'<<<((?:SCRIPT|INTRO)_(\d+))>>>')
+        id_to_result = {}
+        unmatched = []
+        for r in batch_results:
+            m = MARKER_PAT_RE.search(r)
+            if m:
+                id_to_result[int(m.group(2))] = r
+            else:
+                unmatched.append(r)
+        # ترتيب حسب الـ ID الفعلي
+        sorted_results = [id_to_result[k] for k in sorted(id_to_result.keys())]
+        sorted_results.extend(unmatched)
+        combined = "\n\n".join(sorted_results)
         ctx.results[gen_step["id"]] = combined
-        log(f"  تم تجميع {len(batch_results)} نتيجة ماركرز ({len(combined)} حرف)")
+        log(f"  تم تجميع {len(sorted_results)} نتيجة ماركرز بالـ ID ({len(combined)} حرف)")
     else:
         # برومبت واحد — النتيجة مباشرة
         text = batch_results[0] if batch_results else ""

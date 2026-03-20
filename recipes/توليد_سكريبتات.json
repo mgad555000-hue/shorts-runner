@@ -108,7 +108,7 @@
     {
       "id": "topics_json",
       "action": "scripts_to_topics_json",
-      "input": "{texts_raw}",
+      "input": "{tashkeel_texts}",
       "marker_prefix": "SCRIPT",
       "save_as": "topics.json",
       "label": "تصدير topics.json للوصفات الجاية"
