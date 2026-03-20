@@ -1170,7 +1170,7 @@ document.querySelectorAll('.tab').forEach(tab => {
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById(tab.dataset.tab).classList.add('active');
-        if (tab.dataset.tab === 'recipes') loadRecipes();
+        if (tab.dataset.tab === 'recipes' && !window._recipesLoaded) loadRecipes();
         if (tab.dataset.tab === 'runs') loadRuns();
         if (tab.dataset.tab === 'stats') loadStats();
         if (tab.dataset.tab === 'users') loadUsers();
@@ -1261,7 +1261,7 @@ async function loadRecipes(filterType) {
         if (filterType) url += `?recipe_type=${filterType}`;
         const res = await authFetch(url);
         const recipes = await res.json();
-        if (!filterType) allRecipes = recipes;
+        if (!filterType) { allRecipes = recipes; window._recipesLoaded = true; }
 
         // Update recipe select in Runner tab (filter by permission for non-admin)
         const sel = document.getElementById('recipeSelect');
@@ -1414,9 +1414,10 @@ async function showRunDetailInline(runId) {
     container.style.display = 'block';
     container.innerHTML = '<div style="text-align:center;padding:20px;"><span class="spinner spinner-dark"></span> جاري التحميل...</div>';
 
-    // Start auto-refresh
+    // Start auto-refresh (إيقاف modal polling لو شغال)
     if (refreshInterval) clearInterval(refreshInterval);
-    refreshInterval = setInterval(() => refreshRunDetail(runId), 1500);
+    if (modalRefreshInterval) { clearInterval(modalRefreshInterval); modalRefreshInterval = null; }
+    refreshInterval = setInterval(() => refreshRunDetail(runId), 3000);
     await refreshRunDetail(runId);
 }
 
@@ -1641,7 +1642,8 @@ async function showRunDetailModal(runId) {
     modal.classList.add('active');
     content.innerHTML = '<div style="text-align:center;padding:30px;"><span class="spinner spinner-dark"></span></div>';
     if (modalRefreshInterval) { clearInterval(modalRefreshInterval); modalRefreshInterval = null; }
-    modalRefreshInterval = setInterval(() => refreshModalDetail(runId), 1500);
+    if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; }
+    modalRefreshInterval = setInterval(() => refreshModalDetail(runId), 3000);
     await refreshModalDetail(runId);
 }
 function closeRunDetailModal() {
@@ -2244,7 +2246,7 @@ initTopicGrid();
         showApp();
     }
 })();
-setInterval(() => { if (currentUser) loadHeaderStats(); }, 15000);
+setInterval(() => { if (currentUser && document.visibilityState === 'visible') loadHeaderStats(); }, 60000);
 
 // Responsive: make run form single column on mobile
 if (window.innerWidth <= 768) {

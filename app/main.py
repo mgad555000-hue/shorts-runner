@@ -62,8 +62,14 @@ Path(LONGS_OUTPUT_ROOT).mkdir(parents=True, exist_ok=True)
 
 # ========== نظام القنوات ==========
 
+_channels_cache = {"data": None, "time": 0}
+_CHANNELS_CACHE_TTL = 30  # ثانية
+
 def get_channels() -> List[str]:
-    """قراءة القنوات المتاحة من المجلدات"""
+    """قراءة القنوات المتاحة من المجلدات (مع cache 30 ثانية)"""
+    now = time.time()
+    if _channels_cache["data"] is not None and (now - _channels_cache["time"]) < _CHANNELS_CACHE_TTL:
+        return _channels_cache["data"]
     if not os.path.exists(CHANNELS_ROOT):
         return []
     channels = []
@@ -73,7 +79,10 @@ def get_channels() -> List[str]:
                 channels.append(entry.name)
     except Exception:
         pass
-    return sorted(channels)
+    result = sorted(channels)
+    _channels_cache["data"] = result
+    _channels_cache["time"] = now
+    return result
 
 
 def validate_channel_name(channel: str):
@@ -286,7 +295,14 @@ def perform_cleanup(max_age_days: int = None, keep_last_n: int = None) -> dict:
     return {"deleted_runs": deleted_runs, "freed_space_mb": freed_space / (1024*1024), "errors": errors, "settings": {"max_age_days": max_age_days, "keep_last_n": keep_last_n}}
 
 
+_storage_stats_cache = {"data": None, "time": 0}
+_STORAGE_STATS_CACHE_TTL = 60  # ثانية — مسح الملفات مرة كل دقيقة بدل كل 15 ثانية
+
 def get_storage_stats() -> dict:
+    now = time.time()
+    cached = _storage_stats_cache
+
+    # الإحصائيات السريعة (DB) — دايماً طازة
     db = SessionLocal()
     try:
         total_runs = db.query(Run).count()
@@ -294,6 +310,16 @@ def get_storage_stats() -> dict:
         failed_runs = db.query(Run).filter(Run.status == "failed").count()
         running_runs = db.query(Run).filter(Run.status == "running").count()
         cancelled_runs = db.query(Run).filter(Run.status == "cancelled").count()
+        oldest_run = db.query(Run).order_by(Run.created_at.asc()).first()
+        newest_run = db.query(Run).order_by(Run.created_at.desc()).first()
+    finally:
+        db.close()
+
+    # إحصائيات الملفات (الثقيلة) — من الكاش لو متاح
+    if cached["data"] is not None and (now - cached["time"]) < _STORAGE_STATS_CACHE_TTL:
+        total_files = cached["data"]["total_files"]
+        total_size = cached["data"]["total_size"]
+    else:
         total_size = 0
         total_files = 0
         for out_root in [OUTPUT_ROOT, LONGS_OUTPUT_ROOT]:
@@ -303,22 +329,21 @@ def get_storage_stats() -> dict:
                     if f.is_file():
                         total_size += f.stat().st_size
                         total_files += 1
-        oldest_run = db.query(Run).order_by(Run.created_at.asc()).first()
-        newest_run = db.query(Run).order_by(Run.created_at.desc()).first()
-        return {
-            "total_runs": total_runs, "completed_runs": completed_runs, "failed_runs": failed_runs,
-            "running_runs": running_runs, "cancelled_runs": cancelled_runs,
-            "pending_runs": total_runs - completed_runs - failed_runs - running_runs - cancelled_runs,
-            "total_files": total_files, "total_size_mb": round(total_size / (1024*1024), 2),
-            "oldest_run": oldest_run.created_at.isoformat() if oldest_run and oldest_run.created_at else None,
-            "newest_run": newest_run.created_at.isoformat() if newest_run and newest_run.created_at else None,
-            "max_concurrent_runs": get_dynamic_settings()["max_concurrent_runs"],
-            "mock_mode": is_mock_mode(),
-            "channels_count": len(get_channels()),
-            "cleanup_settings": {"interval_hours": CLEANUP_INTERVAL_HOURS, "max_age_days": get_dynamic_settings()["cleanup_max_age_days"], "keep_last_n": get_dynamic_settings()["cleanup_keep_last_n"]}
-        }
-    finally:
-        db.close()
+        _storage_stats_cache["data"] = {"total_files": total_files, "total_size": total_size}
+        _storage_stats_cache["time"] = now
+
+    return {
+        "total_runs": total_runs, "completed_runs": completed_runs, "failed_runs": failed_runs,
+        "running_runs": running_runs, "cancelled_runs": cancelled_runs,
+        "pending_runs": total_runs - completed_runs - failed_runs - running_runs - cancelled_runs,
+        "total_files": total_files, "total_size_mb": round(total_size / (1024*1024), 2),
+        "oldest_run": oldest_run.created_at.isoformat() if oldest_run and oldest_run.created_at else None,
+        "newest_run": newest_run.created_at.isoformat() if newest_run and newest_run.created_at else None,
+        "max_concurrent_runs": get_dynamic_settings()["max_concurrent_runs"],
+        "mock_mode": is_mock_mode(),
+        "channels_count": len(get_channels()),
+        "cleanup_settings": {"interval_hours": CLEANUP_INTERVAL_HOURS, "max_age_days": get_dynamic_settings()["cleanup_max_age_days"], "keep_last_n": get_dynamic_settings()["cleanup_keep_last_n"]}
+    }
 
 
 # ========== Auth Helper ==========
@@ -1103,7 +1128,6 @@ async def get_host_folder_path(docker_path: str, current_user: User = Depends(ge
     if not docker_path.startswith("/app/data/"):
         raise HTTPException(status_code=400, detail="المسار لازم يبدأ بـ /app/data/")
     host_path = docker_path.replace("/app/data/", HOST_DATA_DIR + "/").replace("/", "\\")
-    os.makedirs(docker_path, exist_ok=True)
     return {"success": True, "path": host_path}
 
 
