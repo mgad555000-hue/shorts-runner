@@ -3250,6 +3250,123 @@ def _run_mode_receive_only(config, ctx, steps):
             _run_steps(steps, ctx, start=prev_end)
 
 
+def _retry_truncated_marker_split(batch_results, prompts, gen_step, ctx, batch_info_path):
+    """كشف وإعادة توليد النتائج المقطوعة في marker_split_mode.
+
+    يكشف المقطوعات بطريقتين:
+    1. من GCS predictions (finishReason=MAX_TOKENS) — الأدق
+    2. fallback: بفحص وجود END marker في النتيجة
+
+    ثم يعيد التوليد عبر API العادي بـ max_tokens أعلى.
+    """
+    truncated_indices = []
+
+    # الطريقة 1: كشف من GCS predictions
+    try:
+        if batch_info_path and os.path.exists(batch_info_path):
+            with open(batch_info_path, 'r') as f:
+                batch_info_data = json.load(f)
+
+            provider = batch_info_data.get("provider", "")
+            if provider == "gemini":
+                from engine import _download_from_gcs, _setup_gcs_credentials
+                from google import genai
+
+                job_name = batch_info_data.get("job_name", "")
+                extra = batch_info_data.get("extra", {})
+                project_id, location, bucket_name = _setup_gcs_credentials()
+                saved_location = extra.get("location", location)
+                client = genai.Client(vertexai=True, project=project_id, location=saved_location)
+
+                batch_job = client.batches.get(name=job_name)
+                if hasattr(batch_job, 'dest') and hasattr(batch_job.dest, 'gcs_uri'):
+                    jsonl_content = _download_from_gcs(batch_job.dest.gcs_uri)
+                    for line_idx, line in enumerate(jsonl_content.strip().split('\n')):
+                        if line:
+                            try:
+                                data = json.loads(line)
+                                finish = data['response']['candidates'][0].get('finishReason', 'UNKNOWN')
+                                if finish == 'MAX_TOKENS':
+                                    truncated_indices.append(line_idx)
+                            except (KeyError, IndexError, json.JSONDecodeError):
+                                pass
+    except Exception as e:
+        log(f"  [!] فشل كشف المقطوعات من GCS: {str(e)[:200]}")
+
+    # الطريقة 2 (fallback): كشف بفحص END marker
+    if not truncated_indices:
+        for idx, text in enumerate(batch_results):
+            if text and '<<<END_' not in text:
+                truncated_indices.append(idx)
+        if truncated_indices:
+            log(f"  [!] كشف {len(truncated_indices)} نتيجة بدون END marker (fallback)")
+
+    if not truncated_indices:
+        return batch_results
+
+    log(f"  [!] {len(truncated_indices)} نتيجة مقطوعة (MAX_TOKENS) — إعادة توليد...")
+
+    # إعادة التوليد عبر API العادي
+    system_prompt = gen_step.get("system_prompt", "")
+    if system_prompt:
+        system_prompt = ctx.resolve(system_prompt)
+    temperature = gen_step.get("temperature", 0.7)
+    max_tokens = gen_step.get("max_tokens", 8192)
+    effective_model = gen_step.get("model") or ctx.model
+
+    retry_max_tokens_levels = [
+        min(max_tokens * 2, 131072),
+        min(max_tokens * 2, 131072),
+        min(max_tokens * 4, 131072),
+    ]
+
+    retry_count = 0
+    for trunc_idx in truncated_indices:
+        if trunc_idx >= len(batch_results) or trunc_idx >= len(prompts):
+            continue
+
+        # استخراج الماركر للتعريف
+        marker_match = re.search(r'<<<((?:SCRIPT|INTRO)_\d+)>>>', batch_results[trunc_idx] if batch_results[trunc_idx] else "")
+        marker_id = marker_match.group(1) if marker_match else f"index_{trunc_idx}"
+
+        success = False
+        for attempt in range(3):
+            retry_tokens = retry_max_tokens_levels[attempt]
+            try:
+                log(f"  → إعادة توليد {marker_id} (محاولة {attempt + 1}/3, max_tokens={retry_tokens})...")
+                result = generate(
+                    prompt=prompts[trunc_idx],
+                    model=effective_model,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=retry_tokens
+                )
+
+                if result.success and result.data:
+                    new_text = result.data.strip()
+                    has_end = '<<<END_' in new_text
+
+                    if has_end:
+                        old_len = len(batch_results[trunc_idx]) if batch_results[trunc_idx] else 0
+                        batch_results[trunc_idx] = new_text
+                        log(f"  ✓ {marker_id}: {old_len} → {len(new_text)} حرف | END=True")
+                        retry_count += 1
+                        success = True
+                        break
+                    else:
+                        log(f"  [!] {marker_id}: بدون END marker ({len(new_text)} حرف, max_tokens={retry_tokens})")
+                else:
+                    log(f"  [!] {marker_id}: فشل التوليد — {getattr(result, 'error', '?')}")
+            except Exception as e:
+                log(f"  [!] {marker_id}: خطأ — {str(e)[:200]}")
+
+        if not success:
+            log(f"  [!] {marker_id}: فشلت كل المحاولات — استخدام النتيجة المقطوعة")
+
+    log(f"  تم إصلاح {retry_count}/{len(truncated_indices)} نتيجة مقطوعة")
+    return batch_results
+
+
 def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=False):
     """إرسال خطوة generate واحدة كباتش — مع polling واستقبال النتائج"""
     system_prompt = ctx.resolve(gen_step.get("system_prompt", "")) if gen_step.get("system_prompt") else ""
@@ -3385,6 +3502,11 @@ def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=Fal
         ctx.results[gen_step["id"]] = combined
         log(f"  تم تجميع النتائج ({len(combined)} حرف)")
     elif marker_split_mode:
+        # كشف وإعادة توليد النتائج المقطوعة (MAX_TOKENS) في marker_split_mode
+        batch_results = _retry_truncated_marker_split(
+            batch_results, prompts, gen_step, ctx, save_path
+        )
+
         # تقسيم حسب الماركرز — تجميع النتائج بالـ ID (الباتش مش بيضمن الترتيب)
         MARKER_PAT_RE = re.compile(r'<<<((?:SCRIPT|INTRO)_(\d+))>>>')
         id_to_result = {}
