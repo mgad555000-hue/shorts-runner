@@ -2251,6 +2251,9 @@ def action_split_script(step, ctx):
         if part1_match:
             if part == "intros":
                 section = content[:part1_match.start()].strip()
+                # إزالة كلمة الفاصل من آخر المقدمة (لو موجودة)
+                if section.endswith(separator):
+                    section = section[:-len(separator)].strip()
             else:
                 # النصوص = من <<<PART_1>>> لحد الآخر (بما فيها الماركرز)
                 section = content[part1_match.start():].strip()
@@ -3454,6 +3457,20 @@ def run_pipeline(config):
 
     ctx = PipelineContext()
     steps = config["steps"]
+
+    # قراءة إعدادات التشغيل من _runtime (محقونة في recipe_config.json — أعلى أولوية)
+    runtime = config.get("_runtime", {})
+    if runtime:
+        if runtime.get("execution_mode"):
+            ctx.execution_mode = runtime["execution_mode"]
+            log(f"  [runtime] execution_mode = {ctx.execution_mode} (من recipe_config.json)")
+        if runtime.get("model_name"):
+            ctx.model = runtime["model_name"]
+        if runtime.get("tts_provider"):
+            ctx.tts_provider = runtime["tts_provider"]
+        if runtime.get("topic_ids"):
+            os.environ["TOPIC_IDS"] = runtime["topic_ids"]
+
     mode = ctx.execution_mode
 
     log(f"عدد الخطوات: {len(steps)} | الموديل: {ctx.model} | TTS: {ctx.tts_provider} | الوضع: {mode}")

@@ -106,10 +106,22 @@ def create_sandbox_container(run_id: str, code: str, input_folder: str, content_
                 pass
 
         if is_json_pipeline:
-            # حفظ الـ config
+            # حفظ الـ config مع حقن إعدادات التشغيل (أكثر أماناً من env vars)
+            try:
+                config_obj = json.loads(code)
+                config_obj["_runtime"] = {
+                    "execution_mode": os.getenv("EXECUTION_MODE", "instant"),
+                    "model_name": os.getenv("MODEL_NAME", ""),
+                    "tts_provider": os.getenv("TTS_PROVIDER", "vertex"),
+                    "topic_ids": os.getenv("TOPIC_IDS", ""),
+                }
+                code_with_runtime = json.dumps(config_obj, ensure_ascii=False, indent=2)
+            except Exception:
+                code_with_runtime = code
             config_path = output_dir / "recipe_config.json"
-            config_path.write_text(code, encoding="utf-8")
+            config_path.write_text(code_with_runtime, encoding="utf-8")
             print(f"[SANDBOX DEBUG] JSON Pipeline detected, config saved: {config_path.stat().st_size} bytes")
+            print(f"[SANDBOX DEBUG] _runtime.execution_mode = {os.getenv('EXECUTION_MODE', 'instant')}")
             # توليد wrapper script
             wrapper = '''import sys, json, os
 sys.path.insert(0, '/app/app')
