@@ -2261,6 +2261,116 @@ def action_remove_tashkeel(step, ctx):
     return cleaned
 
 
+def action_clean_text(step, ctx):
+    """تنظيف نصوص التوليد من أخطاء الموديل الشائعة.
+    يصلح: باج اَل، تشكيل آخر حرف، Tatweel، أقواس حول حروف،
+    كلمات ممنوعة، إملاء غلط، حروف أجنبية.
+    """
+    text = str(ctx.resolve(step["input"]))
+    original_len = len(text)
+    fixes = {}
+
+    # 1. إزالة Tatweel (U+0640) من داخل الكلمات
+    tatweel_count = text.count('\u0640')
+    if tatweel_count:
+        text = text.replace('\u0640', '')
+        fixes['tatweel'] = tatweel_count
+
+    # 2. إصلاح باج اَل — ألف + فتحة + لام التعريف → ال عادية
+    al_bug = len(re.findall(r'\u0627\u064E\u0644', text))
+    if al_bug:
+        text = re.sub(r'\u0627\u064E\u0644', '\u0627\u0644', text)
+        fixes['al_bug'] = al_bug
+
+    # 3. إزالة تشكيل الحرف الأخير من كل كلمة
+    TASHKEEL = '\u064B\u064C\u064D\u064E\u064F\u0650\u0651\u0652\u0670'
+    last_letter_fixes = 0
+    def _fix_last_letter(m):
+        nonlocal last_letter_fixes
+        word = m.group(0)
+        # أزل كل التشكيل من آخر حرف (الحرف الأخير + أي تشكيل بعده)
+        i = len(word) - 1
+        while i >= 0 and word[i] in TASHKEEL:
+            i -= 1
+        if i < len(word) - 1 and i >= 0:
+            last_letter_fixes += 1
+            return word[:i+1]
+        return word
+    # كلمة عربية = حروف عربية + تشكيل
+    text = re.sub(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u064B-\u065F\u0670]+', _fix_last_letter, text)
+    if last_letter_fixes:
+        fixes['last_letter_tashkeel'] = last_letter_fixes
+
+    # 4. إصلاح أقواس حول حروف مفردة داخل كلمات: يُعْتَبَ(ر) → يُعْتَبَر
+    paren_fixes = len(re.findall(r'\([\u0600-\u06FF]\)', text))
+    if paren_fixes:
+        text = re.sub(r'\(([\u0600-\u06FF])\)', r'\1', text)
+        fixes['paren_single_char'] = paren_fixes
+
+    # 5. حذف أقواس عادية متبقية
+    remaining_parens = text.count('(') + text.count(')')
+    if remaining_parens:
+        text = text.replace('(', '').replace(')', '')
+        fixes['remaining_parens'] = remaining_parens
+
+    # 6. كلمات ممنوعة
+    forbidden_replacements = {
+        'موت': 'تلف',
+        'الموت': 'التلف',
+        'يموت': 'يتلف',
+        'تموت': 'تتلف',
+        'يقتل': 'يتلف',
+        'القتل': 'الإتلاف',
+    }
+    forbidden_count = 0
+    for bad, good in forbidden_replacements.items():
+        count = len(re.findall(r'\b' + re.escape(bad) + r'\b', text))
+        if count:
+            text = re.sub(r'\b' + re.escape(bad) + r'\b', good, text)
+            forbidden_count += count
+    if forbidden_count:
+        fixes['forbidden_words'] = forbidden_count
+
+    # 7. إصلاح إملاء
+    spelling_fixes = 0
+    # الكلي/الكلى → الكلا (بدون تشكيل بين الحروف)
+    for wrong in ['الكلي', 'الكلى', 'الْكِلَي', 'الْكِلَى']:
+        count = text.count(wrong)
+        if count:
+            text = text.replace(wrong, 'الْكِلَا' if 'ْ' in wrong else 'الكلا')
+            spelling_fixes += count
+    if spelling_fixes:
+        fixes['spelling'] = spelling_fixes
+
+    # 8. إزالة حروف أجنبية (عبرية/فارسية ياء)
+    foreign_count = len(re.findall(r'[\u0590-\u05FF\u06CC]', text))
+    if foreign_count:
+        text = re.sub(r'[\u0590-\u05FF]', '', text)  # عبري
+        text = text.replace('\u06CC', '\u064A')  # ياء فارسية → ياء عربية
+        fixes['foreign_chars'] = foreign_count
+
+    # 9. إزالة ZWNJ وحروف غير مرئية
+    invisible_count = len(re.findall(r'[\u200C\u200D\u200E\u200F\uFEFF]', text))
+    if invisible_count:
+        text = re.sub(r'[\u200C\u200D\u200E\u200F\uFEFF]', '', text)
+        fixes['invisible_chars'] = invisible_count
+
+    # 10. استبدال سكون بديل U+06E1 بسكون عادي U+0652
+    alt_sukun = text.count('\u06E1')
+    if alt_sukun:
+        text = text.replace('\u06E1', '\u0652')
+        fixes['alt_sukun'] = alt_sukun
+
+    total_fixes = sum(fixes.values())
+    if fixes:
+        details = ' | '.join(f"{k}:{v}" for k, v in fixes.items())
+        log(f"  clean_text: {total_fixes} إصلاح ({details})")
+    else:
+        log(f"  clean_text: النص نظيف — لا يحتاج إصلاح")
+
+    return text
+
+
 def action_split_script(step, ctx):
     """تقسيم السكريبت إلى مقدمات ونصوص.
     الطريقة الأساسية: <<<PART_1>>> كفاصل (deterministic — مش بيعتمد على الـ AI).
@@ -2625,6 +2735,7 @@ ACTIONS = {
     "tts_segments": action_tts_segments,
     "montage_short": action_montage_short,
     "remove_tashkeel": action_remove_tashkeel,
+    "clean_text": action_clean_text,
     "split_script": action_split_script,
     "scripts_to_topics_json": action_scripts_to_topics_json,
     "topics_to_markers": action_topics_to_markers,
@@ -2644,6 +2755,7 @@ REQUIRED_PARAMS = {
     "save_file": ["input", "save_as"],
     "template": ["text"],
     "format_text": ["input"],
+    "clean_text": ["input"],
     "save_docx": ["input", "save_as"],
     "read_docx": [],
     "read_excel": ["file"],
