@@ -1,0 +1,47 @@
+{
+  "name": "توليد نصوص من مقدمات",
+  "steps": [
+    {
+      "id": "instructions",
+      "action": "read_input",
+      "file": "instructions.txt",
+      "label": "قراءة التعليمات"
+    },
+    {
+      "id": "intros",
+      "action": "read_input",
+      "file": "intros.txt",
+      "label": "قراءة المقدمات"
+    },
+    {
+      "id": "prompt",
+      "action": "template",
+      "text": "{instructions}\n\n---\n\nالمقدمات المطلوب كتابة نصوص فصحى لها:\n\n{intros}",
+      "label": "تجميع البرومبت"
+    },
+    {
+      "id": "texts_raw",
+      "action": "generate",
+      "input": "{prompt}",
+      "model": "gemini-3.1-pro-preview",
+      "max_tokens": 32000,
+      "temperature": 0.3,
+      "thinking_level": "low",
+      "label": "توليد النصوص"
+    },
+    {
+      "id": "texts_clean",
+      "action": "clean_text",
+      "input": "{texts_raw}",
+      "label": "تنظيف النصوص"
+    },
+    {
+      "id": "docx_texts",
+      "action": "save_docx",
+      "input": "{texts_clean}",
+      "save_as": "texts_output.docx",
+      "font_size": 14,
+      "label": "حفظ النصوص"
+    }
+  ]
+}
