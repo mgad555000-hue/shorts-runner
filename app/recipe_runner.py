@@ -3084,7 +3084,8 @@ def validate_pipeline(config):
                 import re
                 refs = re.findall(r'\{(\w+)\}', value)
                 for ref in refs:
-                    if ref not in seen_ids:
+                    # تجاهل references اللي بتنتهي بـ _failed (بتتحفظ في runtime من validate_texts)
+                    if ref not in seen_ids and not ref.endswith("_failed"):
                         errors.append(f"{step_label}: الـ reference '{{{ref}}}' بيشاور على خطوة مش موجودة قبلها")
 
     return errors
