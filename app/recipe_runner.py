@@ -2917,7 +2917,15 @@ def action_regenerate_failed(step, ctx):
     # توليد كل موضوع فاشل
     regenerated = {}
     for script_num in failed_scripts:
-        prompt = f"{instructions}\n\n---\n\nأعد كتابة النصوص التالية مع الالتزام الكامل بجميع القواعد أعلاه. تأكد من أن كل موضوع يحتوي على 4 أجزاء بالضبط (PART_1 إلى PART_4)، وأن كل جزء قطعة نصية واحدة متصلة، وأن عدد الكلمات في النطاق المطلوب.\n\nالموضوع المطلوب إعادة كتابته:\n\n{original_blocks.get(script_num, f'<<<SCRIPT_{script_num}>>>\n<<<END_SCRIPT>>>')}"
+        fallback_block = "<<<SCRIPT_" + script_num + ">>>\n<<<END_SCRIPT>>>"
+        original_block = original_blocks.get(script_num, fallback_block)
+        prompt = (
+            f"{instructions}\n\n---\n\n"
+            "أعد كتابة النصوص التالية مع الالتزام الكامل بجميع القواعد أعلاه. "
+            "تأكد من أن كل موضوع يحتوي على 4 أجزاء بالضبط (PART_1 إلى PART_4)، "
+            "وأن كل جزء قطعة نصية واحدة متصلة، وأن عدد الكلمات في النطاق المطلوب.\n\n"
+            f"الموضوع المطلوب إعادة كتابته:\n\n{original_block}"
+        )
 
         result = generate(
             prompt=prompt,
