@@ -2772,6 +2772,187 @@ def action_draw_thumbnail(step, ctx):
     return output_paths
 
 
+def action_validate_texts(step, ctx):
+    """مراجعة النصوص والتحقق من سلامتها.
+    يفحص: عدد الأجزاء، عدد الكلمات، كلمات مقطوعة، قطعة واحدة، علامة ترقيم.
+    يصلح: دمج أسطر، إضافة نقطة في الآخر.
+    يرجع: النص المصلح + قائمة الموضوعات الفاشلة في ctx.results[step_id + '_failed']
+    """
+    text = str(ctx.resolve(step["input"]))
+    min_words = step.get("min_words", 70)
+    max_words = step.get("max_words", 130)
+    expected_parts = step.get("expected_parts", 4)
+
+    TASHKEEL = '\u064B\u064C\u064D\u064E\u064F\u0650\u0651\u0652\u0670'
+    pattern = r'(<<<SCRIPT_(\d+)>>>)(.*?)(<<<END_SCRIPT>>>)'
+
+    failed_scripts = []  # قائمة أرقام الموضوعات الفاشلة
+    fixed_blocks = []
+    total_fixes = 0
+    total_issues = 0
+
+    for match in re.finditer(pattern, text, re.DOTALL):
+        marker_start = match.group(1)
+        script_num = match.group(2)
+        content = match.group(3)
+        marker_end = match.group(4)
+
+        # استخراج الأجزاء
+        part_pattern = r'<<<PART_(\d+)>>>(.*?)<<<END_PART>>>'
+        parts = list(re.finditer(part_pattern, content, re.DOTALL))
+
+        script_failed = False
+        script_issues = []
+
+        # فحص 1: عدد الأجزاء
+        if len(parts) != expected_parts:
+            script_issues.append(f"عدد أجزاء = {len(parts)} (المطلوب {expected_parts})")
+            script_failed = True
+
+        fixed_content_parts = []
+        for part_match in parts:
+            part_num = part_match.group(1)
+            part_text = part_match.group(2).strip()
+
+            # إصلاح 1: دمج الأسطر في قطعة واحدة
+            lines = [l.strip() for l in part_text.split('\n') if l.strip()]
+            if len(lines) > 1:
+                part_text = ' '.join(lines)
+                total_fixes += 1
+
+            # إصلاح 2: إضافة نقطة في الآخر لو مفيش علامة ترقيم
+            stripped = part_text.rstrip()
+            if stripped:
+                last_char = stripped[-1]
+                # شيل التشكيل من الآخر عشان نشوف الحرف الفعلي
+                while last_char in TASHKEEL and len(stripped) > 1:
+                    stripped = stripped[:-1]
+                    last_char = stripped[-1]
+                if last_char not in '.،؟!':
+                    part_text = part_text.rstrip() + '.'
+                    total_fixes += 1
+
+            # فحص 2: عدد الكلمات
+            words = part_text.split()
+            word_count = len(words)
+            if word_count < min_words or word_count > max_words:
+                script_issues.append(f"Part {part_num}: {word_count} كلمة (النطاق {min_words}-{max_words})")
+                script_failed = True
+
+            # فحص 3: كلمات مقطوعة (كلمة أقل من 2 حرف عربي في آخر النص)
+            if words:
+                last_word = words[-1].rstrip('.،؟!')
+                # شيل التشكيل
+                clean_last = re.sub(f'[{TASHKEEL}]', '', last_word)
+                arabic_letters = re.sub(r'[^\u0621-\u064A]', '', clean_last)
+                if len(arabic_letters) <= 1 and len(words) > 3:
+                    script_issues.append(f"Part {part_num}: كلمة مقطوعة محتملة '{last_word}'")
+                    script_failed = True
+
+            fixed_content_parts.append(f"<<<PART_{part_num}>>>\n{part_text}\n<<<END_PART>>>")
+
+        # تجميع المحتوى المصلح
+        fixed_content = '\n\n'.join(fixed_content_parts)
+        fixed_blocks.append(f"{marker_start}\n\n{fixed_content}\n\n{marker_end}")
+
+        if script_failed:
+            failed_scripts.append(script_num)
+            total_issues += len(script_issues)
+            for issue in script_issues:
+                log(f"  [!] SCRIPT_{script_num}: {issue}")
+
+    result_text = '\n\n'.join(fixed_blocks)
+
+    # حفظ قائمة الفاشل في ctx
+    failed_key = step["id"] + "_failed"
+    ctx.results[failed_key] = failed_scripts
+
+    log(f"  validate_texts: {len(fixed_blocks)} موضوع | {total_fixes} إصلاح أوتوماتيك | {len(failed_scripts)} موضوع فاشل ({total_issues} مشكلة)")
+
+    if failed_scripts:
+        log(f"  الموضوعات الفاشلة: {', '.join(failed_scripts)}")
+
+    return result_text
+
+
+def action_regenerate_failed(step, ctx):
+    """إعادة توليد الموضوعات الفاشلة فقط.
+    ياخد النص الأصلي + قائمة الفاشل من validate_texts ويعيد توليدهم.
+    """
+    text = str(ctx.resolve(step["input"]))
+    failed_ref = step.get("failed_ref")  # مرجع لخطوة validate (مثل "validated_failed")
+    instructions_ref = step.get("instructions")  # تعليمات التوليد
+
+    if not failed_ref:
+        log("  regenerate_failed: مفيش failed_ref محدد — تخطي")
+        return text
+
+    failed_scripts = ctx.resolve(failed_ref)
+    if not failed_scripts or not isinstance(failed_scripts, list):
+        log("  regenerate_failed: مفيش موضوعات فاشلة — تخطي")
+        return text
+
+    instructions = str(ctx.resolve(instructions_ref)) if instructions_ref else ""
+
+    temperature = step.get("temperature", 0.3)
+    max_tokens = step.get("max_tokens", 16000)
+    thinking_budget = step.get("thinking_budget", None)
+    thinking_level = step.get("thinking_level", None)
+    step_model = step.get("model", None)
+    effective_model = step_model or ctx.model
+
+    if step_model:
+        log(f"  [model override] {step_model}")
+
+    log(f"  regenerate_failed: إعادة توليد {len(failed_scripts)} موضوع: {', '.join(failed_scripts)}")
+
+    # استخراج المقدمات/العناوين الأصلية للموضوعات الفاشلة
+    pattern = r'(<<<SCRIPT_(\d+)>>>)(.*?)(<<<END_SCRIPT>>>)'
+    original_blocks = {}
+    for match in re.finditer(pattern, text, re.DOTALL):
+        script_num = match.group(2)
+        if script_num in failed_scripts:
+            original_blocks[script_num] = match.group(0)
+
+    # توليد كل موضوع فاشل
+    regenerated = {}
+    for script_num in failed_scripts:
+        prompt = f"{instructions}\n\n---\n\nأعد كتابة النصوص التالية مع الالتزام الكامل بجميع القواعد أعلاه. تأكد من أن كل موضوع يحتوي على 4 أجزاء بالضبط (PART_1 إلى PART_4)، وأن كل جزء قطعة نصية واحدة متصلة، وأن عدد الكلمات في النطاق المطلوب.\n\nالموضوع المطلوب إعادة كتابته:\n\n{original_blocks.get(script_num, f'<<<SCRIPT_{script_num}>>>\n<<<END_SCRIPT>>>')}"
+
+        result = generate(
+            prompt=prompt,
+            model=effective_model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            thinking_budget=thinking_budget,
+            thinking_level=thinking_level,
+        )
+
+        if result.success:
+            regenerated[script_num] = result.data
+            ctx.record_usage(step["id"], "direct", result.provider, result.model, result.token_usage)
+            log(f"  [✓] SCRIPT_{script_num}: تم إعادة التوليد")
+        else:
+            log(f"  [X] SCRIPT_{script_num}: فشل إعادة التوليد: {result.error}")
+
+    # استبدال الموضوعات الفاشلة بالجديدة
+    def replace_block(match):
+        script_num = match.group(2)
+        if script_num in regenerated:
+            new_text = regenerated[script_num]
+            # استخراج البلوك الجديد لو فيه ماركرز
+            new_match = re.search(r'<<<SCRIPT_\d+>>>(.*?)<<<END_SCRIPT>>>', new_text, re.DOTALL)
+            if new_match:
+                return f"<<<SCRIPT_{script_num}>>>{new_match.group(1)}<<<END_SCRIPT>>>"
+            return f"<<<SCRIPT_{script_num}>>>\n{new_text}\n<<<END_SCRIPT>>>"
+        return match.group(0)
+
+    result_text = re.sub(pattern, replace_block, text, flags=re.DOTALL)
+
+    log(f"  regenerate_failed: تم استبدال {len(regenerated)}/{len(failed_scripts)} موضوع")
+    return result_text
+
+
 # ========== ACTIONS Registry ==========
 
 ACTIONS = {
@@ -2799,6 +2980,8 @@ ACTIONS = {
     "scripts_to_topics_json": action_scripts_to_topics_json,
     "topics_to_markers": action_topics_to_markers,
     "draw_thumbnail": action_draw_thumbnail,
+    "validate_texts": action_validate_texts,
+    "regenerate_failed": action_regenerate_failed,
 }
 
 # ========== REQUIRED_PARAMS ==========
@@ -2828,6 +3011,8 @@ REQUIRED_PARAMS = {
     "scripts_to_topics_json": ["input"],
     "topics_to_markers": ["input"],
     "draw_thumbnail": ["input"],
+    "validate_texts": ["input"],
+    "regenerate_failed": ["input"],
 }
 
 

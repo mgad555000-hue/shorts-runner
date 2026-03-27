@@ -36,9 +36,39 @@
       "label": "تنظيف النصوص"
     },
     {
+      "id": "texts_validated",
+      "action": "validate_texts",
+      "input": "{texts_clean}",
+      "min_words": 70,
+      "max_words": 130,
+      "expected_parts": 4,
+      "label": "مراجعة النصوص"
+    },
+    {
+      "id": "texts_regenerated",
+      "action": "regenerate_failed",
+      "input": "{texts_validated}",
+      "failed_ref": "{texts_validated_failed}",
+      "instructions": "{instructions}",
+      "model": "gemini-3.1-pro-preview",
+      "temperature": 0.3,
+      "thinking_level": "low",
+      "max_tokens": 16000,
+      "label": "إعادة توليد الفاشل"
+    },
+    {
+      "id": "texts_final",
+      "action": "validate_texts",
+      "input": "{texts_regenerated}",
+      "min_words": 70,
+      "max_words": 130,
+      "expected_parts": 4,
+      "label": "تأكيد نهائي"
+    },
+    {
       "id": "docx_texts",
       "action": "save_docx",
-      "input": "{texts_clean}",
+      "input": "{texts_final}",
       "save_as": "texts_output.docx",
       "font_size": 14,
       "label": "حفظ النصوص"
