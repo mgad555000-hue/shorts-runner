@@ -61,6 +61,11 @@
     <script>
         const TOKEN = localStorage.getItem('auth_token') || '';
 
+        // لو مفيش توكن → ارجع لصفحة اللوجين
+        if (!TOKEN) {
+            window.location.href = '/';
+        }
+
         function fmt(n) { return n ? n.toLocaleString('en') : '0'; }
         function fmtCost(n) { return n ? '$' + n.toFixed(4) : '$0.0000'; }
         function shortId(id) { return id ? id.substring(0, 8) : ''; }
