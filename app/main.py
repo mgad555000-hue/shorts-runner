@@ -758,6 +758,7 @@ MODEL_PRICING = {
     "gemini-2.0-flash": {"input": 0.10, "output": 0.40, "thinking": 0.40},
     "gemini-3.0-flash": {"input": 0.15, "output": 0.60, "thinking": 0.60},
     "gemini-3.1-pro-preview": {"input": 1.25, "output": 10.00, "thinking": 10.00},
+    "gemini-3.1-flash-lite-preview": {"input": 0.02, "output": 0.10, "thinking": 0.10},
     # OpenAI
     "gpt-4o": {"input": 2.50, "output": 10.00, "thinking": 0},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60, "thinking": 0},
