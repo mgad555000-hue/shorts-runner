@@ -435,9 +435,17 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
     config_params = {"temperature": temperature, "top_p": 0.95}
     if max_tokens:
         config_params["max_output_tokens"] = max_tokens
-    # تحكم في التفكير — thinking_level لـ 3.x، thinking_budget لـ 2.x
+    # تحكم في التفكير — thinking_budget=0 له الأولوية القصوى (إلغاء التفكير)
     is_gemini_3 = any(x in model for x in ["gemini-3", "gemini-3.0", "gemini-3.1"])
-    if thinking_level and is_gemini_3:
+    if thinking_budget == 0:
+        # إلغاء التفكير تماماً — Gemini 3.x يستخدم "none"، الباقي thinking_budget=0
+        if is_gemini_3:
+            config_params["thinking_config"] = types.ThinkingConfig(thinking_level="none")
+            log(f"  [thinking] OFF (thinking_level=none for Gemini 3.x)")
+        else:
+            config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+            log(f"  [thinking] OFF (thinking_budget=0)")
+    elif thinking_level and is_gemini_3:
         config_params["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
     elif thinking_budget is not None:
         config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
