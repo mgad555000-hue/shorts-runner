@@ -1508,6 +1508,8 @@ async function refreshRunDetail(runId) {
         } else {
             // أول مرة — بناء كامل
             container.innerHTML = renderRunDetail(run, log, files);
+            // جلب التكلفة
+            fetchRunUsage(run.run_id);
             // Scroll للأسفل أول مرة
             const newLogEl = container.querySelector('.log-display');
             if (newLogEl) newLogEl.scrollTop = newLogEl.scrollHeight;
@@ -1536,6 +1538,10 @@ function renderRunDetail(run, log, files) {
             </div>
             <div class="detail-body">
                 <div class="detail-grid">
+                    <div class="detail-field" style="grid-column: 1 / -1;">
+                        <div class="detail-field-label">Run ID</div>
+                        <div class="detail-field-value" style="font-family:monospace; font-size:12px; cursor:pointer; user-select:all;" onclick="navigator.clipboard.writeText('${escJs(run.run_id)}').then(()=>this.style.color='#22c55e')" title="اضغط للنسخ">${esc(run.run_id)} 📋</div>
+                    </div>
                     <div class="detail-field">
                         <div class="detail-field-label">المجلد</div>
                         <div class="detail-field-value">${esc(run.input_folder)}</div>
@@ -1551,6 +1557,10 @@ function renderRunDetail(run, log, files) {
                     <div class="detail-field">
                         <div class="detail-field-label">مدة التنفيذ</div>
                         <div class="detail-field-value">${formatTime(run.execution_time_ms)}</div>
+                    </div>
+                    <div class="detail-field" id="usage-field-${escJs(run.run_id).substring(0,8)}">
+                        <div class="detail-field-label">التكلفة</div>
+                        <div class="detail-field-value" id="usage-cost-${escJs(run.run_id).substring(0,8)}">جاري التحميل...</div>
                     </div>
                 </div>
 
@@ -1573,6 +1583,27 @@ function renderRunDetail(run, log, files) {
             </div>
         </div>
     `;
+}
+
+// ===== Run Usage (Cost) =====
+async function fetchRunUsage(runId) {
+    try {
+        const res = await authFetch(`${API.replace('/utilities','')}/usage/run/${runId}`);
+        if (!res.ok) throw new Error(res.status);
+        const data = await res.json();
+        const el = document.getElementById('usage-cost-' + runId.substring(0,8));
+        if (el && data.totals) {
+            const t = data.totals;
+            if (t.total_tokens > 0) {
+                el.innerHTML = `$${t.estimated_cost_usd.toFixed(4)} <span style="opacity:0.6; font-size:11px;">(${t.total_tokens.toLocaleString()} tokens | ${t.api_calls} calls)</span>`;
+            } else {
+                el.textContent = 'لا توجد بيانات';
+            }
+        }
+    } catch(e) {
+        const el = document.getElementById('usage-cost-' + runId.substring(0,8));
+        if (el) el.textContent = '—';
+    }
 }
 
 // ===== Load Runs =====
@@ -1628,6 +1659,7 @@ async function refreshModalDetail(runId) {
             if (wasAtBottom) logEl.scrollTop = logEl.scrollHeight;
         } else {
             content.innerHTML = renderRunDetail(run, log, filesRes.files || []);
+            fetchRunUsage(run.run_id);
             const newLogEl = content.querySelector('.log-display');
             if (newLogEl) newLogEl.scrollTop = newLogEl.scrollHeight;
         }
