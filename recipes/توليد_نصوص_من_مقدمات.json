@@ -9,8 +9,8 @@
     },
     {
       "id": "intros",
-      "action": "read_input",
-      "file": "intros.txt",
+      "action": "read_docx",
+      "file": "intros_output.docx",
       "label": "قراءة المقدمات"
     },
     {
