@@ -62,7 +62,7 @@
       "model": "gemini-2.5-pro",
       "max_tokens": 65536,
       "temperature": 0.1,
-      "thinking_level": "low",
+      "thinking_level": "medium",
       "label": "تشكيل المقدمات"
     },
     {
