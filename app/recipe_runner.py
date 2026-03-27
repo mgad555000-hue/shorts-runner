@@ -2772,6 +2772,33 @@ def action_draw_thumbnail(step, ctx):
     return output_paths
 
 
+def action_filter_by_topics(step, ctx):
+    """فلترة النص حسب TOPIC_IDS — يحتفظ فقط بالموضوعات المطلوبة.
+    لو مفيش TOPIC_IDS محدد، يرجع النص كامل بدون تغيير.
+    """
+    text = str(ctx.resolve(step["input"]))
+
+    if not ctx.topic_ids:
+        log("  filter_by_topics: مفيش TOPIC_IDS — تمرير النص كامل")
+        return text
+
+    pattern = r'(<<<SCRIPT_(\d+)>>>.*?<<<END_SCRIPT>>>)'
+    matches = list(re.finditer(pattern, text, re.DOTALL))
+
+    if not matches:
+        log("  filter_by_topics: مفيش ماركرز SCRIPT — تمرير النص كامل")
+        return text
+
+    filtered = []
+    for match in matches:
+        script_num = int(match.group(2))
+        if script_num in ctx.topic_ids:
+            filtered.append(match.group(1))
+
+    log(f"  filter_by_topics: {len(filtered)} من {len(matches)} (TOPIC_IDS: {sorted(ctx.topic_ids)})")
+    return "\n\n".join(filtered)
+
+
 def action_validate_texts(step, ctx):
     """مراجعة النصوص والتحقق من سلامتها.
     يفحص: عدد الأجزاء، عدد الكلمات، كلمات مقطوعة، قطعة واحدة، علامة ترقيم.
@@ -2990,6 +3017,7 @@ ACTIONS = {
     "draw_thumbnail": action_draw_thumbnail,
     "validate_texts": action_validate_texts,
     "regenerate_failed": action_regenerate_failed,
+    "filter_by_topics": action_filter_by_topics,
 }
 
 # ========== REQUIRED_PARAMS ==========
@@ -3021,6 +3049,7 @@ REQUIRED_PARAMS = {
     "draw_thumbnail": ["input"],
     "validate_texts": ["input"],
     "regenerate_failed": ["input"],
+    "filter_by_topics": ["input"],
 }
 
 

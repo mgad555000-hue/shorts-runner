@@ -15,9 +15,15 @@
       "label": "قراءة المقدمات"
     },
     {
+      "id": "intros_filtered",
+      "action": "filter_by_topics",
+      "input": "{intros}",
+      "label": "فلترة المقدمات حسب TOPIC_IDS"
+    },
+    {
       "id": "prompt",
       "action": "template",
-      "text": "{instructions}\n\n---\n\nالمقدمات المطلوب كتابة نصوص فصحى لها:\n\n{intros}",
+      "text": "{instructions}\n\n---\n\nالمقدمات المطلوب كتابة نصوص فصحى لها:\n\n{intros_filtered}",
       "label": "تجميع البرومبت"
     },
     {
