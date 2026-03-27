@@ -59,7 +59,7 @@
       "id": "tashkeel_intros",
       "action": "generate",
       "input": "{tashkeel_prompt}",
-      "model": "gemini-3.1-flash-lite-preview",
+      "model": "gemini-3.1-flash-preview",
       "max_tokens": 65536,
       "temperature": 0.1,
       "thinking_level": "low",
