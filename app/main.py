@@ -27,7 +27,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import threading
 
-from app.database import get_db, init_db, Recipe, Run, Setting, User, UserPermission, SessionLocal
+from app.database import get_db, init_db, Recipe, Run, Setting, User, UserPermission, ApiUsage, SessionLocal
 from app.models import (
     RecipeCreate, RecipeUpdate, RecipeResponse,
     RunCreate, RunResponse, PathResponse, CleanupResponse,
@@ -750,6 +750,80 @@ async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, cur
     return RunResponse.model_validate(db_run)
 
 
+# ========== جدول أسعار التوكنز (لكل مليون توكن) ==========
+MODEL_PRICING = {
+    # Gemini models (per million tokens)
+    "gemini-2.5-flash": {"input": 0.15, "output": 0.60, "thinking": 0.60},
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.00, "thinking": 10.00},
+    "gemini-2.0-flash": {"input": 0.10, "output": 0.40, "thinking": 0.40},
+    "gemini-3.0-flash": {"input": 0.15, "output": 0.60, "thinking": 0.60},
+    "gemini-3.1-pro-preview": {"input": 1.25, "output": 10.00, "thinking": 10.00},
+    # OpenAI
+    "gpt-4o": {"input": 2.50, "output": 10.00, "thinking": 0},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60, "thinking": 0},
+    # Claude
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "thinking": 15.00},
+    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00, "thinking": 4.00},
+}
+
+def _estimate_cost(model: str, input_tokens: int, output_tokens: int, thinking_tokens: int) -> float:
+    """حساب التكلفة التقديرية بالدولار"""
+    # بحث بالاسم الكامل أولاً ثم بأقرب تطابق
+    pricing = MODEL_PRICING.get(model)
+    if not pricing:
+        for key in MODEL_PRICING:
+            if key in model or model in key:
+                pricing = MODEL_PRICING[key]
+                break
+    if not pricing:
+        pricing = {"input": 0.50, "output": 2.00, "thinking": 2.00}  # تقدير افتراضي
+    cost = (
+        (input_tokens / 1_000_000) * pricing["input"] +
+        (output_tokens / 1_000_000) * pricing["output"] +
+        (thinking_tokens / 1_000_000) * pricing["thinking"]
+    )
+    return round(cost, 6)
+
+
+def _save_usage_from_summary(db, run_id: str, output_dir: Path):
+    """قراءة usage_summary.json وحفظ البيانات في جدول api_usage"""
+    usage_file = output_dir / "usage_summary.json"
+    if not usage_file.exists():
+        return
+    try:
+        with open(usage_file, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+        records = summary.get("records", [])
+        for rec in records:
+            cost = _estimate_cost(
+                rec.get("model", ""),
+                rec.get("input_tokens", 0),
+                rec.get("output_tokens", 0),
+                rec.get("thinking_tokens", 0),
+            )
+            usage = ApiUsage(
+                run_id=run_id,
+                step_id=rec.get("step_id", ""),
+                call_type=rec.get("call_type", "direct"),
+                provider=rec.get("provider", ""),
+                model=rec.get("model", ""),
+                input_tokens=rec.get("input_tokens", 0),
+                output_tokens=rec.get("output_tokens", 0),
+                thinking_tokens=rec.get("thinking_tokens", 0),
+                total_tokens=rec.get("total_tokens", 0),
+                estimated_cost_usd=cost,
+            )
+            db.add(usage)
+        db.commit()
+        total_cost = sum(
+            _estimate_cost(r.get("model", ""), r.get("input_tokens", 0), r.get("output_tokens", 0), r.get("thinking_tokens", 0))
+            for r in records
+        )
+        print(f"[USAGE] حفظ {len(records)} سجل استهلاك | التكلفة التقديرية: ${total_cost:.4f}")
+    except Exception as e:
+        print(f"[USAGE] خطأ في حفظ بيانات الاستهلاك: {e}")
+
+
 def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = None, model_name: str = "gemini-2.5-flash", tts_provider: str = "vertex", execution_mode: str = "instant", topic_ids: str = "", content_type: str = "shorts"):
     db = SessionLocal()
     try:
@@ -786,6 +860,8 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
             os.environ["TTS_PROVIDER"] = tts_provider
             os.environ["EXECUTION_MODE"] = execution_mode
             os.environ["TOPIC_IDS"] = topic_ids
+            os.environ["RUN_ID"] = run_id
+            os.environ["RECIPE_NAME"] = recipe_name or ""
             if actual_output_recipe:
                 os.environ["RECIPE_OUTPUT_DIR"] = actual_output_recipe
 
@@ -807,6 +883,10 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
             if error_msg:
                 db_run.error_message = error_msg[:2000]
             db.commit()
+
+        # حفظ بيانات استهلاك التوكنز من usage_summary.json
+        if output_path:
+            _save_usage_from_summary(db, run_id, Path(output_path))
 
         if output_path:
             output_dir = Path(output_path).resolve()
@@ -1018,6 +1098,119 @@ async def download_run_outputs(run_id: str, current_user: User = Depends(get_cur
 @app.get("/api/utilities/stats")
 async def get_stats(current_user: User = Depends(get_current_user)):
     return get_storage_stats()
+
+
+# ========== API تتبع التكاليف ==========
+
+@app.get("/api/usage")
+async def get_usage(
+    days: int = Query(default=30, ge=1, le=365),
+    run_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """جلب بيانات استهلاك التوكنز"""
+    from sqlalchemy import func
+    query = db.query(ApiUsage)
+    if run_id:
+        query = query.filter(ApiUsage.run_id == run_id)
+    else:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        query = query.filter(ApiUsage.created_at >= cutoff)
+    records = query.order_by(ApiUsage.created_at.desc()).all()
+
+    # تجميعات
+    total_input = sum(r.input_tokens for r in records)
+    total_output = sum(r.output_tokens for r in records)
+    total_thinking = sum(r.thinking_tokens for r in records)
+    total_tokens = sum(r.total_tokens for r in records)
+    total_cost = sum(r.estimated_cost_usd for r in records)
+
+    # تجميع حسب الموديل
+    by_model = {}
+    for r in records:
+        if r.model not in by_model:
+            by_model[r.model] = {"input": 0, "output": 0, "thinking": 0, "total": 0, "cost": 0, "calls": 0}
+        by_model[r.model]["input"] += r.input_tokens
+        by_model[r.model]["output"] += r.output_tokens
+        by_model[r.model]["thinking"] += r.thinking_tokens
+        by_model[r.model]["total"] += r.total_tokens
+        by_model[r.model]["cost"] += r.estimated_cost_usd
+        by_model[r.model]["calls"] += 1
+
+    # تجميع حسب التشغيلة
+    by_run = {}
+    for r in records:
+        if r.run_id not in by_run:
+            by_run[r.run_id] = {"total_tokens": 0, "cost": 0, "calls": 0, "created_at": r.created_at.isoformat() if r.created_at else ""}
+        by_run[r.run_id]["total_tokens"] += r.total_tokens
+        by_run[r.run_id]["cost"] += r.estimated_cost_usd
+        by_run[r.run_id]["calls"] += 1
+
+    return {
+        "period_days": days,
+        "totals": {
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "thinking_tokens": total_thinking,
+            "total_tokens": total_tokens,
+            "estimated_cost_usd": round(total_cost, 4),
+            "api_calls": len(records),
+        },
+        "by_model": {k: {**v, "cost": round(v["cost"], 4)} for k, v in by_model.items()},
+        "by_run": {k: {**v, "cost": round(v["cost"], 4)} for k, v in sorted(by_run.items(), key=lambda x: x[1]["cost"], reverse=True)[:50]},
+        "records": [
+            {
+                "run_id": r.run_id,
+                "step_id": r.step_id,
+                "call_type": r.call_type,
+                "provider": r.provider,
+                "model": r.model,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "thinking_tokens": r.thinking_tokens,
+                "total_tokens": r.total_tokens,
+                "estimated_cost_usd": round(r.estimated_cost_usd, 6),
+                "created_at": r.created_at.isoformat() if r.created_at else "",
+            }
+            for r in records[:200]
+        ],
+    }
+
+
+@app.get("/api/usage/run/{run_id}")
+async def get_run_usage(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """جلب استهلاك تشغيلة محددة"""
+    records = db.query(ApiUsage).filter(ApiUsage.run_id == run_id).all()
+    if not records:
+        return {"run_id": run_id, "records": [], "totals": {"total_tokens": 0, "estimated_cost_usd": 0}}
+    total_cost = sum(r.estimated_cost_usd for r in records)
+    return {
+        "run_id": run_id,
+        "totals": {
+            "input_tokens": sum(r.input_tokens for r in records),
+            "output_tokens": sum(r.output_tokens for r in records),
+            "thinking_tokens": sum(r.thinking_tokens for r in records),
+            "total_tokens": sum(r.total_tokens for r in records),
+            "estimated_cost_usd": round(total_cost, 6),
+            "api_calls": len(records),
+        },
+        "records": [
+            {
+                "step_id": r.step_id,
+                "call_type": r.call_type,
+                "provider": r.provider,
+                "model": r.model,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "thinking_tokens": r.thinking_tokens,
+                "total_tokens": r.total_tokens,
+                "estimated_cost_usd": round(r.estimated_cost_usd, 6),
+                "created_at": r.created_at.isoformat() if r.created_at else "",
+            }
+            for r in records
+        ],
+    }
 
 
 @app.post("/api/utilities/cleanup", response_model=CleanupResponse)

@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>تتبع التكاليف — MG Ranner</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', Tahoma, sans-serif; background: #0f1419; color: #e7e9ea; padding: 20px; direction: rtl; }
+        h1 { color: #1d9bf0; margin-bottom: 20px; font-size: 24px; }
+        h2 { color: #8899a6; margin: 20px 0 10px; font-size: 18px; }
+        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+        .card { background: #1e2732; border-radius: 12px; padding: 16px; text-align: center; }
+        .card .value { font-size: 28px; font-weight: bold; color: #1d9bf0; }
+        .card .label { font-size: 13px; color: #8899a6; margin-top: 4px; }
+        .card.cost .value { color: #f7931a; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 24px; background: #1e2732; border-radius: 12px; overflow: hidden; }
+        th { background: #283340; color: #8899a6; font-weight: 600; padding: 10px 12px; text-align: right; font-size: 13px; }
+        td { padding: 8px 12px; border-top: 1px solid #283340; font-size: 13px; }
+        tr:hover { background: #283340; }
+        .cost-col { color: #f7931a; font-weight: 600; }
+        .token-col { color: #1d9bf0; }
+        .controls { display: flex; gap: 12px; margin-bottom: 20px; align-items: center; }
+        select, input { background: #283340; color: #e7e9ea; border: 1px solid #38444d; border-radius: 8px; padding: 8px 12px; font-size: 14px; }
+        button { background: #1d9bf0; color: white; border: none; border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 14px; }
+        button:hover { background: #1a8cd8; }
+        .run-id { font-family: monospace; font-size: 11px; color: #8899a6; }
+        .loading { text-align: center; padding: 40px; color: #8899a6; }
+        a { color: #1d9bf0; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .back-link { margin-bottom: 16px; display: inline-block; }
+    </style>
+</head>
+<body>
+    <a href="/" class="back-link">← العودة للوحة الرئيسية</a>
+    <h1>📊 تتبع التكاليف</h1>
+
+    <div class="controls">
+        <label>الفترة:</label>
+        <select id="days">
+            <option value="1">اليوم</option>
+            <option value="7" selected>آخر أسبوع</option>
+            <option value="30">آخر شهر</option>
+            <option value="90">آخر 3 شهور</option>
+        </select>
+        <input type="text" id="runIdFilter" placeholder="فلترة بـ Run ID..." style="width: 280px;">
+        <button onclick="loadData()">تحديث</button>
+    </div>
+
+    <div id="summary" class="cards"></div>
+
+    <h2>حسب الموديل</h2>
+    <table id="byModelTable"><thead><tr><th>الموديل</th><th>الاستدعاءات</th><th>إدخال</th><th>إخراج</th><th>تفكير</th><th>إجمالي</th><th>التكلفة $</th></tr></thead><tbody></tbody></table>
+
+    <h2>حسب التشغيلة (أغلى 50)</h2>
+    <table id="byRunTable"><thead><tr><th>Run ID</th><th>الاستدعاءات</th><th>إجمالي التوكنز</th><th>التكلفة $</th><th>التاريخ</th></tr></thead><tbody></tbody></table>
+
+    <h2>السجل التفصيلي (آخر 200)</h2>
+    <table id="recordsTable"><thead><tr><th>Run ID</th><th>الخطوة</th><th>النوع</th><th>المزود</th><th>الموديل</th><th>إدخال</th><th>إخراج</th><th>تفكير</th><th>التكلفة $</th><th>التاريخ</th></tr></thead><tbody></tbody></table>
+
+    <script>
+        const TOKEN = localStorage.getItem('auth_token') || '';
+
+        function fmt(n) { return n ? n.toLocaleString('en') : '0'; }
+        function fmtCost(n) { return n ? '$' + n.toFixed(4) : '$0.0000'; }
+        function shortId(id) { return id ? id.substring(0, 8) : ''; }
+        function shortDate(iso) { if (!iso) return ''; const d = new Date(iso); return d.toLocaleDateString('ar-EG') + ' ' + d.toLocaleTimeString('ar-EG', {hour:'2-digit',minute:'2-digit'}); }
+
+        async function loadData() {
+            const days = document.getElementById('days').value;
+            const runId = document.getElementById('runIdFilter').value.trim();
+            let url = `/api/usage?days=${days}`;
+            if (runId) url += `&run_id=${runId}`;
+
+            try {
+                const res = await fetch(url, { headers: { 'Authorization': `Bearer ${TOKEN}` } });
+                if (!res.ok) throw new Error(res.status);
+                const data = await res.json();
+                renderSummary(data.totals);
+                renderByModel(data.by_model);
+                renderByRun(data.by_run);
+                renderRecords(data.records);
+            } catch (e) {
+                document.getElementById('summary').innerHTML = `<div class="loading">خطأ في تحميل البيانات: ${e.message}</div>`;
+            }
+        }
+
+        function renderSummary(t) {
+            document.getElementById('summary').innerHTML = `
+                <div class="card cost"><div class="value">${fmtCost(t.estimated_cost_usd)}</div><div class="label">التكلفة التقديرية</div></div>
+                <div class="card"><div class="value">${fmt(t.api_calls)}</div><div class="label">عدد الاستدعاءات</div></div>
+                <div class="card"><div class="value">${fmt(t.total_tokens)}</div><div class="label">إجمالي التوكنز</div></div>
+                <div class="card"><div class="value">${fmt(t.input_tokens)}</div><div class="label">توكنز الإدخال</div></div>
+                <div class="card"><div class="value">${fmt(t.output_tokens)}</div><div class="label">توكنز الإخراج</div></div>
+                <div class="card"><div class="value">${fmt(t.thinking_tokens)}</div><div class="label">توكنز التفكير</div></div>
+            `;
+        }
+
+        function renderByModel(byModel) {
+            const tbody = document.querySelector('#byModelTable tbody');
+            tbody.innerHTML = Object.entries(byModel).map(([model, v]) => `
+                <tr>
+                    <td>${model}</td>
+                    <td>${fmt(v.calls)}</td>
+                    <td class="token-col">${fmt(v.input)}</td>
+                    <td class="token-col">${fmt(v.output)}</td>
+                    <td class="token-col">${fmt(v.thinking)}</td>
+                    <td class="token-col">${fmt(v.total)}</td>
+                    <td class="cost-col">${fmtCost(v.cost)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function renderByRun(byRun) {
+            const tbody = document.querySelector('#byRunTable tbody');
+            tbody.innerHTML = Object.entries(byRun).map(([runId, v]) => `
+                <tr>
+                    <td class="run-id">${shortId(runId)}</td>
+                    <td>${fmt(v.calls)}</td>
+                    <td class="token-col">${fmt(v.total_tokens)}</td>
+                    <td class="cost-col">${fmtCost(v.cost)}</td>
+                    <td>${shortDate(v.created_at)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function renderRecords(records) {
+            const tbody = document.querySelector('#recordsTable tbody');
+            tbody.innerHTML = records.map(r => `
+                <tr>
+                    <td class="run-id">${shortId(r.run_id)}</td>
+                    <td>${r.step_id}</td>
+                    <td>${r.call_type}</td>
+                    <td>${r.provider}</td>
+                    <td>${r.model}</td>
+                    <td class="token-col">${fmt(r.input_tokens)}</td>
+                    <td class="token-col">${fmt(r.output_tokens)}</td>
+                    <td class="token-col">${fmt(r.thinking_tokens)}</td>
+                    <td class="cost-col">${fmtCost(r.estimated_cost_usd)}</td>
+                    <td>${shortDate(r.created_at)}</td>
+                </tr>
+            `).join('');
+        }
+
+        loadData();
+    </script>
+</body>
+</html>

@@ -37,6 +37,7 @@ class EngineResult:
     provider: str = ""         # المزود (gemini, openai, claude, glm, elevenlabs, vertex, whisper)
     attempts: int = 0          # عدد المحاولات
     duration_ms: int = 0       # مدة التنفيذ
+    token_usage: Dict = field(default_factory=dict)  # {"input": 0, "output": 0, "thinking": 0, "total": 0}
 
 
 @dataclass
@@ -363,35 +364,43 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
     log(f"-> generate | model: {model} | provider: {provider} | prompt: {len(prompt)} chars")
 
     try:
+        token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
+
         if provider == "gemini":
-            text = _retry_call(
+            result_tuple = _retry_call(
                 lambda: _generate_gemini(prompt, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level),
                 max_retries=3, base_delay=3.0, description=f"Gemini {model}"
             )
         elif provider == "vertex":
             # استخرج اسم الموديل الفعلي (بعد "vertex:")
             actual_model = model.split(":", 1)[1] if ":" in model else model
-            text = _retry_call(
+            result_tuple = _retry_call(
                 lambda: _generate_vertex(prompt, actual_model, system_prompt, temperature, max_tokens),
                 max_retries=3, base_delay=3.0, description=f"Vertex AI {actual_model}"
             )
         elif provider == "openai":
-            text = _retry_call(
+            result_tuple = _retry_call(
                 lambda: _generate_openai(prompt, model, api_key, system_prompt, temperature, max_tokens),
                 max_retries=3, base_delay=3.0, description=f"OpenAI {model}"
             )
         elif provider == "claude":
-            text = _retry_call(
+            result_tuple = _retry_call(
                 lambda: _generate_claude(prompt, model, api_key, system_prompt, temperature, max_tokens),
                 max_retries=3, base_delay=3.0, description=f"Claude {model}"
             )
         elif provider == "glm":
-            text = _retry_call(
+            result_tuple = _retry_call(
                 lambda: _generate_glm(prompt, model, api_key, system_prompt, temperature, max_tokens),
                 max_retries=3, base_delay=3.0, description=f"GLM {model}"
             )
         else:
             raise EngineError(f"مزود غير مدعوم: {provider}", code="UNSUPPORTED_PROVIDER")
+
+        # فك الـ tuple (text, token_usage)
+        if isinstance(result_tuple, tuple):
+            text, token_usage = result_tuple
+        else:
+            text = result_tuple
 
         # فحص النتيجة
         text = _check_response_text(text, model)
@@ -401,7 +410,7 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
 
         return EngineResult(
             success=True, data=text, model=model, provider=provider,
-            duration_ms=duration
+            duration_ms=duration, token_usage=token_usage
         )
 
     except EngineError:
@@ -450,14 +459,15 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
     if not response or not response.text:
         raise ValueError("Gemini returned empty response")
 
-    # تسجيل استهلاك التوكنز
+    # تسجيل واستخراج استهلاك التوكنز
+    _token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
     if hasattr(response, 'usage_metadata') and response.usage_metadata:
         um = response.usage_metadata
-        inp = getattr(um, 'prompt_token_count', 0) or 0
-        out = getattr(um, 'candidates_token_count', 0) or 0
-        think = getattr(um, 'thoughts_token_count', 0) or 0
-        total = getattr(um, 'total_token_count', 0) or 0
-        log(f"  [tokens] input={inp} output={out} thinking={think} total={total}")
+        _token_usage["input"] = getattr(um, 'prompt_token_count', 0) or 0
+        _token_usage["output"] = getattr(um, 'candidates_token_count', 0) or 0
+        _token_usage["thinking"] = getattr(um, 'thoughts_token_count', 0) or 0
+        _token_usage["total"] = getattr(um, 'total_token_count', 0) or 0
+        log(f"  [tokens] input={_token_usage['input']} output={_token_usage['output']} thinking={_token_usage['thinking']} total={_token_usage['total']}")
 
     # كشف القطع — لو finish_reason=MAX_TOKENS يبقى المخرج ناقص أكيد
     if response.candidates and response.candidates[0].finish_reason:
@@ -465,7 +475,7 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
         if fr == "MAX_TOKENS":
             raise ValueError(f"Gemini truncated (MAX_TOKENS) — {len(response.text)} chars returned")
 
-    return response.text
+    return response.text, _token_usage
 
 
 def _generate_openai(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
@@ -501,7 +511,15 @@ def _generate_openai(prompt: str, model: str, api_key: str, system_prompt: str, 
     if not response.choices or not response.choices[0].message.content:
         raise ValueError("OpenAI returned empty response")
 
-    return response.choices[0].message.content
+    # استخراج التوكنز
+    _token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
+    if hasattr(response, 'usage') and response.usage:
+        _token_usage["input"] = getattr(response.usage, 'prompt_tokens', 0) or 0
+        _token_usage["output"] = getattr(response.usage, 'completion_tokens', 0) or 0
+        _token_usage["total"] = _token_usage["input"] + _token_usage["output"]
+        log(f"  [tokens] input={_token_usage['input']} output={_token_usage['output']} total={_token_usage['total']}")
+
+    return response.choices[0].message.content, _token_usage
 
 
 def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
@@ -524,7 +542,15 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
     if not message.content or not message.content[0].text:
         raise ValueError("Claude returned empty response")
 
-    return message.content[0].text
+    # استخراج التوكنز
+    _token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
+    if hasattr(message, 'usage') and message.usage:
+        _token_usage["input"] = getattr(message.usage, 'input_tokens', 0) or 0
+        _token_usage["output"] = getattr(message.usage, 'output_tokens', 0) or 0
+        _token_usage["total"] = _token_usage["input"] + _token_usage["output"]
+        log(f"  [tokens] input={_token_usage['input']} output={_token_usage['output']} total={_token_usage['total']}")
+
+    return message.content[0].text, _token_usage
 
 
 def _generate_glm(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
@@ -556,7 +582,16 @@ def _generate_glm(prompt: str, model: str, api_key: str, system_prompt: str, tem
     if not data.get("choices") or not data["choices"][0].get("message", {}).get("content"):
         raise ValueError("GLM returned empty response")
 
-    return data["choices"][0]["message"]["content"]
+    # استخراج التوكنز
+    _token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
+    usage = data.get("usage", {})
+    if usage:
+        _token_usage["input"] = usage.get("prompt_tokens", 0)
+        _token_usage["output"] = usage.get("completion_tokens", 0)
+        _token_usage["total"] = usage.get("total_tokens", 0) or (_token_usage["input"] + _token_usage["output"])
+        log(f"  [tokens] input={_token_usage['input']} output={_token_usage['output']} total={_token_usage['total']}")
+
+    return data["choices"][0]["message"]["content"], _token_usage
 
 
 def _generate_vertex(prompt: str, model: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
@@ -615,7 +650,17 @@ def _generate_vertex(prompt: str, model: str, system_prompt: str, temperature: f
     if not response or not response.text:
         raise ValueError("Vertex AI returned empty response")
 
-    return response.text
+    # استخراج التوكنز
+    _token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
+    if hasattr(response, 'usage_metadata') and response.usage_metadata:
+        um = response.usage_metadata
+        _token_usage["input"] = getattr(um, 'prompt_token_count', 0) or 0
+        _token_usage["output"] = getattr(um, 'candidates_token_count', 0) or 0
+        _token_usage["thinking"] = getattr(um, 'thoughts_token_count', 0) or 0
+        _token_usage["total"] = getattr(um, 'total_token_count', 0) or 0
+        log(f"  [tokens] input={_token_usage['input']} output={_token_usage['output']} thinking={_token_usage['thinking']} total={_token_usage['total']}")
+
+    return response.text, _token_usage
 
 
 # ========== دوال مساعدة لـ Google Cloud Storage ==========
@@ -902,7 +947,7 @@ def _batch_send_gemini_rest(prompts: list, model: str, api_key: str, system_prom
     return batch_info
 
 
-def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None) -> BatchInfo:
+def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None, labels: dict = None) -> BatchInfo:
     """إرسال دفعة عبر Vertex AI Batch Prediction (من الوثيقة - طريقة 7)"""
     import json
     from google.cloud import aiplatform
@@ -947,8 +992,20 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
 
     log(f"  رفع الطلبات إلى: {input_uri}")
 
-    # إنشاء مهمة Batch
+    # إنشاء مهمة Batch مع labels للتتبع في Google Cloud Billing
     job_display_name = f"vertex-batch-{timestamp}"
+    job_labels = {}
+    if labels:
+        # تنظيف Labels حسب شروط Google Cloud (أحرف صغيرة، أرقام، شرطات سفلية فقط، max 63 chars)
+        import re as _re
+        for k, v in labels.items():
+            clean_key = _re.sub(r'[^a-z0-9_-]', '_', str(k).lower())[:63]
+            clean_val = _re.sub(r'[^a-z0-9_-]', '_', str(v).lower())[:63]
+            if clean_key and clean_val:
+                job_labels[clean_key] = clean_val
+        if job_labels:
+            log(f"  [labels] Vertex Batch Labels: {job_labels}")
+
     batch_job = aiplatform.BatchPredictionJob.create(
         job_display_name=job_display_name,
         model_name=f"publishers/google/models/{model}",
@@ -957,6 +1014,7 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
         gcs_source=input_uri,
         gcs_destination_prefix=output_uri,
         sync=False,
+        labels=job_labels if job_labels else None,
     )
 
     batch_info = BatchInfo(
@@ -974,7 +1032,7 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
     return batch_info
 
 
-def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = 8192, save_path: str = None, method: str = "sdk", thinking_budget: int = None, thinking_level: str = None) -> EngineResult:
+def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = 8192, save_path: str = None, method: str = "sdk", thinking_budget: int = None, thinking_level: str = None, labels: dict = None) -> EngineResult:
     """
     الدالة 2: إرسال دفعة برومبتات
     تدعم: Gemini Batch (SDK/REST), Claude Batch, Vertex AI Batch
@@ -1008,7 +1066,7 @@ def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: 
             # Vertex AI Batch Prediction
             actual_model = model.split(":", 1)[1] if ":" in model else model
             batch_info = _retry_call(
-                lambda: _batch_send_vertex(prompts, actual_model, system_prompt, temperature, max_tokens, thinking_budget, thinking_level),
+                lambda: _batch_send_vertex(prompts, actual_model, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, labels=labels),
                 max_retries=3, base_delay=3.0, description=f"Vertex AI Batch {actual_model}"
             )
         elif provider == "claude":
@@ -1290,8 +1348,9 @@ def _batch_retrieve_vertex(batch_info: BatchInfo) -> list:
     bucket = storage_client.bucket(bucket_name)
     blobs = bucket.list_blobs(prefix=prefix)
 
-    # قراءة النتائج
+    # قراءة النتائج مع التوكنز
     results = []
+    token_totals = {"input": 0, "output": 0, "thinking": 0, "total": 0}
     for blob in blobs:
         if blob.name.endswith('.jsonl'):
             content = blob.download_as_text()
@@ -1301,9 +1360,20 @@ def _batch_retrieve_vertex(batch_info: BatchInfo) -> list:
                     try:
                         text = data['prediction']['candidates'][0]['content']['parts'][0]['text']
                         results.append(text)
+                        # استخراج التوكنز
+                        usage = data.get('prediction', {}).get('usageMetadata', {})
+                        if usage:
+                            token_totals["input"] += usage.get('promptTokenCount', 0)
+                            token_totals["output"] += usage.get('candidatesTokenCount', 0)
+                            token_totals["thinking"] += usage.get('thoughtsTokenCount', 0)
+                            token_totals["total"] += usage.get('totalTokenCount', 0)
                     except (KeyError, IndexError) as e:
                         log(f"[!] فشل استخراج نتيجة: {str(e)}")
                         results.append("")
+
+    if token_totals["total"] > 0:
+        log(f"  [tokens] إجمالي Vertex Batch: input={token_totals['input']} output={token_totals['output']} thinking={token_totals['thinking']} total={token_totals['total']}")
+    batch_info._token_totals = token_totals
 
     return results
 
@@ -1360,6 +1430,9 @@ def batch_retrieve(batch_info_path: str = None, batch_info: BatchInfo = None) ->
         if actual_count != expected_count:
             log(f"[!] تحذير: العدد المتوقع {expected_count} لكن استلمنا {actual_count}")
 
+        # جمع التوكنز من batch_info
+        token_usage = getattr(info, '_token_totals', {"input": 0, "output": 0, "thinking": 0, "total": 0})
+
         duration = int((time.time() - start_time) * 1000)
         log(f"<- batch_retrieve OK | {len(results)} نتيجة | {duration}ms")
 
@@ -1368,7 +1441,8 @@ def batch_retrieve(batch_info_path: str = None, batch_info: BatchInfo = None) ->
             data=results,
             model=info.model,
             provider=provider,
-            duration_ms=duration
+            duration_ms=duration,
+            token_usage=token_usage
         )
 
     except EngineError:

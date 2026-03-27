@@ -304,6 +304,8 @@ run_pipeline(config)
                     "CHANNEL_NAME": os.getenv("CHANNEL_NAME", ""),
                     "CHANNEL_ROOT": os.getenv("CHANNEL_ROOT", ""),
                     "RECIPE_OUTPUT_DIR": os.getenv("RECIPE_OUTPUT_DIR", ""),
+                    "RUN_ID": os.getenv("RUN_ID", ""),
+                    "RECIPE_NAME": os.getenv("RECIPE_NAME", ""),
                     "GOOGLE_CLIENT_ID": api_env.get("GOOGLE_CLIENT_ID", ""),
                     "GOOGLE_CLIENT_SECRET": api_env.get("GOOGLE_CLIENT_SECRET", ""),
                     "GOOGLE_REFRESH_TOKEN": api_env.get("GOOGLE_REFRESH_TOKEN", ""),

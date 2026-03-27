@@ -89,6 +89,24 @@ class Run(Base):
     user_id = Column(Integer, nullable=True)
 
 
+class ApiUsage(Base):
+    """سجل استهلاك التوكنز لكل API call"""
+    __tablename__ = "api_usage"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String, index=True, nullable=False)
+    step_id = Column(String, nullable=True)
+    call_type = Column(String, nullable=False)  # "direct" أو "batch"
+    provider = Column(String, nullable=False)    # gemini, vertex, openai, claude
+    model = Column(String, nullable=False)
+    input_tokens = Column(Integer, default=0)
+    output_tokens = Column(Integer, default=0)
+    thinking_tokens = Column(Integer, default=0)
+    total_tokens = Column(Integer, default=0)
+    estimated_cost_usd = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 def _migrate_db():
     """ترقية آمنة"""
     insp = inspect(engine)
@@ -123,6 +141,7 @@ def init_db():
         _migrate_db()
     except Exception as e:
         print(f"[DB Migration] Warning: {e}")
+    # إنشاء جدول api_usage لو مش موجود (create_all بيعمله أوتوماتيك)
 
 
 def get_db():

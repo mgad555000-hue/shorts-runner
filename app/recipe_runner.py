@@ -21,7 +21,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from engine import generate, tts, transcribe, transcribe_with_timestamps, batch_send, batch_retrieve, log, EngineError, BatchInfo
+from engine import generate, tts, transcribe, transcribe_with_timestamps, batch_send, batch_retrieve, log, EngineError, BatchInfo, detect_provider
 
 
 # ========== PipelineContext ==========
@@ -37,8 +37,12 @@ class PipelineContext:
         self.tts_voice = os.environ.get("TTS_VOICE_ID", "Achird")
         self.execution_mode = os.environ.get("EXECUTION_MODE", "instant")
         self.channel_name = os.environ.get("CHANNEL_NAME", "")
+        self.run_id = os.environ.get("RUN_ID", "")
+        self.recipe_name = os.environ.get("RECIPE_NAME", "")
         self.topic_ids = self._parse_topic_ids()
         self.results = {}
+        # تتبع استهلاك التوكنز لكل خطوة
+        self.usage_records = []  # [{step_id, call_type, provider, model, input, output, thinking, total}]
 
     def _parse_topic_ids(self):
         """قراءة TOPIC_IDS من البيئة وتحويلها لـ set"""
@@ -80,6 +84,43 @@ class PipelineContext:
         if isinstance(resolved, list):
             return resolved
         return [resolved]
+
+    def record_usage(self, step_id: str, call_type: str, provider: str, model: str, token_usage: dict):
+        """تسجيل استهلاك توكنز من API call"""
+        if not token_usage or token_usage.get("total", 0) == 0:
+            return
+        record = {
+            "step_id": step_id,
+            "call_type": call_type,
+            "provider": provider,
+            "model": model,
+            "input_tokens": token_usage.get("input", 0),
+            "output_tokens": token_usage.get("output", 0),
+            "thinking_tokens": token_usage.get("thinking", 0),
+            "total_tokens": token_usage.get("total", 0),
+        }
+        self.usage_records.append(record)
+
+    def save_usage_summary(self):
+        """حفظ ملخص الاستهلاك في ملف JSON في مجلد الإخراج"""
+        if not self.usage_records:
+            return
+        summary = {
+            "run_id": self.run_id,
+            "recipe_name": self.recipe_name,
+            "records": self.usage_records,
+            "totals": {
+                "input_tokens": sum(r["input_tokens"] for r in self.usage_records),
+                "output_tokens": sum(r["output_tokens"] for r in self.usage_records),
+                "thinking_tokens": sum(r["thinking_tokens"] for r in self.usage_records),
+                "total_tokens": sum(r["total_tokens"] for r in self.usage_records),
+                "api_calls": len(self.usage_records),
+            }
+        }
+        path = os.path.join(self.output_dir, "usage_summary.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+        log(f"  [usage] حفظ ملخص الاستهلاك: {summary['totals']['total_tokens']} tokens في {len(self.usage_records)} calls")
 
     def input_path(self, filename):
         """مسار ملف في مجلد الإدخال"""
@@ -167,6 +208,8 @@ def action_generate(step, ctx):
         if not result.success:
             raise EngineError(f"فشل التوليد: {result.error}", code="GENERATE_FAILED")
         text = result.data
+        # تسجيل استهلاك التوكنز
+        ctx.record_usage(step["id"], "direct", result.provider, result.model, result.token_usage)
 
     # حفظ لو محدد
     if step.get("save_as"):
@@ -239,7 +282,7 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
     def _gen_one(marker):
         section = sections.get(marker)
         if not section:
-            return marker, None
+            return marker, None, {}
         single_prompt = instructions_part + section
         result = generate(
             prompt=single_prompt,
@@ -250,7 +293,7 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
             thinking_budget=thinking_budget,
             thinking_level=thinking_level,
         )
-        return marker, result.data if result.success else None
+        return marker, result.data if result.success else None, result.token_usage if result.success else {}
 
     results = {}
     failed = []
@@ -258,10 +301,12 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
         futures = {executor.submit(_gen_one, m): m for m in input_markers}
         done_count = 0
         for future in as_completed(futures):
-            marker, data = future.result()
+            marker, data, usage = future.result()
             done_count += 1
             if data:
                 results[marker] = data
+                # تسجيل التوكنز من كل marker
+                ctx.record_usage(f"generate_{marker}", "direct", detect_provider(model_to_use) if hasattr(ctx, 'model') else "gemini", model_to_use, usage)
                 log(f"  ✓ {marker} ({done_count}/{len(input_markers)})")
             else:
                 failed.append(marker)
@@ -271,9 +316,10 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
     if failed:
         log(f"  → إعادة محاولة {len(failed)} ماركر فاشل...")
         for marker in failed:
-            _, data = _gen_one(marker)
+            _, data, usage = _gen_one(marker)
             if data:
                 results[marker] = data
+                ctx.record_usage(f"generate_{marker}_retry", "direct", detect_provider(model_to_use) if hasattr(ctx, 'model') else "gemini", model_to_use, usage)
                 log(f"  ✓ {marker} (إعادة)")
             else:
                 log(f"  [!!] فشل نهائي: {marker}")
@@ -570,6 +616,16 @@ def action_batch_send(step, ctx):
     if step.get("save_as"):
         save_path = ctx.output_path(step["save_as"])
 
+    # Labels للتتبع في Google Cloud Billing
+    batch_labels = {}
+    if ctx.run_id:
+        batch_labels["run_id"] = ctx.run_id
+    if ctx.recipe_name:
+        batch_labels["recipe"] = ctx.recipe_name
+    if ctx.channel_name:
+        batch_labels["channel"] = ctx.channel_name
+    batch_labels["step"] = step["id"]
+
     result = batch_send(
         prompts=prompts,
         model=effective_model,
@@ -579,6 +635,7 @@ def action_batch_send(step, ctx):
         save_path=save_path,
         thinking_budget=thinking_budget,
         thinking_level=thinking_level,
+        labels=batch_labels if batch_labels else None,
     )
 
     if not result.success:
@@ -614,6 +671,8 @@ def action_batch_retrieve(step, ctx):
             result = batch_retrieve(batch_info_path=batch_info_path)
             if result.success:
                 log(f"  تم استقبال {len(result.data)} نتيجة")
+                # تسجيل استهلاك التوكنز من الباتش
+                ctx.record_usage(step["id"], "batch", result.provider, result.model, result.token_usage)
                 return result.data
         except EngineError as e:
             if e.code == "BATCH_JOB_NOT_READY":
@@ -3319,6 +3378,15 @@ def _run_mode_send_only(config, ctx, steps):
     if gen_step.get("model"):
         log(f"  [model override] {gen_step['model']}")
 
+    # Labels للتتبع في Google Cloud Billing
+    _labels = {"step": gen_step["id"]}
+    if ctx.run_id:
+        _labels["run_id"] = ctx.run_id
+    if ctx.recipe_name:
+        _labels["recipe"] = ctx.recipe_name
+    if ctx.channel_name:
+        _labels["channel"] = ctx.channel_name
+
     log(f"--- إرسال باتش: {len(prompts)} طلب ---")
     result = batch_send(
         prompts=prompts,
@@ -3329,6 +3397,7 @@ def _run_mode_send_only(config, ctx, steps):
         save_path=save_path,
         thinking_budget=thinking_budget,
         thinking_level=thinking_level,
+        labels=_labels,
     )
 
     if not result.success:
@@ -3627,6 +3696,15 @@ def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=Fal
 
     save_path = ctx.output_path(f"batch_{gen_step['id']}.json")
 
+    # Labels للتتبع في Google Cloud Billing
+    _ba_labels = {"step": gen_step["id"]}
+    if ctx.run_id:
+        _ba_labels["run_id"] = ctx.run_id
+    if ctx.recipe_name:
+        _ba_labels["recipe"] = ctx.recipe_name
+    if ctx.channel_name:
+        _ba_labels["channel"] = ctx.channel_name
+
     log(f"--- إرسال باتش: {len(prompts)} طلب (model: {effective_model}) ---")
     send_result = batch_send(
         prompts=prompts,
@@ -3637,6 +3715,7 @@ def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=Fal
         save_path=save_path,
         thinking_budget=thinking_budget,
         thinking_level=thinking_level,
+        labels=_ba_labels,
     )
 
     if not send_result.success:
@@ -3795,6 +3874,9 @@ def run_pipeline(config):
     else:
         log(f"[!] وضع غير معروف '{mode}' — fallback لوضع فوري")
         _run_steps(steps, ctx)
+
+    # حفظ ملخص استهلاك التوكنز
+    ctx.save_usage_summary()
 
     log(f"========== Pipeline اكتمل بنجاح: {pipeline_name} ==========")
 
