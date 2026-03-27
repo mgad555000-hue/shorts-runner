@@ -11,6 +11,7 @@
       "id": "intros",
       "action": "read_docx",
       "file": "intros_output.docx",
+      "reconstruct_markers": true,
       "label": "قراءة المقدمات"
     },
     {
