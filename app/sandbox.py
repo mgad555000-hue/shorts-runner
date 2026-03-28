@@ -91,8 +91,8 @@ def create_sandbox_container(run_id: str, code: str, input_folder: str, content_
         output_dir = Path(output_root) / run_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # التأكد من وجود مجلد الإدخال
-        input_dir = Path(DATA_ROOT) / input_folder
+        # التأكد من وجود مجلد الإدخال (المسار كامل من main.py — لا نضيف DATA_ROOT)
+        input_dir = Path(input_folder)
         if not input_dir.exists():
             return False, str(output_dir), f"مجلد الإدخال غير موجود: {input_folder}"
 

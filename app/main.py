@@ -108,10 +108,15 @@ def get_recipe_output_path(channel: str, recipe_name: str) -> Path:
     return get_channel_path(channel) / safe_recipe / "output"
 
 
-def ensure_channel_recipe_folders(channel: str, recipe_name: str):
-    """إنشاء مجلدات input/output لوصفة في قناة"""
-    get_recipe_input_path(channel, recipe_name).mkdir(parents=True, exist_ok=True)
-    get_recipe_output_path(channel, recipe_name).mkdir(parents=True, exist_ok=True)
+def ensure_channel_recipe_folders(channel: str, recipe_name: str, db_input_folder: str = None):
+    """إنشاء مجلدات input/output لوصفة في قناة — يستخدم input_folder من DB لو متاح"""
+    if db_input_folder:
+        ch = get_channel_path(channel)
+        (ch / db_input_folder / "input").mkdir(parents=True, exist_ok=True)
+        (ch / db_input_folder / "output").mkdir(parents=True, exist_ok=True)
+    else:
+        get_recipe_input_path(channel, recipe_name).mkdir(parents=True, exist_ok=True)
+        get_recipe_output_path(channel, recipe_name).mkdir(parents=True, exist_ok=True)
 
 
 # ========== التنظيف التلقائي ==========
@@ -544,7 +549,7 @@ async def create_channel(name: str, admin: User = Depends(require_admin), db: Se
     (ch_path / "videos").mkdir(exist_ok=True)
     # إنشاء مجلدات كل الوصفات الموجودة في القناة الجديدة
     for recipe in db.query(Recipe).all():
-        ensure_channel_recipe_folders(safe_name, recipe.name)
+        ensure_channel_recipe_folders(safe_name, recipe.name, recipe.input_folder)
     return {"message": "تم إنشاء القناة", "channel": safe_name, "created": True}
 
 
@@ -589,7 +594,7 @@ async def create_folder(folder_name: str, admin: User = Depends(require_admin), 
     (ch_path / "videos").mkdir(exist_ok=True)
     # إنشاء مجلدات كل الوصفات الموجودة في القناة الجديدة
     for recipe in db.query(Recipe).all():
-        ensure_channel_recipe_folders(safe_name, recipe.name)
+        ensure_channel_recipe_folders(safe_name, recipe.name, recipe.input_folder)
     return {"message": "تم إنشاء القناة", "folder": safe_name, "created": True}
 
 
