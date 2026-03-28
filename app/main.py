@@ -751,25 +751,56 @@ async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, cur
 
 
 # ========== جدول أسعار التوكنز (لكل مليون توكن) ==========
+# ========== نظام حساب التكلفة — مطابق لفواتير Google Cloud ==========
+#
+# المصدر: https://cloud.google.com/vertex-ai/generative-ai/pricing
+# آخر تحديث: 2026-03-28
+#
+# قواعد الحساب:
+# 1. الأسعار بالدولار لكل مليون توكن (per million tokens)
+# 2. Batch API = خصم 50% على كل أنواع التوكنز (Google + Claude)
+# 3. thinking tokens = سعر خاص (عادةً = سعر output)
+# 4. Google usageMetadata:
+#    - promptTokenCount = input (يشمل system_prompt + user prompt)
+#    - candidatesTokenCount = output (النص الفعلي المنتج)
+#    - thoughtsTokenCount = thinking (التفكير الداخلي للموديل)
+#    - totalTokenCount = مجموع الثلاثة
+# 5. التكلفة = (input × سعر_input) + (output × سعر_output) + (thinking × سعر_thinking)
+# 6. لو batch → كل الأسعار × 0.5
+
 MODEL_PRICING = {
-    # Gemini models (per million tokens)
-    "gemini-2.5-flash": {"input": 0.15, "output": 0.60, "thinking": 0.60},
-    "gemini-2.5-pro": {"input": 1.25, "output": 10.00, "thinking": 10.00},
-    "gemini-2.0-flash": {"input": 0.10, "output": 0.40, "thinking": 0.40},
-    "gemini-3.0-flash": {"input": 0.15, "output": 0.60, "thinking": 0.60},
-    "gemini-3.1-pro-preview": {"input": 1.25, "output": 10.00, "thinking": 10.00},
-    "gemini-3.1-flash-preview": {"input": 0.10, "output": 0.40, "thinking": 0.40},
-    "gemini-3.1-flash-lite-preview": {"input": 0.02, "output": 0.10, "thinking": 0.10},
-    # OpenAI
-    "gpt-4o": {"input": 2.50, "output": 10.00, "thinking": 0},
-    "gpt-4o-mini": {"input": 0.15, "output": 0.60, "thinking": 0},
-    # Claude
-    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "thinking": 15.00},
-    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00, "thinking": 4.00},
+    # Gemini models — Vertex AI pricing (per million tokens)
+    # سعر_input | سعر_output | سعر_thinking | batch_discount
+    "gemini-2.5-flash": {"input": 0.15, "output": 0.60, "thinking": 0.60, "batch_discount": 0.5},
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.00, "thinking": 10.00, "batch_discount": 0.5},
+    "gemini-2.0-flash": {"input": 0.10, "output": 0.40, "thinking": 0.40, "batch_discount": 0.5},
+    "gemini-3.0-flash": {"input": 0.15, "output": 0.60, "thinking": 0.60, "batch_discount": 0.5},
+    "gemini-3.1-pro-preview": {"input": 1.25, "output": 10.00, "thinking": 10.00, "batch_discount": 0.5},
+    "gemini-3.1-flash-preview": {"input": 0.10, "output": 0.40, "thinking": 0.40, "batch_discount": 0.5},
+    "gemini-3.1-flash-lite-preview": {"input": 0.02, "output": 0.10, "thinking": 0.10, "batch_discount": 0.5},
+    # OpenAI — لا يوجد batch discount في Vertex
+    "gpt-4o": {"input": 2.50, "output": 10.00, "thinking": 0, "batch_discount": 0.5},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60, "thinking": 0, "batch_discount": 0.5},
+    # Claude — Anthropic batch discount = 50%
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "thinking": 15.00, "batch_discount": 0.5},
+    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00, "thinking": 4.00, "batch_discount": 0.5},
 }
 
-def _estimate_cost(model: str, input_tokens: int, output_tokens: int, thinking_tokens: int) -> float:
-    """حساب التكلفة التقديرية بالدولار"""
+
+def _estimate_cost(model: str, input_tokens: int, output_tokens: int, thinking_tokens: int,
+                   call_type: str = "direct") -> float:
+    """حساب التكلفة بالدولار — مطابق لفواتير Google Cloud.
+
+    Args:
+        model: اسم الموديل
+        input_tokens: عدد توكنز المدخلات (promptTokenCount)
+        output_tokens: عدد توكنز المخرجات (candidatesTokenCount)
+        thinking_tokens: عدد توكنز التفكير (thoughtsTokenCount)
+        call_type: "direct" أو "batch" — الباتش بيحصل على خصم 50%
+
+    Returns:
+        التكلفة بالدولار
+    """
     # بحث بالاسم الكامل أولاً ثم بأقرب تطابق
     pricing = MODEL_PRICING.get(model)
     if not pricing:
@@ -778,17 +809,27 @@ def _estimate_cost(model: str, input_tokens: int, output_tokens: int, thinking_t
                 pricing = MODEL_PRICING[key]
                 break
     if not pricing:
-        pricing = {"input": 0.50, "output": 2.00, "thinking": 2.00}  # تقدير افتراضي
+        # تقدير افتراضي — لازم يظهر warning عشان نضيف الموديل
+        print(f"[PRICING WARNING] موديل غير معروف: {model} — استخدام تقدير افتراضي!")
+        pricing = {"input": 0.50, "output": 2.00, "thinking": 2.00, "batch_discount": 0.5}
+
+    # حساب التكلفة الأساسية
     cost = (
         (input_tokens / 1_000_000) * pricing["input"] +
         (output_tokens / 1_000_000) * pricing["output"] +
         (thinking_tokens / 1_000_000) * pricing["thinking"]
     )
+
+    # تطبيق خصم الباتش لو call_type = "batch"
+    if call_type == "batch":
+        discount = pricing.get("batch_discount", 0.5)
+        cost *= discount
+
     return round(cost, 6)
 
 
 def _save_usage_from_summary(db, run_id: str, output_dir: Path):
-    """قراءة usage_summary.json وحفظ البيانات في جدول api_usage"""
+    """قراءة usage_summary.json وحفظ البيانات في جدول api_usage — مع حساب تكلفة دقيق"""
     usage_file = output_dir / "usage_summary.json"
     if not usage_file.exists():
         return
@@ -797,16 +838,18 @@ def _save_usage_from_summary(db, run_id: str, output_dir: Path):
             summary = json.load(f)
         records = summary.get("records", [])
         for rec in records:
+            rec_call_type = rec.get("call_type", "direct")
             cost = _estimate_cost(
                 rec.get("model", ""),
                 rec.get("input_tokens", 0),
                 rec.get("output_tokens", 0),
                 rec.get("thinking_tokens", 0),
+                call_type=rec_call_type,
             )
             usage = ApiUsage(
                 run_id=run_id,
                 step_id=rec.get("step_id", ""),
-                call_type=rec.get("call_type", "direct"),
+                call_type=rec_call_type,
                 provider=rec.get("provider", ""),
                 model=rec.get("model", ""),
                 input_tokens=rec.get("input_tokens", 0),
@@ -818,10 +861,14 @@ def _save_usage_from_summary(db, run_id: str, output_dir: Path):
             db.add(usage)
         db.commit()
         total_cost = sum(
-            _estimate_cost(r.get("model", ""), r.get("input_tokens", 0), r.get("output_tokens", 0), r.get("thinking_tokens", 0))
+            _estimate_cost(
+                r.get("model", ""), r.get("input_tokens", 0),
+                r.get("output_tokens", 0), r.get("thinking_tokens", 0),
+                call_type=r.get("call_type", "direct")
+            )
             for r in records
         )
-        print(f"[USAGE] حفظ {len(records)} سجل استهلاك | التكلفة التقديرية: ${total_cost:.4f}")
+        print(f"[USAGE] حفظ {len(records)} سجل استهلاك | التكلفة: ${total_cost:.4f} (batch discount مُطبّق)")
     except Exception as e:
         print(f"[USAGE] خطأ في حفظ بيانات الاستهلاك: {e}")
 
@@ -1132,13 +1179,17 @@ async def get_usage(
     by_model = {}
     for r in records:
         if r.model not in by_model:
-            by_model[r.model] = {"input": 0, "output": 0, "thinking": 0, "total": 0, "cost": 0, "calls": 0}
+            by_model[r.model] = {"input": 0, "output": 0, "thinking": 0, "total": 0, "cost": 0, "calls": 0, "batch_calls": 0, "direct_calls": 0}
         by_model[r.model]["input"] += r.input_tokens
         by_model[r.model]["output"] += r.output_tokens
         by_model[r.model]["thinking"] += r.thinking_tokens
         by_model[r.model]["total"] += r.total_tokens
         by_model[r.model]["cost"] += r.estimated_cost_usd
         by_model[r.model]["calls"] += 1
+        if r.call_type == "batch":
+            by_model[r.model]["batch_calls"] += 1
+        else:
+            by_model[r.model]["direct_calls"] += 1
 
     # تجميع حسب التشغيلة
     by_run = {}

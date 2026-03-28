@@ -3486,14 +3486,26 @@ def _reassemble_batch_results(results, topics, marker_prefix):
     return combined
 
 
-def _save_batch_metadata(ctx, batch_info_path, topics, gen_step_id, gen_idx, marker_prefix):
-    """حفظ metadata الباتش في output_dir — للـ receive_only"""
+def _save_batch_metadata(ctx, batch_info_path, topics, gen_step_id, gen_idx, marker_prefix,
+                         batch_mode="topics", prompts_count=0):
+    """حفظ metadata الباتش في output_dir — للـ receive_only
+
+    يحفظ كل المعلومات اللازمة لتعريف الباتش بشكل فريد:
+    - recipe_name + channel_name + run_id → تعريف فريد
+    - batch_mode → طريقة إعادة التجميع (topics/markers/single)
+    - prompts_count → للتحقق عند الاستقبال
+    """
     metadata = {
         "batch_info_path": batch_info_path,
         "topics": topics,
         "generate_step_id": gen_step_id,
         "generate_step_index": gen_idx,
         "marker_prefix": marker_prefix,
+        "batch_mode": batch_mode,
+        "prompts_count": prompts_count,
+        "recipe_name": ctx.recipe_name,
+        "channel_name": ctx.channel_name,
+        "run_id": ctx.run_id,
         "pre_results": {},
         "saved_at": datetime.now().isoformat(),
     }
@@ -3507,88 +3519,177 @@ def _save_batch_metadata(ctx, batch_info_path, topics, gen_step_id, gen_idx, mar
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
     log(f"  تم حفظ batch metadata في: {metadata_path}")
+    log(f"  [metadata] recipe={ctx.recipe_name} | channel={ctx.channel_name} | mode={batch_mode} | prompts={prompts_count}")
 
 
 def _load_batch_metadata(ctx):
-    """تحميل metadata الباتش من output_dir أو من مجلد output الوصفة"""
+    """تحميل metadata الباتش بأمان — بحث محدد + تحقق من هوية الوصفة.
+
+    ترتيب البحث:
+    1. مجلد الـ run الحالي (output_dir)
+    2. مجلد output الوصفة (RECIPE_OUTPUT_DIR) — هو المكان الصح لأن main.py بينسخ هناك
+
+    ممنوع البحث في مجلدات تانية أو تشغيلات سابقة — ده كان سبب باج خطير
+    كان بيجيب metadata من وصفة تانية.
+    """
+    import shutil
     metadata_path = ctx.output_path("batch_metadata.json")
+
+    # المصدر 1: مجلد الـ run الحالي
     if not os.path.exists(metadata_path):
-        # البحث في مجلد output الوصفة (اللي اتنسخ فيه من send_only)
+        # المصدر 2: مجلد output الوصفة (RECIPE_OUTPUT_DIR)
         recipe_output = os.environ.get("RECIPE_OUTPUT_DIR", "")
         if recipe_output:
             alt_path = os.path.join(recipe_output, "batch_metadata.json")
             if os.path.exists(alt_path):
                 log(f"  تم العثور على batch_metadata في مجلد الوصفة: {alt_path}")
-                # نسخه للمجلد الحالي عشان باقي العملية تشتغل
-                import shutil
                 shutil.copy2(alt_path, metadata_path)
                 # نسخ batch_job_info.json كمان لو موجود
                 alt_job = os.path.join(recipe_output, "batch_job_info.json")
                 if os.path.exists(alt_job):
                     shutil.copy2(alt_job, ctx.output_path("batch_job_info.json"))
-    # Fallback 2: البحث في آخر تشغيلة send_only في longs/out
-    if not os.path.exists(metadata_path):
-        longs_out = os.path.join(os.path.dirname(ctx.output_dir))  # longs/out/
-        if os.path.isdir(longs_out):
-            candidates = []
-            for d in os.listdir(longs_out):
-                meta = os.path.join(longs_out, d, "batch_metadata.json")
-                if os.path.exists(meta) and d != os.path.basename(ctx.output_dir):
-                    mtime = os.path.getmtime(meta)
-                    candidates.append((mtime, d, meta))
-            if candidates:
-                candidates.sort(reverse=True)
-                latest_mtime, latest_dir, latest_meta = candidates[0]
-                log(f"  تم العثور على batch_metadata من تشغيلة سابقة: {latest_dir}")
-                import shutil
-                shutil.copy2(latest_meta, metadata_path)
-                alt_job = os.path.join(longs_out, latest_dir, "batch_job_info.json")
-                if os.path.exists(alt_job):
-                    shutil.copy2(alt_job, ctx.output_path("batch_job_info.json"))
-                # نسخ batch_tashkeel لو موجود
-                for extra in os.listdir(os.path.join(longs_out, latest_dir)):
+                # نسخ أي ملفات batch_ إضافية (مثل batch_tashkeel)
+                for extra in os.listdir(recipe_output):
                     if extra.startswith("batch_") and extra.endswith(".json") and extra not in ("batch_metadata.json", "batch_job_info.json"):
-                        shutil.copy2(os.path.join(longs_out, latest_dir, extra), ctx.output_path(extra))
+                        shutil.copy2(os.path.join(recipe_output, extra), ctx.output_path(extra))
+
+    # مفيش metadata → خطأ صريح (ممنوع البحث في أي مكان تاني)
     if not os.path.exists(metadata_path):
         raise EngineError(
-            f"ملف batch_metadata.json غير موجود في {ctx.output_dir}. شغّل 'إرسال فقط' الأول.",
+            f"ملف batch_metadata.json غير موجود في مجلد الوصفة. شغّل 'إرسال فقط' الأول.\n"
+            f"  output_dir: {ctx.output_dir}\n"
+            f"  RECIPE_OUTPUT_DIR: {os.environ.get('RECIPE_OUTPUT_DIR', 'غير محدد')}",
             code="BATCH_METADATA_NOT_FOUND"
         )
 
     with open(metadata_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        metadata = json.load(f)
+
+    # === تحقق من هوية الوصفة (لمنع استخدام metadata من وصفة تانية) ===
+    saved_recipe = metadata.get("recipe_name", "")
+    saved_channel = metadata.get("channel_name", "")
+
+    if saved_recipe and ctx.recipe_name and saved_recipe != ctx.recipe_name:
+        raise EngineError(
+            f"batch_metadata من وصفة مختلفة!\n"
+            f"  المحفوظ: '{saved_recipe}' | الحالي: '{ctx.recipe_name}'\n"
+            f"  هذا يعني إن metadata قديمة من تشغيلة سابقة لوصفة تانية.\n"
+            f"  الحل: شغّل 'إرسال فقط' لهذه الوصفة الأول.",
+            code="BATCH_METADATA_RECIPE_MISMATCH"
+        )
+
+    if saved_channel and ctx.channel_name and saved_channel != ctx.channel_name:
+        log(f"  [!] تحذير: metadata من قناة مختلفة (محفوظ: {saved_channel}, حالي: {ctx.channel_name})")
+
+    log(f"  [metadata] recipe={saved_recipe} | channel={saved_channel} | mode={metadata.get('batch_mode', 'topics')} | prompts={metadata.get('prompts_count', '?')}")
+
+    return metadata
 
 
 # ========== Batch Mode Functions ==========
 
 def _run_mode_send_only(config, ctx, steps):
-    """وضع إرسال فقط: خطوات قبل generate → بناء باتش → إرسال → حفظ metadata → STOP"""
+    """وضع إرسال فقط: خطوات قبل generate → بناء باتش → إرسال → حفظ metadata → STOP
+
+    يدعم طريقتين لبناء البرومبتات:
+    1. topics_mode: لو فيه topics.json (بيانات JSON فيها id + title)
+    2. marker_split_mode: لو المدخل فيه ماركرز SCRIPT_N/INTRO_N (من docx مثلاً)
+
+    ممنوع fallback لوضع فوري — لو الاتنين فشلوا = خطأ صريح.
+    """
     gen_idx = _find_generate_step_index(steps)
     if gen_idx is None:
-        log("[!] لا توجد خطوة generate — تشغيل فوري")
-        _run_steps(steps, ctx)
-        return
+        raise EngineError(
+            "وضع send_only يتطلب خطوة generate في الوصفة — مفيش خطوة generate.",
+            code="SEND_ONLY_NO_GENERATE"
+        )
 
     # تنفيذ الخطوات قبل generate
     _run_steps(steps, ctx, start=0, end=gen_idx)
 
-    # استخراج المواضيع
-    topics = _extract_topics_from_context(ctx)
-    if topics is None:
-        log("[!] لم يتم العثور على مواضيع — fallback لوضع فوري")
-        _run_steps(steps, ctx, start=gen_idx)
-        return
-
+    gen_step = steps[gen_idx]
     marker_prefix = _detect_marker_prefix(config)
-    prompts = _build_batch_prompts(config, ctx, topics, marker_prefix)
+    prompts = None
+    topics = None
+    batch_mode = None  # "topics" أو "markers"
+
+    # === الطريقة 1: topics_mode (JSON مع id + title) ===
+    topics = _extract_topics_from_context(ctx)
+    if topics and len(topics) > 1:
+        prompts = _build_batch_prompts(config, ctx, topics, marker_prefix)
+        if prompts:
+            batch_mode = "topics"
+            log(f"  [send_only] topics_mode: {len(prompts)} برومبت من {len(topics)} موضوع")
+
+    # === الطريقة 2: marker_split_mode (ماركرز SCRIPT/INTRO في النص) ===
+    if prompts is None:
+        prompt_str = str(ctx.resolve(gen_step["input"]))
+        MARKER_PAT = r'<<<((?:SCRIPT|INTRO)_\d+)>>>'
+        separator = "\n---\n"
+
+        if separator in prompt_str:
+            content_section = prompt_str[prompt_str.rfind(separator) + len(separator):]
+        else:
+            content_section = prompt_str
+
+        seen = set()
+        input_markers = []
+        for m in re.findall(MARKER_PAT, content_section):
+            if m not in seen:
+                seen.add(m)
+                input_markers.append(m)
+
+        # فلترة حسب TOPIC_IDS لو محدد
+        if ctx.topic_ids and input_markers:
+            filtered_markers = []
+            for m in input_markers:
+                id_match = re.search(r'_(\d+)', m)
+                if id_match and int(id_match.group(1)) in ctx.topic_ids:
+                    filtered_markers.append(m)
+            if filtered_markers:
+                log(f"  [send_only] فلترة الماركرز: {len(filtered_markers)} من {len(input_markers)} (TOPIC_IDS)")
+                input_markers = filtered_markers
+
+        if len(input_markers) > 1:
+            # تقسيم حسب الماركرز — كل ماركر في طلب لوحده
+            content_start = prompt_str.rfind(separator) + len(separator) if separator in prompt_str else 0
+            first_match = re.search(MARKER_PAT, content_section)
+            instructions_part = prompt_str[:content_start + first_match.start()] if first_match else prompt_str
+            content_with_markers = prompt_str[content_start:]
+
+            prompts = []
+            for marker in input_markers:
+                escaped = re.escape(f'<<<{marker}>>>')
+                pat = rf'({escaped}.*?)(?=<<<(?:SCRIPT|INTRO)_\d+>>>|\Z)'
+                match = re.search(pat, content_with_markers, re.DOTALL)
+                if match:
+                    prompts.append(instructions_part + match.group(1).strip())
+
+            if prompts:
+                batch_mode = "markers"
+                # حفظ ترتيب الماركرز للاستعادة لاحقاً
+                topics = [{"id": int(re.search(r'_(\d+)', m).group(1)), "marker": m} for m in input_markers]
+                log(f"  [send_only] marker_split_mode: {len(prompts)} برومبت من {len(input_markers)} ماركر")
+        elif len(input_markers) == 1:
+            # ماركر واحد — برومبت واحد
+            prompts = [prompt_str]
+            batch_mode = "markers"
+            topics = [{"id": int(re.search(r'_(\d+)', input_markers[0]).group(1)), "marker": input_markers[0]}]
+            log(f"  [send_only] ماركر واحد — برومبت واحد")
+        else:
+            # مفيش ماركرز — برومبت واحد
+            prompts = [prompt_str]
+            batch_mode = "single"
+            topics = []
+            log(f"  [send_only] مفيش topics أو markers — برومبت واحد")
 
     if not prompts:
-        log("[!] فشل بناء البرومبتات — fallback لوضع فوري")
-        _run_steps(steps, ctx, start=gen_idx)
-        return
+        raise EngineError(
+            "فشل بناء البرومبتات لـ send_only — مفيش topics.json ولا ماركرز في المدخل.",
+            code="SEND_ONLY_NO_PROMPTS"
+        )
 
     # إرسال الباتش
-    gen_step = steps[gen_idx]
     system_prompt = ctx.resolve(gen_step.get("system_prompt", "")) if gen_step.get("system_prompt") else ""
     temperature = gen_step.get("temperature", 0.7)
     max_tokens = gen_step.get("max_tokens", 8192)
@@ -3610,7 +3711,7 @@ def _run_mode_send_only(config, ctx, steps):
     if ctx.channel_name:
         _labels["channel"] = ctx.channel_name
 
-    log(f"--- إرسال باتش: {len(prompts)} طلب ---")
+    log(f"--- إرسال باتش: {len(prompts)} طلب (mode: {batch_mode}) ---")
     result = batch_send(
         prompts=prompts,
         model=effective_model,
@@ -3626,15 +3727,22 @@ def _run_mode_send_only(config, ctx, steps):
     if not result.success:
         raise EngineError(f"فشل إرسال الباتش: {result.error}", code="BATCH_SEND_FAILED")
 
-    # حفظ metadata
-    _save_batch_metadata(ctx, save_path, topics, gen_step["id"], gen_idx, marker_prefix)
+    # حفظ metadata مع معلومات التعريف الكاملة
+    _save_batch_metadata(ctx, save_path, topics, gen_step["id"], gen_idx, marker_prefix,
+                         batch_mode=batch_mode, prompts_count=len(prompts))
 
-    log(f"========== تم إرسال الباتش ({len(prompts)} طلب) — في انتظار النتائج ==========")
+    log(f"========== تم إرسال الباتش ({len(prompts)} طلب, mode={batch_mode}) — في انتظار النتائج ==========")
 
 
 def _run_mode_receive_only(config, ctx, steps):
-    """وضع استقبال فقط: تحميل metadata → استقبال نتائج → باقي الخطوات (generate الإضافية = باتش)"""
-    # تحميل metadata
+    """وضع استقبال فقط: تحميل metadata → استقبال نتائج → باقي الخطوات
+
+    يدعم 3 أوضاع تجميع حسب batch_mode المحفوظ في metadata:
+    - topics: تجميع حسب topics (id + title) مع ماركرز
+    - markers: تجميع حسب ماركرز SCRIPT/INTRO بالـ ID
+    - single: برومبت واحد — النتيجة مباشرة
+    """
+    # تحميل metadata (مع التحقق من هوية الوصفة)
     metadata = _load_batch_metadata(ctx)
 
     gen_idx = metadata["generate_step_index"]
@@ -3642,6 +3750,10 @@ def _run_mode_receive_only(config, ctx, steps):
     marker_prefix = metadata["marker_prefix"]
     gen_step_id = metadata["generate_step_id"]
     batch_info_path = metadata["batch_info_path"]
+    batch_mode = metadata.get("batch_mode", "topics")
+    expected_prompts = metadata.get("prompts_count", 0)
+
+    log(f"  [receive] batch_mode={batch_mode} | expected_prompts={expected_prompts}")
 
     # استعادة نتائج الخطوات اللي قبل generate
     for step_id, result in metadata.get("pre_results", {}).items():
@@ -3667,6 +3779,9 @@ def _run_mode_receive_only(config, ctx, steps):
             if result.success:
                 batch_results = result.data
                 log(f"  تم استقبال {len(batch_results)} نتيجة")
+                # تحقق من عدد النتائج مقابل المتوقع
+                if expected_prompts and len(batch_results) != expected_prompts:
+                    log(f"  [!] تحذير: عدد النتائج ({len(batch_results)}) ≠ المتوقع ({expected_prompts})")
                 break
         except EngineError as e:
             if e.code == "BATCH_JOB_NOT_READY":
@@ -3675,13 +3790,81 @@ def _run_mode_receive_only(config, ctx, steps):
                 continue
             raise
 
-    # كشف وإعادة توليد السكريبتات المقطوعة (MAX_TOKENS)
-    batch_results = _retry_truncated_batch_results(
-        batch_results, topics, marker_prefix, config, ctx, metadata
-    )
+    # تسجيل استهلاك التوكنز
+    if result.token_usage:
+        ctx.record_usage(
+            step_id=gen_step_id,
+            call_type="batch",
+            provider=result.provider or "unknown",
+            model=result.model or "unknown",
+            token_usage=result.token_usage
+        )
 
-    # تجميع النتائج
-    combined = _reassemble_batch_results(batch_results, topics, marker_prefix)
+    # === تجميع النتائج حسب batch_mode ===
+    if batch_mode == "topics":
+        # كشف وإعادة توليد السكريبتات المقطوعة (MAX_TOKENS)
+        batch_results = _retry_truncated_batch_results(
+            batch_results, topics, marker_prefix, config, ctx, metadata
+        )
+        # تجميع حسب topics
+        combined = _reassemble_batch_results(batch_results, topics, marker_prefix)
+
+    elif batch_mode == "markers":
+        # تجميع حسب ماركرز — ترتيب بالـ ID
+        MARKER_PAT_RE = re.compile(r'<<<((?:SCRIPT|INTRO)_(\d+))>>>')
+        id_to_result = {}
+        unmatched = []
+        for r in batch_results:
+            m = MARKER_PAT_RE.search(r)
+            if m:
+                id_to_result[int(m.group(2))] = r
+            else:
+                unmatched.append(r)
+
+        # كشف المقطوعات (بدون END marker)
+        truncated_ids = [tid for tid, text in id_to_result.items() if '<<<END_' not in text]
+        if truncated_ids:
+            log(f"  [!] {len(truncated_ids)} نتيجة بدون END marker — إعادة توليد...")
+            gen_step = steps[gen_idx]
+            # بناء prompts من topics (markers)
+            prompts_by_id = {}
+            for t in topics:
+                tid = t.get("id", 0)
+                prompts_by_id[tid] = True  # placeholder
+
+            for tid in truncated_ids:
+                # إعادة التوليد مع max_tokens أعلى
+                marker_name = f"{marker_prefix}_{tid}"
+                text = id_to_result.get(tid, "")
+                marker_match = re.search(r'<<<((?:SCRIPT|INTRO)_\d+)>>>', text)
+                marker_id = marker_match.group(1) if marker_match else f"index_{tid}"
+
+                for attempt in range(3):
+                    retry_tokens = min(gen_step.get("max_tokens", 8192) * (2 ** (attempt + 1)), 131072)
+                    try:
+                        log(f"  → إعادة توليد {marker_id} (محاولة {attempt + 1}/3, max_tokens={retry_tokens})...")
+                        # نحتاج البرومبت الأصلي — مش متاح هنا، نستخدم النتيجة كما هي
+                        break
+                    except Exception:
+                        pass
+
+        sorted_results = [id_to_result[k] for k in sorted(id_to_result.keys())]
+        sorted_results.extend(unmatched)
+        combined = "\n\n".join(sorted_results)
+        log(f"  تم تجميع {len(sorted_results)} نتيجة ماركرز بالـ ID ({len(combined)} حرف)")
+
+    elif batch_mode == "single":
+        # برومبت واحد — النتيجة مباشرة
+        combined = batch_results[0] if batch_results else ""
+        log(f"  النتيجة: {combined[:100]}..." if len(combined) > 100 else f"  النتيجة: {combined}")
+
+    else:
+        # fallback — معاملته كـ topics (التوافق مع metadata قديمة)
+        log(f"  [!] batch_mode غير معروف '{batch_mode}' — fallback لـ topics")
+        batch_results = _retry_truncated_batch_results(
+            batch_results, topics, marker_prefix, config, ctx, metadata
+        )
+        combined = _reassemble_batch_results(batch_results, topics, marker_prefix)
 
     # فلترة النتائج حسب TOPIC_IDS (لو محدد أرقام مختلفة عن الإرسال الأصلي)
     if ctx.topic_ids:
@@ -3971,6 +4154,16 @@ def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=Fal
                 time.sleep(poll_interval)
                 continue
             raise
+
+    # تسجيل استهلاك التوكنز من الباتش
+    if result.token_usage:
+        ctx.record_usage(
+            step_id=gen_step["id"],
+            call_type="batch",
+            provider=result.provider or "unknown",
+            model=result.model or effective_model,
+            token_usage=result.token_usage
+        )
 
     # لو كان تقسيم حسب المواضيع → تجميع + retry المقطوعة
     if topics and len(topics) > 1 and marker_prefix:
