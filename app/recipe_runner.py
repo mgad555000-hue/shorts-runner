@@ -31,7 +31,13 @@ class PipelineContext:
 
     def __init__(self):
         self.input_dir = os.environ.get("INPUT_DIR", "/mnt/input")
-        self.output_dir = os.environ.get("OUTPUT_DIR", "/mnt/output")
+        # RECIPE_OUTPUT_DIR = المجلد الدائم (data/channels/.../output)
+        # OUTPUT_DIR = المجلد المؤقت (shorts/out/{run_id})
+        # الأولوية لـ RECIPE_OUTPUT_DIR عشان نكتب مباشرة في المكان النهائي
+        self.output_dir = os.environ.get("RECIPE_OUTPUT_DIR", "") or os.environ.get("OUTPUT_DIR", "/mnt/output")
+        self._work_dir = os.environ.get("OUTPUT_DIR", "/mnt/output")  # المجلد المؤقت (للـ config فقط)
+        # التأكد من وجود مجلد المخرجات
+        os.makedirs(self.output_dir, exist_ok=True)
         self.model = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
         self.tts_provider = os.environ.get("TTS_PROVIDER", "vertex")
         self.tts_voice = os.environ.get("TTS_VOICE_ID", "Achird")
@@ -3529,42 +3535,17 @@ def _save_batch_metadata(ctx, batch_info_path, topics, gen_step_id, gen_idx, mar
 
 
 def _load_batch_metadata(ctx):
-    """تحميل metadata الباتش بأمان — بحث محدد + تحقق من هوية الوصفة.
+    """تحميل metadata الباتش — البحث في output_dir فقط (= مجلد الوصفة الدائم).
 
-    ترتيب البحث:
-    1. مجلد الـ run الحالي (output_dir)
-    2. مجلد output الوصفة (RECIPE_OUTPUT_DIR) — هو المكان الصح لأن main.py بينسخ هناك
-
-    ممنوع البحث في مجلدات تانية أو تشغيلات سابقة — ده كان سبب باج خطير
-    كان بيجيب metadata من وصفة تانية.
+    بعد توحيد المجلدات: output_dir = RECIPE_OUTPUT_DIR مباشرة.
+    ممنوع البحث في مجلدات تانية — ده كان سبب باج خطير.
     """
-    import shutil
     metadata_path = ctx.output_path("batch_metadata.json")
 
-    # المصدر 1: مجلد الـ run الحالي
-    if not os.path.exists(metadata_path):
-        # المصدر 2: مجلد output الوصفة (RECIPE_OUTPUT_DIR)
-        recipe_output = os.environ.get("RECIPE_OUTPUT_DIR", "")
-        if recipe_output:
-            alt_path = os.path.join(recipe_output, "batch_metadata.json")
-            if os.path.exists(alt_path):
-                log(f"  تم العثور على batch_metadata في مجلد الوصفة: {alt_path}")
-                shutil.copy2(alt_path, metadata_path)
-                # نسخ batch_job_info.json كمان لو موجود
-                alt_job = os.path.join(recipe_output, "batch_job_info.json")
-                if os.path.exists(alt_job):
-                    shutil.copy2(alt_job, ctx.output_path("batch_job_info.json"))
-                # نسخ أي ملفات batch_ إضافية (مثل batch_tashkeel)
-                for extra in os.listdir(recipe_output):
-                    if extra.startswith("batch_") and extra.endswith(".json") and extra not in ("batch_metadata.json", "batch_job_info.json"):
-                        shutil.copy2(os.path.join(recipe_output, extra), ctx.output_path(extra))
-
-    # مفيش metadata → خطأ صريح (ممنوع البحث في أي مكان تاني)
     if not os.path.exists(metadata_path):
         raise EngineError(
-            f"ملف batch_metadata.json غير موجود في مجلد الوصفة. شغّل 'إرسال فقط' الأول.\n"
-            f"  output_dir: {ctx.output_dir}\n"
-            f"  RECIPE_OUTPUT_DIR: {os.environ.get('RECIPE_OUTPUT_DIR', 'غير محدد')}",
+            f"ملف batch_metadata.json غير موجود. شغّل 'إرسال فقط' الأول.\n"
+            f"  output_dir: {ctx.output_dir}",
             code="BATCH_METADATA_NOT_FOUND"
         )
 

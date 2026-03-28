@@ -149,13 +149,21 @@ run_pipeline(config)
         # إذا كان Docker متاحاً نستخدمه، وإلا ننفذ محلياً داخل نفس الحاوية
         if docker_client is not None:
             try:
+                # بناء volumes — إضافة RECIPE_OUTPUT_DIR كـ mount مباشر
+                _volumes = {
+                    str(input_dir.resolve()): {"bind": "/mnt/input", "mode": "ro"},
+                    str(output_dir.resolve()): {"bind": "/mnt/output", "mode": "rw"},
+                }
+                _recipe_out_dir = os.getenv("RECIPE_OUTPUT_DIR", "")
+                if _recipe_out_dir:
+                    _recipe_out_path = Path(_recipe_out_dir).resolve()
+                    _recipe_out_path.mkdir(parents=True, exist_ok=True)
+                    _volumes[str(_recipe_out_path)] = {"bind": "/mnt/recipe_output", "mode": "rw"}
+
                 container = docker_client.containers.run(
                     image=SANDBOX_IMAGE,  # صورة مخصصة فيها python-docx
                     command=["python", "/mnt/output/script.py"],
-                    volumes={
-                        str(input_dir.resolve()): {"bind": "/mnt/input", "mode": "ro"},
-                        str(output_dir.resolve()): {"bind": "/mnt/output", "mode": "rw"},
-                    },
+                    volumes=_volumes,
                     environment={
                         "INPUT_DIR": "/mnt/input",
                         "OUTPUT_DIR": "/mnt/output",
@@ -163,7 +171,7 @@ run_pipeline(config)
                         "MODEL_NAME": os.getenv("MODEL_NAME", ""),
                         "CHANNEL_NAME": os.getenv("CHANNEL_NAME", ""),
                         "CHANNEL_ROOT": os.getenv("CHANNEL_ROOT", ""),
-                        "RECIPE_OUTPUT_DIR": os.getenv("RECIPE_OUTPUT_DIR", ""),
+                        "RECIPE_OUTPUT_DIR": "/mnt/recipe_output" if _recipe_out_dir else "",
                         "TTS_PROVIDER": os.getenv("TTS_PROVIDER", "vertex"),
                         "TTS_VOICE_ID": _get_api_env().get("TTS_VOICE_ID", "Achird"),
                         "EXECUTION_MODE": os.getenv("EXECUTION_MODE", "instant"),

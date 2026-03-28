@@ -977,101 +977,33 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
             db.commit()
 
         # حفظ بيانات استهلاك التوكنز من usage_summary.json
-        if output_path:
+        # recipe_runner بيكتب مباشرة في RECIPE_OUTPUT_DIR، فنبحث هناك أولاً
+        if actual_output_recipe and Path(actual_output_recipe).exists():
+            _save_usage_from_summary(db, run_id, Path(actual_output_recipe))
+        elif output_path:
             _save_usage_from_summary(db, run_id, Path(output_path))
 
-        if output_path:
-            output_dir = Path(output_path).resolve()
-            print(f"[COPY] === بدء نسخ المخرجات ===")
-            print(f"[COPY] المصدر: {output_dir} (exists={output_dir.exists()})")
-            if output_dir.exists():
-                all_files = list(output_dir.iterdir())
-                print(f"[COPY] عدد الملفات في المصدر: {len(all_files)}")
-                for item in all_files:
-                    print(f"[COPY]   - {item.name} ({'dir' if item.is_dir() else f'{item.stat().st_size} bytes'})")
+        # recipe_runner بيكتب مباشرة في RECIPE_OUTPUT_DIR — مفيش حاجة تتنسخ
+        # المجلد المؤقت (output_path) فيه بس script.py و recipe_config.json
+        if actual_output_recipe:
+            recipe_out = Path(actual_output_recipe).resolve()
+            if recipe_out.exists():
+                out_files = [f.name for f in recipe_out.iterdir() if f.is_file()]
+                print(f"[OUTPUT] المخرجات في المجلد الدائم مباشرة: {recipe_out}")
+                print(f"[OUTPUT] عدد الملفات: {len(out_files)}")
+                for fname in out_files[:20]:
+                    fpath = recipe_out / fname
+                    print(f"[OUTPUT]   - {fname} ({fpath.stat().st_size} bytes)")
 
-                skip_files = {"script.py", "result_manifest.json", "run_log.txt"}
-                # لو التشغيلة فشلت — منمسحش ملفات الباتش (batch_metadata.json, batch_job_info.json)
-                # عشان receive_only يقدر يلاقيها بعدين
-                batch_protect_files = {"batch_metadata.json", "batch_job_info.json", "batch_tashkeel_intros.json"}
-                if not success:
-                    skip_files = skip_files | batch_protect_files
-                if actual_output_recipe:
-                    recipe_out = Path(actual_output_recipe).resolve()
-                    recipe_out.mkdir(parents=True, exist_ok=True)
-                    print(f"[COPY] الوجهة: {recipe_out} (exists={recipe_out.exists()})")
-
-                    def _validate_wav(filepath):
-                        """Check if a .wav file is too small (likely corrupt) and delete it."""
-                        if filepath.suffix.lower() == '.wav' and filepath.exists():
-                            fsize = filepath.stat().st_size
-                            if fsize < 10240:
-                                print(f"[COPY] ⚠ WAV file too small ({fsize} bytes): {filepath.name} — likely corrupt")
-                                try:
-                                    filepath.unlink()
-                                except Exception as del_e:
-                                    print(f"[COPY] خطأ في حذف WAV فاسد {filepath.name}: {del_e}")
-
-                    copied_count = 0
-                    for f in all_files:
-                        if f.is_file() and f.name not in skip_files:
-                            dest = recipe_out / f.name
-                            try:
-                                # لو الملف موجود ومقفول، امسحه الأول
-                                if dest.exists():
-                                    try:
-                                        dest.unlink()
-                                        print(f"[COPY] حذف ملف قديم: {dest.name}")
-                                    except Exception:
-                                        pass
-                                shutil.copy2(str(f), str(dest))
-                                copied_count += 1
-                                print(f"[COPY] OK: {f.name} ({f.stat().st_size} bytes) -> {dest}")
-                                if dest.exists():
-                                    print(f"[COPY] تأكيد: {dest.name} موجود ({dest.stat().st_size} bytes)")
-                                    _validate_wav(dest)
-                                else:
-                                    print(f"[COPY] تحذير: {dest.name} مش موجود بعد النسخ!")
-                            except Exception as e:
-                                print(f"[COPY] خطأ في نسخ {f.name}: {type(e).__name__}: {e}")
-                                # محاولة تانية بطريقة مختلفة
-                                try:
-                                    with open(str(f), 'rb') as src, open(str(dest), 'wb') as dst:
-                                        dst.write(src.read())
-                                    copied_count += 1
-                                    print(f"[COPY] OK (محاولة تانية): {f.name}")
-                                    _validate_wav(dest)
-                                except Exception as e2:
-                                    # محاولة ثالثة: حفظ باسم جديد (timestamp)
-                                    from datetime import datetime as _dt
-                                    ts = _dt.now().strftime("%Y%m%d_%H%M%S")
-                                    stem = f.stem
-                                    suffix = f.suffix
-                                    alt_name = f"{stem}_{ts}{suffix}"
-                                    alt_dest = recipe_out / alt_name
-                                    try:
-                                        shutil.copy2(str(f), str(alt_dest))
-                                        copied_count += 1
-                                        print(f"[COPY] OK (اسم بديل): {f.name} -> {alt_name} ({alt_dest.stat().st_size} bytes)")
-                                        _validate_wav(alt_dest)
-                                    except Exception as e3:
-                                        print(f"[COPY] فشل نهائي: {f.name}: {e2} | بديل: {e3}")
-
-                    for d in all_files:
-                        if d.is_dir():
-                            dest_dir = recipe_out / d.name
-                            try:
-                                shutil.copytree(str(d), str(dest_dir), dirs_exist_ok=True)
-                                copied_count += 1
-                                print(f"[COPY] OK dir: {d.name}")
-                            except Exception as e:
-                                print(f"[COPY] خطأ في نسخ مجلد {d.name}: {e}")
-
-                    print(f"[COPY] === اكتمل: {copied_count} ملف/مجلد تم نسخهم ===")
-                else:
-                    print(f"[COPY] تحذير: actual_output_recipe فارغ - مفيش وجهة للنسخ!")
-            else:
-                print(f"[COPY] تحذير: مجلد المصدر مش موجود: {output_dir}")
+                # التحقق من WAV الفاسد
+                for fname in out_files:
+                    fpath = recipe_out / fname
+                    if fpath.suffix.lower() == '.wav' and fpath.stat().st_size < 10240:
+                        print(f"[OUTPUT] ⚠ WAV صغير جداً ({fpath.stat().st_size} bytes): {fname} — likely corrupt")
+                        try:
+                            fpath.unlink()
+                        except Exception:
+                            pass
 
     except Exception as e:
         # Prevent stuck "running" runs on unexpected errors
