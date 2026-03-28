@@ -753,35 +753,60 @@ async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, cur
 # ========== جدول أسعار التوكنز (لكل مليون توكن) ==========
 # ========== نظام حساب التكلفة — مطابق لفواتير Google Cloud ==========
 #
-# المصدر: https://cloud.google.com/vertex-ai/generative-ai/pricing
+# المصادر الرسمية:
+# - https://ai.google.dev/gemini-api/docs/pricing
+# - https://cloud.google.com/vertex-ai/generative-ai/pricing
 # آخر تحديث: 2026-03-28
 #
-# قواعد الحساب:
-# 1. الأسعار بالدولار لكل مليون توكن (per million tokens)
-# 2. Batch API = خصم 50% على كل أنواع التوكنز (Google + Claude)
-# 3. thinking tokens = سعر خاص (عادةً = سعر output)
+# قواعد حساب التكلفة (مطابقة 100% لفواتير Google):
+# 1. الأسعار بالدولار لكل مليون توكن (per million tokens) — Standard tier
+# 2. Batch/Flex API = خصم 50% على كل أنواع التوكنز
+# 3. Thinking tokens = بتتحسب بنفس سعر Output (مفيش سعر منفصل!)
+#    - Google بيعاملها كـ output tokens في الفاتورة
+#    - إحنا بنجمعها مع output عند الحساب
 # 4. Google usageMetadata:
 #    - promptTokenCount = input (يشمل system_prompt + user prompt)
 #    - candidatesTokenCount = output (النص الفعلي المنتج)
-#    - thoughtsTokenCount = thinking (التفكير الداخلي للموديل)
+#    - thoughtsTokenCount = thinking (التفكير — بيتحسب بسعر output)
 #    - totalTokenCount = مجموع الثلاثة
-# 5. التكلفة = (input × سعر_input) + (output × سعر_output) + (thinking × سعر_thinking)
-# 6. لو batch → كل الأسعار × 0.5
+# 5. Context tiers: بعض الموديلات (2.5 Pro, 3.1 Pro) سعرها بيزيد فوق 200K tokens
 
 MODEL_PRICING = {
-    # Gemini models — Vertex AI pricing (per million tokens)
-    # سعر_input | سعر_output | سعر_thinking | batch_discount
-    "gemini-2.5-flash": {"input": 0.15, "output": 0.60, "thinking": 0.60, "batch_discount": 0.5},
-    "gemini-2.5-pro": {"input": 1.25, "output": 10.00, "thinking": 10.00, "batch_discount": 0.5},
-    "gemini-2.0-flash": {"input": 0.10, "output": 0.40, "thinking": 0.40, "batch_discount": 0.5},
-    "gemini-3.0-flash": {"input": 0.15, "output": 0.60, "thinking": 0.60, "batch_discount": 0.5},
-    "gemini-3.1-pro-preview": {"input": 1.25, "output": 10.00, "thinking": 10.00, "batch_discount": 0.5},
-    "gemini-3.1-flash-preview": {"input": 0.10, "output": 0.40, "thinking": 0.40, "batch_discount": 0.5},
-    "gemini-3.1-flash-lite-preview": {"input": 0.02, "output": 0.10, "thinking": 0.10, "batch_discount": 0.5},
-    # OpenAI — لا يوجد batch discount في Vertex
+    # ========== Gemini models — أسعار Standard tier (per million tokens) ==========
+    # input = سعر input tokens | output = سعر output + thinking tokens
+    # thinking = نفس سعر output (Google بيحسبهم سوا في الفاتورة)
+
+    # Gemini 2.5 Flash (سعر واحد — مفيش context tiers)
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50, "thinking": 2.50, "batch_discount": 0.5},
+
+    # Gemini 2.5 Pro (فيه context tiers: ≤200K و >200K)
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.00, "thinking": 10.00, "batch_discount": 0.5,
+                        "input_200k": 2.50, "output_200k": 15.00, "thinking_200k": 15.00},
+
+    # Gemini 2.0 Flash (legacy — deprecated)
+    "gemini-2.0-flash": {"input": 0.15, "output": 0.60, "thinking": 0.60, "batch_discount": 0.5},
+
+    # Gemini 3.0 Flash (= Gemini 3 Flash Preview)
+    "gemini-3.0-flash": {"input": 0.50, "output": 3.00, "thinking": 3.00, "batch_discount": 0.5},
+
+    # Gemini 3.1 Pro Preview (فيه context tiers)
+    "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00, "thinking": 12.00, "batch_discount": 0.5,
+                                "input_200k": 4.00, "output_200k": 18.00, "thinking_200k": 18.00},
+
+    # Gemini 3.1 Flash Preview (سعر واحد)
+    "gemini-3.1-flash-preview": {"input": 0.50, "output": 3.00, "thinking": 3.00, "batch_discount": 0.5},
+
+    # Gemini 3.1 Flash-Lite Preview
+    "gemini-3.1-flash-lite-preview": {"input": 0.25, "output": 1.50, "thinking": 1.50, "batch_discount": 0.5},
+
+    # Gemini 2.5 Flash-Lite
+    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40, "thinking": 0.40, "batch_discount": 0.5},
+
+    # ========== OpenAI ==========
     "gpt-4o": {"input": 2.50, "output": 10.00, "thinking": 0, "batch_discount": 0.5},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60, "thinking": 0, "batch_discount": 0.5},
-    # Claude — Anthropic batch discount = 50%
+
+    # ========== Claude (Anthropic) — batch discount = 50% ==========
     "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "thinking": 15.00, "batch_discount": 0.5},
     "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00, "thinking": 4.00, "batch_discount": 0.5},
 }
@@ -791,15 +816,20 @@ def _estimate_cost(model: str, input_tokens: int, output_tokens: int, thinking_t
                    call_type: str = "direct") -> float:
     """حساب التكلفة بالدولار — مطابق لفواتير Google Cloud.
 
+    القواعد:
+    - Thinking tokens بتتحسب بنفس سعر Output (Google بيجمعهم في الفاتورة)
+    - Batch API = خصم 50% على كل شيء
+    - Context tiers (>200K) = سعر أعلى للموديلات المدعومة
+
     Args:
         model: اسم الموديل
         input_tokens: عدد توكنز المدخلات (promptTokenCount)
         output_tokens: عدد توكنز المخرجات (candidatesTokenCount)
-        thinking_tokens: عدد توكنز التفكير (thoughtsTokenCount)
+        thinking_tokens: عدد توكنز التفكير (thoughtsTokenCount) — بيتحسب بسعر output
         call_type: "direct" أو "batch" — الباتش بيحصل على خصم 50%
 
     Returns:
-        التكلفة بالدولار
+        التكلفة بالدولار (6 خانات عشرية)
     """
     # بحث بالاسم الكامل أولاً ثم بأقرب تطابق
     pricing = MODEL_PRICING.get(model)
@@ -809,15 +839,28 @@ def _estimate_cost(model: str, input_tokens: int, output_tokens: int, thinking_t
                 pricing = MODEL_PRICING[key]
                 break
     if not pricing:
-        # تقدير افتراضي — لازم يظهر warning عشان نضيف الموديل
         print(f"[PRICING WARNING] موديل غير معروف: {model} — استخدام تقدير افتراضي!")
-        pricing = {"input": 0.50, "output": 2.00, "thinking": 2.00, "batch_discount": 0.5}
+        pricing = {"input": 1.00, "output": 5.00, "thinking": 5.00, "batch_discount": 0.5}
+
+    # كشف context tier (>200K tokens) — لو الموديل بيدعم tiers
+    use_200k_tier = False
+    if "input_200k" in pricing and input_tokens > 200_000:
+        use_200k_tier = True
+
+    if use_200k_tier:
+        input_price = pricing["input_200k"]
+        output_price = pricing["output_200k"]
+        thinking_price = pricing["thinking_200k"]
+    else:
+        input_price = pricing["input"]
+        output_price = pricing["output"]
+        thinking_price = pricing["thinking"]
 
     # حساب التكلفة الأساسية
     cost = (
-        (input_tokens / 1_000_000) * pricing["input"] +
-        (output_tokens / 1_000_000) * pricing["output"] +
-        (thinking_tokens / 1_000_000) * pricing["thinking"]
+        (input_tokens / 1_000_000) * input_price +
+        (output_tokens / 1_000_000) * output_price +
+        (thinking_tokens / 1_000_000) * thinking_price
     )
 
     # تطبيق خصم الباتش لو call_type = "batch"
