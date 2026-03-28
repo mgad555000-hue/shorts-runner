@@ -3838,21 +3838,12 @@ def _run_mode_receive_only(config, ctx, steps):
                 tid = t.get("id", 0)
                 prompts_by_id[tid] = True  # placeholder
 
+            # البرومبتات الأصلية غير متاحة في receive_only — نسجل تحذير بالمقطوعات
             for tid in truncated_ids:
-                # إعادة التوليد مع max_tokens أعلى
-                marker_name = f"{marker_prefix}_{tid}"
                 text = id_to_result.get(tid, "")
                 marker_match = re.search(r'<<<((?:SCRIPT|INTRO)_\d+)>>>', text)
                 marker_id = marker_match.group(1) if marker_match else f"index_{tid}"
-
-                for attempt in range(3):
-                    retry_tokens = min(gen_step.get("max_tokens", 8192) * (2 ** (attempt + 1)), 131072)
-                    try:
-                        log(f"  → إعادة توليد {marker_id} (محاولة {attempt + 1}/3, max_tokens={retry_tokens})...")
-                        # نحتاج البرومبت الأصلي — مش متاح هنا، نستخدم النتيجة كما هي
-                        break
-                    except Exception:
-                        pass
+                log(f"  [!] {marker_id} مقطوع (بدون END marker) — البرومبت الأصلي غير متاح للـ retry")
 
         sorted_results = [id_to_result[k] for k in sorted(id_to_result.keys())]
         sorted_results.extend(unmatched)
@@ -4284,6 +4275,7 @@ def run_pipeline(config):
             ctx.tts_provider = runtime["tts_provider"]
         if runtime.get("topic_ids"):
             os.environ["TOPIC_IDS"] = runtime["topic_ids"]
+            ctx.topic_ids = ctx._parse_topic_ids()  # إعادة قراءة بعد تحديث البيئة
 
     mode = ctx.execution_mode
 

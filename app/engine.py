@@ -1066,8 +1066,8 @@ def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: 
     model = _check_model(model)
     provider = detect_provider(model)
 
-    # Vertex في method لا يحتاج API key
-    api_key = None if method == "vertex" else _get_api_key_for_provider(provider)
+    # Vertex لا يحتاج API key (سواء بالـ method أو بالـ provider)
+    api_key = None if method == "vertex" or provider == "vertex" else _get_api_key_for_provider(provider)
 
     log(f"→ إرسال دفعة | الموديل: {model} | المزود: {provider} | الطريقة: {method} | العدد: {len(prompts)}")
 
