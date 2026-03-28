@@ -1206,6 +1206,13 @@ def _batch_retrieve_gemini(batch_info: BatchInfo, api_key: str) -> list:
                 finish = getattr(response.response.candidates[0], 'finish_reason', 'UNKNOWN')
                 results.append(text)
                 finish_reasons.append(str(finish))
+                # استخراج التوكنز من inlined_responses
+                um = getattr(response.response, 'usage_metadata', None)
+                if um:
+                    token_totals["input"] += getattr(um, 'prompt_token_count', 0) or 0
+                    token_totals["output"] += getattr(um, 'candidates_token_count', 0) or 0
+                    token_totals["thinking"] += getattr(um, 'thoughts_token_count', 0) or 0
+                    token_totals["total"] += getattr(um, 'total_token_count', 0) or 0
             except (AttributeError, IndexError) as e:
                 log(f"[!] فشل استخراج نتيجة: {str(e)}")
                 results.append("")
@@ -1258,18 +1265,31 @@ def _batch_retrieve_claude(batch_info: BatchInfo, api_key: str) -> list:
             code="BATCH_JOB_UNKNOWN_STATUS"
         )
 
-    # استخراج النتائج
+    # استخراج النتائج مع التوكنز
     results = []
+    token_totals = {"input": 0, "output": 0, "thinking": 0, "total": 0}
     for result in client.messages.batches.results(batch_id):
         try:
             if hasattr(result, 'result') and hasattr(result.result, 'message'):
-                text = result.result.message.content[0].text
+                msg = result.result.message
+                text = msg.content[0].text
                 results.append(text)
+                # استخراج التوكنز من كل نتيجة
+                if hasattr(msg, 'usage') and msg.usage:
+                    inp = getattr(msg.usage, 'input_tokens', 0) or 0
+                    out = getattr(msg.usage, 'output_tokens', 0) or 0
+                    token_totals["input"] += inp
+                    token_totals["output"] += out
+                    token_totals["total"] += inp + out
             else:
                 results.append("")
         except (AttributeError, IndexError) as e:
             log(f"[!] فشل استخراج نتيجة: {str(e)}")
             results.append("")
+
+    if token_totals["total"] > 0:
+        log(f"  [tokens] إجمالي Claude Batch: input={token_totals['input']} output={token_totals['output']} total={token_totals['total']}")
+    batch_info._token_totals = token_totals
 
     return results
 
@@ -1307,16 +1327,28 @@ def _batch_retrieve_gemini_rest(batch_info: BatchInfo, api_key: str) -> list:
             code="BATCH_JOB_NOT_READY"
         )
 
-    # استخراج النتائج
+    # استخراج النتائج مع التوكنز
     results = []
+    token_totals = {"input": 0, "output": 0, "thinking": 0, "total": 0}
     responses = data.get('responses', [])
     for resp in responses:
         try:
             text = resp['candidates'][0]['content']['parts'][0]['text']
             results.append(text)
+            # استخراج التوكنز من كل response
+            usage = resp.get('usageMetadata', {})
+            if usage:
+                token_totals["input"] += usage.get('promptTokenCount', 0)
+                token_totals["output"] += usage.get('candidatesTokenCount', 0)
+                token_totals["thinking"] += usage.get('thoughtsTokenCount', 0)
+                token_totals["total"] += usage.get('totalTokenCount', 0)
         except (KeyError, IndexError) as e:
             log(f"[!] فشل استخراج نتيجة: {str(e)}")
             results.append("")
+
+    if token_totals["total"] > 0:
+        log(f"  [tokens] إجمالي Gemini REST Batch: input={token_totals['input']} output={token_totals['output']} thinking={token_totals['thinking']} total={token_totals['total']}")
+    batch_info._token_totals = token_totals
 
     return results
 
