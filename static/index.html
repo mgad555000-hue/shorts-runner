@@ -1478,7 +1478,7 @@ async function refreshRunDetail(runId) {
                                     `<button class="btn btn-danger btn-sm" onclick="cancelRun('${escJs(run.run_id)}')">الغاء</button>` : ''}
                                 ${['completed','failed'].includes(run.status) ?
                                     `<button class="btn btn-success btn-sm" onclick="downloadZip('${escJs(run.run_id)}')">تنزيل ZIP</button>
-                                     <button class="btn btn-ghost btn-sm" onclick="openOutputFolder('${escJs(run.input_folder)}','${escJs(run.recipe_name || '')}')">مجلد المخرجات</button>` : ''}
+                                     <button class="btn btn-ghost btn-sm" onclick="openRunOutputFolder('${escJs(run.run_id)}')">مجلد المخرجات</button>` : ''}
                             `;
                         }
                     }
@@ -1535,7 +1535,7 @@ function renderRunDetail(run, log, files) {
                         `<button class="btn btn-danger btn-sm" onclick="cancelRun('${escJs(run.run_id)}')">الغاء</button>` : ''}
                     ${['completed','failed'].includes(run.status) ?
                         `<button class="btn btn-success btn-sm" onclick="downloadZip('${escJs(run.run_id)}')">تنزيل ZIP</button>
-                         <button class="btn btn-ghost btn-sm" onclick="openOutputFolder('${escJs(run.input_folder)}','${escJs(run.recipe_name || '')}')">مجلد المخرجات</button>` : ''}
+                         <button class="btn btn-ghost btn-sm" onclick="openRunOutputFolder('${escJs(run.run_id)}')">مجلد المخرجات</button>` : ''}
                 </div>
             </div>
             <div class="detail-body">
@@ -1992,6 +1992,14 @@ async function openInputFolder() {
 async function openOutputFolder(channel, recipeName) {
     try {
         const res = await authFetch(`${API.replace('utilities','channels')}/${channel}/recipe-path/${encodeURIComponent(recipeName)}`);
+        const data = await res.json();
+        await openFolder(data.output_path);
+    } catch(e) { showAlert('error', e.message); }
+}
+
+async function openRunOutputFolder(runId) {
+    try {
+        const res = await authFetch(`${API}/runs/${runId}/output-path`);
         const data = await res.json();
         await openFolder(data.output_path);
     } catch(e) { showAlert('error', e.message); }

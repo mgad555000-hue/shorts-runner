@@ -1360,14 +1360,8 @@ def get_run_output_dir(run_id: str, output_relpath: str = None) -> Path:
 
 
 def _get_recipe_output_for_run(run: "Run", db: "Session") -> Path:
-    """مجلد المخرجات الدائم للتشغيلة — حيث recipe_runner يكتب فعلاً.
-    يبحث في مجلد الوصفة أولاً، ثم المجلد المؤقت كـ fallback."""
-    if run.recipe_name and run.input_folder:
-        db_recipe = db.query(Recipe).filter(Recipe.name == run.recipe_name).first()
-        folder_name = db_recipe.input_folder if db_recipe and db_recipe.input_folder else sanitize_folder_name(run.recipe_name).replace(' ', '_')
-        recipe_out = get_channel_path(run.input_folder) / folder_name / "output"
-        if recipe_out.exists():
-            return recipe_out
+    """مجلد الـ sandbox الخاص بالتشغيلة — كل تشغيلة ليها مجلد منفصل.
+    بيرجع مجلد sandbox (per-run) عشان كل تشغيلة تعرض ملفاتها هي بالظبط."""
     return get_run_output_dir(run.run_id, run.output_relpath)
 
 HOST_DATA_DIR = os.getenv("HOST_DATA_DIR", "C:/Users/w10/shorts-runner/data")
@@ -1377,10 +1371,29 @@ async def get_host_folder_path(docker_path: str, current_user: User = Depends(ge
     """تحويل مسار Docker لمسار Windows وإنشاء المجلد"""
     if not docker_path or ".." in docker_path:
         raise HTTPException(status_code=400, detail="مسار غير صالح")
-    if not docker_path.startswith("/app/data/"):
-        raise HTTPException(status_code=400, detail="المسار لازم يبدأ بـ /app/data/")
-    host_path = docker_path.replace("/app/data/", HOST_DATA_DIR + "/").replace("/", "\\")
+    HOST_ROOT = os.getenv("HOST_ROOT", "C:/Users/w10/shorts-runner")
+    if docker_path.startswith("/app/data/"):
+        host_path = docker_path.replace("/app/data/", HOST_DATA_DIR + "/")
+    elif docker_path.startswith("/app/longs/out/"):
+        host_path = docker_path.replace("/app/longs/out/", HOST_ROOT + "/longs/out/")
+    elif docker_path.startswith("/app/shorts/out/"):
+        host_path = docker_path.replace("/app/shorts/out/", HOST_ROOT + "/shorts/out/")
+    else:
+        raise HTTPException(status_code=400, detail="المسار لازم يبدأ بـ /app/data/ أو /app/longs/out/ أو /app/shorts/out/")
+    host_path = host_path.replace("/", "\\")
     return {"success": True, "path": host_path}
+
+
+@app.get("/api/utilities/runs/{run_id}/output-path")
+async def get_run_output_path(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """إرجاع مسار مجلد sandbox الخاص بالتشغيلة — للفتح من الواجهة"""
+    run = db.query(Run).filter(Run.run_id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="التشغيل غير موجود")
+    output_dir = get_run_output_dir(run.run_id, run.output_relpath)
+    # تحويل لمسار Docker (لتحويله في الواجهة)
+    docker_path = f"/app/{run.output_relpath}"
+    return {"output_path": str(docker_path), "exists": output_dir.exists()}
 
 
 def get_output_root_for_content(content_type: str) -> str:
