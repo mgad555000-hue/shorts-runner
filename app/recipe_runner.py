@@ -3865,12 +3865,10 @@ def _run_mode_receive_only(config, ctx, steps):
         log(f"  النتيجة: {combined[:100]}..." if len(combined) > 100 else f"  النتيجة: {combined}")
 
     else:
-        # fallback — معاملته كـ topics (التوافق مع metadata قديمة)
-        log(f"  [!] batch_mode غير معروف '{batch_mode}' — fallback لـ topics")
-        batch_results = _retry_truncated_batch_results(
-            batch_results, topics, marker_prefix, config, ctx, metadata
+        raise EngineError(
+            f"batch_mode غير معروف في الـ metadata: '{batch_mode}'. القيم المتاحة: topics, markers, single",
+            code="UNKNOWN_BATCH_MODE"
         )
-        combined = _reassemble_batch_results(batch_results, topics, marker_prefix)
 
     # فلترة النتائج حسب TOPIC_IDS (لو محدد أرقام مختلفة عن الإرسال الأصلي)
     if ctx.topic_ids:
