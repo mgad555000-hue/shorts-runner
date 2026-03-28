@@ -773,7 +773,7 @@ def _download_from_gcs(gcs_uri: str) -> str:
     return "\n".join(all_content)
 
 
-def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None) -> BatchInfo:
+def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None, labels: dict = None) -> BatchInfo:
     """إرسال دفعة عبر Gemini Batch API (يحتاج GCS)"""
     import json
     from google import genai
@@ -817,7 +817,13 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
     log(f"  رفع الطلبات إلى: {input_uri}")
 
     # إنشاء الـ Batch Job — نجرب الـ location الأصلي، ولو NOT_FOUND نجرب global
-    job_name = f"batch-{timestamp}"
+    # display_name يحتوي على run_id + recipe للتتبع في Google Cloud Console
+    run_id = (labels or {}).get("run_id", "")
+    recipe = (labels or {}).get("recipe", "")
+    if run_id:
+        job_name = f"mgr-{run_id[:8]}-{recipe[:20]}-{timestamp}" if recipe else f"mgr-{run_id[:8]}-{timestamp}"
+    else:
+        job_name = f"mgr-batch-{timestamp}"
     locations_to_try = [location, "global"] if location != "global" else ["global"]
     last_err = None
 
@@ -835,7 +841,8 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
                 provider="gemini", model=model, job_id=job_id, job_name=job_full_name,
                 item_order=list(range(len(prompts))), items_count=len(prompts),
                 created_at=datetime.now().isoformat(), status="submitted",
-                extra={"display_name": job_name, "input_uri": input_uri, "method": "sdk", "location": loc}
+                extra={"display_name": job_name, "input_uri": input_uri, "method": "sdk", "location": loc,
+                       "labels": labels or {}}
             )
         except Exception as e:
             last_err = e
@@ -1001,7 +1008,12 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
     log(f"  رفع الطلبات إلى: {input_uri}")
 
     # إنشاء مهمة Batch مع labels للتتبع في Google Cloud Billing
-    job_display_name = f"vertex-batch-{timestamp}"
+    _run_id = (labels or {}).get("run_id", "")
+    _recipe = (labels or {}).get("recipe", "")
+    if _run_id:
+        job_display_name = f"mgr-{_run_id[:8]}-{_recipe[:20]}-{timestamp}" if _recipe else f"mgr-{_run_id[:8]}-{timestamp}"
+    else:
+        job_display_name = f"mgr-vertex-{timestamp}"
     job_labels = {}
     if labels:
         # تنظيف Labels حسب شروط Google Cloud (أحرف صغيرة، أرقام، شرطات سفلية فقط، max 63 chars)
@@ -1062,7 +1074,7 @@ def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: 
     try:
         if provider == "gemini" and method == "sdk":
             batch_info = _retry_call(
-                lambda: _batch_send_gemini(prompts, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level),
+                lambda: _batch_send_gemini(prompts, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, labels=labels),
                 max_retries=3, base_delay=3.0, description=f"Gemini Batch SDK {model}"
             )
         elif provider == "gemini" and method == "rest":

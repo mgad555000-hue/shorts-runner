@@ -2965,7 +2965,7 @@ def action_regenerate_failed(step, ctx):
 
         if result.success:
             regenerated[script_num] = result.data
-            ctx.record_usage(step["id"], "direct", result.provider, result.model, result.token_usage)
+            ctx.record_usage(f"{step['id']}_SCRIPT_{script_num}", "retry_direct", result.provider, result.model, result.token_usage)
             log(f"  [✓] SCRIPT_{script_num}: تم إعادة التوليد")
         else:
             log(f"  [X] SCRIPT_{script_num}: فشل إعادة التوليد: {result.error}")
@@ -3401,6 +3401,12 @@ def _retry_truncated_batch_results(batch_results, topics, marker_prefix, config,
                     new_text = result.data.strip()
                     old_len = len(batch_results[batch_idx])
                     new_len = len(new_text)
+
+                    # تسجيل التوكنز — retry_direct (تكلفة كاملة مش باتش)
+                    ctx.record_usage(
+                        f"retry_truncated_SCRIPT_{topic_id}",
+                        "retry_direct", result.provider, result.model, result.token_usage
+                    )
 
                     end_marker = f"<<<END_{marker_prefix}>>>"
                     has_end = end_marker in new_text
@@ -3997,6 +4003,12 @@ def _retry_truncated_marker_split(batch_results, prompts, gen_step, ctx, batch_i
                     new_text = result.data.strip()
                     has_end = '<<<END_' in new_text
 
+                    # تسجيل التوكنز — retry_direct (تكلفة كاملة مش باتش)
+                    ctx.record_usage(
+                        f"retry_marker_{marker_id}",
+                        "retry_direct", result.provider, result.model, result.token_usage
+                    )
+
                     if has_end:
                         old_len = len(batch_results[trunc_idx]) if batch_results[trunc_idx] else 0
                         batch_results[trunc_idx] = new_text
@@ -4288,8 +4300,10 @@ def run_pipeline(config):
     elif mode == "batch_auto":
         _run_mode_batch_auto(config, ctx, steps)
     else:
-        log(f"[!] وضع غير معروف '{mode}' — fallback لوضع فوري")
-        _run_steps(steps, ctx)
+        raise EngineError(
+            f"وضع تشغيل غير معروف: '{mode}'. الأوضاع المتاحة: instant, send_only, receive_only, batch_auto",
+            code="UNKNOWN_EXECUTION_MODE"
+        )
 
     # حفظ ملخص استهلاك التوكنز
     ctx.save_usage_summary()
