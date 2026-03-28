@@ -635,11 +635,18 @@ async def create_all_recipe_folders(admin: User = Depends(require_admin), db: Se
 # ========== API - مسارات المجلدات ==========
 
 @app.get("/api/channels/{channel}/recipe-path/{recipe_name}")
-async def get_recipe_paths(channel: str, recipe_name: str, current_user: User = Depends(get_current_user)):
-    """الحصول على مسارات input/output لوصفة في قناة"""
+async def get_recipe_paths(channel: str, recipe_name: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """الحصول على مسارات input/output لوصفة في قناة — يستخدم input_folder من DB أولاً"""
     validate_channel_name(channel)
-    input_path = get_recipe_input_path(channel, recipe_name)
-    output_path = get_recipe_output_path(channel, recipe_name)
+    # الأولوية لـ input_folder المسجّل في DB (نفس اللي execute_run بيستخدمه)
+    db_recipe = db.query(Recipe).filter(Recipe.name == recipe_name).first()
+    if db_recipe and db_recipe.input_folder:
+        folder_name = db_recipe.input_folder
+    else:
+        folder_name = sanitize_folder_name(recipe_name).replace(' ', '_')
+    channel_path = get_channel_path(channel)
+    input_path = channel_path / folder_name / "input"
+    output_path = channel_path / folder_name / "output"
     input_path.mkdir(parents=True, exist_ok=True)
     output_path.mkdir(parents=True, exist_ok=True)
     return {
@@ -1082,10 +1089,11 @@ async def list_run_files(run_id: str, current_user: User = Depends(get_current_u
     run = db.query(Run).filter(Run.run_id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="التشغيل غير موجود")
-    output_dir = get_run_output_dir(run_id, run.output_relpath)
+    output_dir = _get_recipe_output_for_run(run, db)
     if not output_dir.exists():
         return {"files": []}
-    files = [{"name": f.name, "size": f.stat().st_size, "path": f"/api/utilities/runs/{run_id}/files/{f.name}"} for f in output_dir.iterdir() if f.is_file()]
+    skip = {"script.py", "recipe_config.json", "result_manifest.json", "run_log.txt"}
+    files = [{"name": f.name, "size": f.stat().st_size, "path": f"/api/utilities/runs/{run_id}/files/{f.name}"} for f in output_dir.iterdir() if f.is_file() and f.name not in skip]
     return {"files": sorted(files, key=lambda x: x["name"])}
 
 
@@ -1096,7 +1104,8 @@ async def get_run_file(run_id: str, filename: str, current_user: User = Depends(
     run = db.query(Run).filter(Run.run_id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="التشغيل غير موجود")
-    file_path = get_run_output_dir(run_id, run.output_relpath) / filename
+    output_dir = _get_recipe_output_for_run(run, db)
+    file_path = output_dir / filename
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="الملف غير موجود")
     return FileResponse(file_path)
@@ -1107,7 +1116,7 @@ async def download_run_outputs(run_id: str, current_user: User = Depends(get_cur
     run = db.query(Run).filter(Run.run_id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="التشغيل غير موجود")
-    output_dir = get_run_output_dir(run_id, run.output_relpath)
+    output_dir = _get_recipe_output_for_run(run, db)
     if not output_dir.exists():
         raise HTTPException(status_code=404, detail="مجلد الإخراج غير موجود")
     zip_buffer = io.BytesIO()
@@ -1339,10 +1348,22 @@ async def update_settings(updates: SettingsUpdate, admin: User = Depends(require
 # ========== مسارات المجلدات على الجهاز المضيف ==========
 
 def get_run_output_dir(run_id: str, output_relpath: str = None) -> Path:
-    """تحديد مجلد الإخراج بناءً على output_relpath أو البحث في المسارين"""
+    """مجلد sandbox المؤقت (script.py و config فقط)"""
     if output_relpath and output_relpath.startswith("longs/"):
         return Path(LONGS_OUTPUT_ROOT) / run_id
     return Path(OUTPUT_ROOT) / run_id
+
+
+def _get_recipe_output_for_run(run: "Run", db: "Session") -> Path:
+    """مجلد المخرجات الدائم للتشغيلة — حيث recipe_runner يكتب فعلاً.
+    يبحث في مجلد الوصفة أولاً، ثم المجلد المؤقت كـ fallback."""
+    if run.recipe_name and run.input_folder:
+        db_recipe = db.query(Recipe).filter(Recipe.name == run.recipe_name).first()
+        folder_name = db_recipe.input_folder if db_recipe and db_recipe.input_folder else sanitize_folder_name(run.recipe_name).replace(' ', '_')
+        recipe_out = get_channel_path(run.input_folder) / folder_name / "output"
+        if recipe_out.exists():
+            return recipe_out
+    return get_run_output_dir(run.run_id, run.output_relpath)
 
 HOST_DATA_DIR = os.getenv("HOST_DATA_DIR", "C:/Users/w10/shorts-runner/data")
 
