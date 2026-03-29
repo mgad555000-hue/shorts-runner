@@ -989,11 +989,26 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
             db.commit()
 
         # حفظ بيانات استهلاك التوكنز من usage_summary.json
-        # recipe_runner بيكتب مباشرة في RECIPE_OUTPUT_DIR، فنبحث هناك أولاً
-        if actual_output_recipe and Path(actual_output_recipe).exists():
-            _save_usage_from_summary(db, run_id, Path(actual_output_recipe))
-        elif output_path:
+        # مهم: نقرأ من sandbox أولاً (per-run) — مش من مجلد الوصفة المشترك
+        # عشان مجلد الوصفة ممكن يكون فيه usage_summary من تشغيلة سابقة
+        _usage_saved = False
+        if output_path and (Path(output_path) / "usage_summary.json").exists():
             _save_usage_from_summary(db, run_id, Path(output_path))
+            _usage_saved = True
+        if not _usage_saved and actual_output_recipe:
+            # fallback: نقرأ من مجلد الوصفة بس نتحقق إن الـ run_id متطابق
+            usage_file = Path(actual_output_recipe) / "usage_summary.json"
+            if usage_file.exists():
+                try:
+                    import json as _json
+                    with open(usage_file, "r", encoding="utf-8") as _f:
+                        _summary = _json.load(_f)
+                    if _summary.get("run_id") == run_id:
+                        _save_usage_from_summary(db, run_id, Path(actual_output_recipe))
+                    else:
+                        print(f"[USAGE] تخطي usage_summary — run_id مختلف: {_summary.get('run_id', '?')[:8]} != {run_id[:8]}")
+                except Exception as _e:
+                    print(f"[USAGE] خطأ في قراءة usage_summary: {_e}")
 
         # نسخ ملفات الإخراج من مجلد الوصفة للـ sandbox — عشان كل تشغيلة يكون عندها نسختها
         if actual_output_recipe and output_path:
