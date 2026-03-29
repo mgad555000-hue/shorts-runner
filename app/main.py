@@ -995,16 +995,24 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
         elif output_path:
             _save_usage_from_summary(db, run_id, Path(output_path))
 
-        # recipe_runner بيكتب مباشرة في RECIPE_OUTPUT_DIR — مفيش حاجة تتنسخ
-        # المجلد المؤقت (output_path) فيه بس script.py و recipe_config.json
-        if actual_output_recipe:
+        # نسخ ملفات الإخراج من مجلد الوصفة للـ sandbox — عشان كل تشغيلة يكون عندها نسختها
+        if actual_output_recipe and output_path:
             recipe_out = Path(actual_output_recipe).resolve()
-            if recipe_out.exists():
-                out_files = [f.name for f in recipe_out.iterdir() if f.is_file()]
-                print(f"[OUTPUT] المخرجات في المجلد الدائم مباشرة: {recipe_out}")
-                print(f"[OUTPUT] عدد الملفات: {len(out_files)}")
+            sandbox_out = Path(output_path).resolve()
+            if recipe_out.exists() and sandbox_out.exists():
+                skip_files = {"script.py", "recipe_config.json", "result_manifest.json", "run_log.txt"}
+                copied = 0
+                for f in recipe_out.iterdir():
+                    if f.is_file() and f.name not in skip_files:
+                        dest = sandbox_out / f.name
+                        if not dest.exists():
+                            shutil.copy2(f, dest)
+                            copied += 1
+                out_files = [f.name for f in sandbox_out.iterdir() if f.is_file() and f.name not in skip_files]
+                print(f"[OUTPUT] نسخ {copied} ملف من مجلد الوصفة للـ sandbox: {sandbox_out}")
+                print(f"[OUTPUT] عدد ملفات الإخراج: {len(out_files)}")
                 for fname in out_files[:20]:
-                    fpath = recipe_out / fname
+                    fpath = sandbox_out / fname
                     print(f"[OUTPUT]   - {fname} ({fpath.stat().st_size} bytes)")
 
                 # التحقق من WAV الفاسد
