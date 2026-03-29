@@ -2805,9 +2805,61 @@ def action_filter_by_topics(step, ctx):
     return "\n\n".join(filtered)
 
 
+def _check_brackets_pattern(part_text):
+    """فحص وجود أقواس مربعة حول حروف عربية — مثل: التَّكَيُّسَا[ت]"""
+    bracket_matches = re.findall(r'\[[^\[\]]{1,3}\]', part_text)
+    # فلتر: بس اللي جواهم حرف عربي
+    arabic_brackets = [m for m in bracket_matches if re.search(r'[\u0621-\u064A]', m)]
+    return arabic_brackets
+
+
+def _check_single_letters(part_text, tashkeel_chars):
+    """فحص الحروف المنفردة — كل كلمة حرف عربي واحد بس (بعد شيل التشكيل)."""
+    words = part_text.split()
+    if len(words) < 5:
+        return 0, 0
+    single_count = 0
+    for w in words:
+        clean = re.sub(f'[{tashkeel_chars}]', '', w).strip()
+        # شيل علامات الترقيم
+        clean = re.sub(r'[.،؟!:\-]', '', clean)
+        arabic_only = re.sub(r'[^\u0621-\u064A]', '', clean)
+        if len(arabic_only) == 1:
+            single_count += 1
+    pct = (single_count / len(words)) * 100 if words else 0
+    return single_count, pct
+
+
+def _check_truncated_words(part_text, tashkeel_chars):
+    """فحص الكلمات المبتورة — كلمات من حرفين عربيين أو أقل (بعد شيل التشكيل).
+    نسبة عالية = مشكلة (طبيعي 5-10%، مشكلة > 20%).
+    """
+    words = part_text.split()
+    if len(words) < 5:
+        return 0, 0
+    short_count = 0
+    # كلمات عربية شائعة من حرفين (مش مبتورة)
+    COMMON_SHORT = {'في', 'من', 'أو', 'لا', 'ما', 'هو', 'هي', 'أن', 'إن', 'قد', 'لم', 'لن', 'بل', 'كل', 'بس', 'يا', 'عن', 'مع', 'بك', 'لك', 'له', 'لي', 'بي', 'ذا', 'دا', 'ده', 'دي'}
+    for w in words:
+        clean = re.sub(f'[{tashkeel_chars}]', '', w).strip()
+        clean = re.sub(r'[.،؟!:\-\[\]]', '', clean)
+        arabic_only = re.sub(r'[^\u0621-\u064A]', '', clean)
+        if 0 < len(arabic_only) <= 2 and clean not in COMMON_SHORT:
+            short_count += 1
+    pct = (short_count / len(words)) * 100 if words else 0
+    return short_count, pct
+
+
+def _check_split_hamza(part_text):
+    """فحص الهمزة المنفصلة — مثل: إ لَى بدل إِلَى، أ نَّ بدل أَنَّ."""
+    # همزة وحيدة (إ أ) متبوعة بمسافة ثم كلمة
+    split_matches = re.findall(r'(?:^|\s)([إأ])\s+(\S+)', part_text)
+    return split_matches
+
+
 def action_validate_texts(step, ctx):
     """مراجعة النصوص والتحقق من سلامتها.
-    يفحص: عدد الأجزاء، عدد الكلمات، كلمات مقطوعة، قطعة واحدة، علامة ترقيم.
+    يفحص: عدد الأجزاء، عدد الكلمات، أقواس مربعة، حروف منفردة، كلمات مبتورة، همزة منفصلة، علامة ترقيم.
     يصلح: دمج أسطر، إضافة نقطة في الآخر.
     يرجع: النص المصلح + قائمة الموضوعات الفاشلة في ctx.results[step_id + '_failed']
     """
@@ -2815,6 +2867,11 @@ def action_validate_texts(step, ctx):
     min_words = step.get("min_words", 70)
     max_words = step.get("max_words", 130)
     expected_parts = step.get("expected_parts", 4)
+    # حدود الفحوصات الجديدة (قابلة للتعديل من الوصفة)
+    bracket_threshold = step.get("bracket_threshold", 3)        # أكتر من 3 أقواس = فاشل
+    single_letter_pct = step.get("single_letter_pct", 15)       # أكتر من 15% حروف منفردة = فاشل
+    truncated_pct = step.get("truncated_pct", 20)               # أكتر من 20% كلمات مبتورة = فاشل
+    split_hamza_threshold = step.get("split_hamza_threshold", 3) # أكتر من 3 همزات منفصلة = فاشل
 
     TASHKEEL = '\u064B\u064C\u064D\u064E\u064F\u0650\u0651\u0652\u0670'
     pattern = r'(<<<SCRIPT_(\d+)>>>)(.*?)(<<<END_SCRIPT>>>)'
@@ -2869,18 +2926,32 @@ def action_validate_texts(step, ctx):
             words = part_text.split()
             word_count = len(words)
             if word_count < min_words or word_count > max_words:
-                script_issues.append(f"Part {part_num}: {word_count} كلمة (النطاق {min_words}-{max_words})")
+                script_issues.append(f"P{part_num}: {word_count} كلمة (النطاق {min_words}-{max_words})")
                 script_failed = True
 
-            # فحص 3: كلمات مقطوعة (كلمة أقل من 2 حرف عربي في آخر النص)
-            if words:
-                last_word = words[-1].rstrip('.،؟!')
-                # شيل التشكيل
-                clean_last = re.sub(f'[{TASHKEEL}]', '', last_word)
-                arabic_letters = re.sub(r'[^\u0621-\u064A]', '', clean_last)
-                if len(arabic_letters) <= 1 and len(words) > 3:
-                    script_issues.append(f"Part {part_num}: كلمة مقطوعة محتملة '{last_word}'")
-                    script_failed = True
+            # فحص 3: أقواس مربعة حول حروف — [ت] [ة] [ن]
+            brackets = _check_brackets_pattern(part_text)
+            if len(brackets) > bracket_threshold:
+                script_issues.append(f"P{part_num}: {len(brackets)} قوس مربع — أقواس حول حروف")
+                script_failed = True
+
+            # فحص 4: حروف منفردة كارثية — كل كلمة = حرف واحد
+            single_count, single_pct_val = _check_single_letters(part_text, TASHKEEL)
+            if single_pct_val > single_letter_pct:
+                script_issues.append(f"P{part_num}: {single_count} حرف منفرد ({single_pct_val:.0f}%) — نص مفكّك")
+                script_failed = True
+
+            # فحص 5: كلمات مبتورة — نسبة عالية من كلمات حرفين أو أقل
+            trunc_count, trunc_pct_val = _check_truncated_words(part_text, TASHKEEL)
+            if trunc_pct_val > truncated_pct:
+                script_issues.append(f"P{part_num}: {trunc_count} كلمة مبتورة ({trunc_pct_val:.0f}%) — قطع في النص")
+                script_failed = True
+
+            # فحص 6: همزة منفصلة — إ لَى بدل إِلَى
+            split_hamzas = _check_split_hamza(part_text)
+            if len(split_hamzas) > split_hamza_threshold:
+                script_issues.append(f"P{part_num}: {len(split_hamzas)} همزة منفصلة — مثل 'إ لَى'")
+                script_failed = True
 
             fixed_content_parts.append(f"<<<PART_{part_num}>>>\n{part_text}\n<<<END_PART>>>")
 
