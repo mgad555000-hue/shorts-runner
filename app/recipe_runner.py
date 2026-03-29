@@ -2808,7 +2808,6 @@ def action_filter_by_topics(step, ctx):
 def _check_brackets_pattern(part_text):
     """فحص وجود أقواس مربعة حول حروف عربية — مثل: التَّكَيُّسَا[ت]"""
     bracket_matches = re.findall(r'\[[^\[\]]{1,3}\]', part_text)
-    # فلتر: بس اللي جواهم حرف عربي
     arabic_brackets = [m for m in bracket_matches if re.search(r'[\u0621-\u064A]', m)]
     return arabic_brackets
 
@@ -2821,7 +2820,6 @@ def _check_single_letters(part_text, tashkeel_chars):
     single_count = 0
     for w in words:
         clean = re.sub(f'[{tashkeel_chars}]', '', w).strip()
-        # شيل علامات الترقيم
         clean = re.sub(r'[.،؟!:\-]', '', clean)
         arabic_only = re.sub(r'[^\u0621-\u064A]', '', clean)
         if len(arabic_only) == 1:
@@ -2838,7 +2836,6 @@ def _check_truncated_words(part_text, tashkeel_chars):
     if len(words) < 5:
         return 0, 0
     short_count = 0
-    # كلمات عربية شائعة من حرفين (مش مبتورة)
     COMMON_SHORT = {'في', 'من', 'أو', 'لا', 'ما', 'هو', 'هي', 'أن', 'إن', 'قد', 'لم', 'لن', 'بل', 'كل', 'بس', 'يا', 'عن', 'مع', 'بك', 'لك', 'له', 'لي', 'بي', 'ذا', 'دا', 'ده', 'دي'}
     for w in words:
         clean = re.sub(f'[{tashkeel_chars}]', '', w).strip()
@@ -2852,9 +2849,91 @@ def _check_truncated_words(part_text, tashkeel_chars):
 
 def _check_split_hamza(part_text):
     """فحص الهمزة المنفصلة — مثل: إ لَى بدل إِلَى، أ نَّ بدل أَنَّ."""
-    # همزة وحيدة (إ أ) متبوعة بمسافة ثم كلمة
     split_matches = re.findall(r'(?:^|\s)([إأ])\s+(\S+)', part_text)
     return split_matches
+
+
+def _check_repeated_words(part_text, tashkeel_chars):
+    """فحص تكرار كلمات متتالية — مثل: الكلى الكلى الكلى (AI stuttering)."""
+    words = part_text.split()
+    if len(words) < 5:
+        return 0
+    repeated = 0
+    for i in range(1, len(words)):
+        w_prev = re.sub(f'[{tashkeel_chars}]', '', words[i-1]).strip().rstrip('.،؟!')
+        w_curr = re.sub(f'[{tashkeel_chars}]', '', words[i]).strip().rstrip('.،؟!')
+        if w_prev and w_curr and w_prev == w_curr and len(w_prev) > 2:
+            repeated += 1
+    return repeated
+
+
+def _check_latin_chars(part_text):
+    """فحص وجود حروف لاتينية في النص العربي."""
+    latin_matches = re.findall(r'[a-zA-Z]{2,}', part_text)
+    # استثناء: كلمات علمية شائعة مسموح بيها
+    ALLOWED_LATIN = {'pH', 'mg', 'ml', 'kg', 'cm', 'mm', 'DNA', 'RNA', 'BMI', 'GFR', 'HDL', 'LDL', 'II', 'III', 'IV'}
+    filtered = [m for m in latin_matches if m not in ALLOWED_LATIN]
+    return filtered
+
+
+def _check_markdown_artifacts(part_text):
+    """فحص بقايا تنسيق Markdown — **bold**, ##heading, -list, *italic*."""
+    artifacts = []
+    if re.search(r'\*\*[^*]+\*\*', part_text):
+        artifacts.append('**bold**')
+    if re.search(r'^#{1,3}\s', part_text, re.MULTILINE):
+        artifacts.append('## heading')
+    if re.search(r'^\s*[-*]\s+\S', part_text, re.MULTILINE):
+        artifacts.append('- list')
+    if re.search(r'(?<!\*)\*(?!\*)[^*\s][^*]*[^*\s]\*(?!\*)', part_text):
+        artifacts.append('*italic*')
+    if re.search(r'`[^`]+`', part_text):
+        artifacts.append('`code`')
+    return artifacts
+
+
+def _check_missing_tashkeel(part_text, tashkeel_chars):
+    """فحص غياب التشكيل — لو النص المفروض مشكّل بس مفيهوش تشكيل."""
+    arabic_chars = re.findall(r'[\u0621-\u064A]', part_text)
+    tashkeel_found = re.findall(f'[{tashkeel_chars}]', part_text)
+    if len(arabic_chars) < 20:
+        return 0.0
+    ratio = len(tashkeel_found) / len(arabic_chars) * 100
+    return ratio
+
+
+def _check_repeated_phrases(part_text, tashkeel_chars):
+    """فحص تكرار جمل أو عبارات كاملة (3+ كلمات متتالية مكررة)."""
+    words = part_text.split()
+    if len(words) < 15:
+        return 0
+    # فحص trigrams (3 كلمات)
+    clean_words = [re.sub(f'[{tashkeel_chars}]', '', w).strip().rstrip('.،؟!') for w in words]
+    trigrams = {}
+    repeated = 0
+    for i in range(len(clean_words) - 2):
+        tri = ' '.join(clean_words[i:i+3])
+        if len(tri) > 6:  # تجاهل trigrams قصيرة جداً
+            trigrams[tri] = trigrams.get(tri, 0) + 1
+    for tri, count in trigrams.items():
+        if count >= 3:  # نفس العبارة 3 مرات أو أكثر
+            repeated += count - 1
+    return repeated
+
+
+def _check_digit_numbers(part_text):
+    """فحص وجود أرقام (digits) في النص — المفروض تكون مكتوبة بالحروف."""
+    # استثناء: أرقام في سياق طبي/علمي مقبولة (pH 6.5, 500mg)
+    # بس أرقام كبيرة لوحدها غير مقبولة
+    digit_matches = re.findall(r'(?<!\S)\d{3,}(?!\S)', part_text)  # 3+ أرقام متتالية
+    return digit_matches
+
+
+def _check_unclosed_parens(part_text):
+    """فحص أقواس غير مغلقة."""
+    open_paren = part_text.count('(') - part_text.count(')')
+    open_bracket = part_text.count('[') - part_text.count(']')
+    return abs(open_paren) + abs(open_bracket)
 
 
 def action_validate_texts(step, ctx):
@@ -2867,11 +2946,15 @@ def action_validate_texts(step, ctx):
     min_words = step.get("min_words", 70)
     max_words = step.get("max_words", 130)
     expected_parts = step.get("expected_parts", 4)
-    # حدود الفحوصات الجديدة (قابلة للتعديل من الوصفة)
-    bracket_threshold = step.get("bracket_threshold", 3)        # أكتر من 3 أقواس = فاشل
-    single_letter_pct = step.get("single_letter_pct", 15)       # أكتر من 15% حروف منفردة = فاشل
-    truncated_pct = step.get("truncated_pct", 20)               # أكتر من 20% كلمات مبتورة = فاشل
-    split_hamza_threshold = step.get("split_hamza_threshold", 3) # أكتر من 3 همزات منفصلة = فاشل
+    # حدود الفحوصات (قابلة للتعديل من الوصفة)
+    bracket_threshold = step.get("bracket_threshold", 3)          # أكتر من 3 أقواس = فاشل
+    single_letter_pct = step.get("single_letter_pct", 15)         # أكتر من 15% حروف منفردة = فاشل
+    truncated_pct = step.get("truncated_pct", 20)                 # أكتر من 20% كلمات مبتورة = فاشل
+    split_hamza_threshold = step.get("split_hamza_threshold", 3)   # أكتر من 3 همزات منفصلة = فاشل
+    repeated_words_threshold = step.get("repeated_words_threshold", 3)  # أكتر من 3 تكرارات = فاشل
+    latin_threshold = step.get("latin_threshold", 2)               # أكتر من 2 كلمات لاتينية = فاشل
+    min_tashkeel_pct = step.get("min_tashkeel_pct", 15)            # أقل من 15% تشكيل = فاشل
+    repeated_phrases_threshold = step.get("repeated_phrases_threshold", 3)  # تكرار عبارات = فاشل
 
     TASHKEEL = '\u064B\u064C\u064D\u064E\u064F\u0650\u0651\u0652\u0670'
     pattern = r'(<<<SCRIPT_(\d+)>>>)(.*?)(<<<END_SCRIPT>>>)'
@@ -2951,6 +3034,53 @@ def action_validate_texts(step, ctx):
             split_hamzas = _check_split_hamza(part_text)
             if len(split_hamzas) > split_hamza_threshold:
                 script_issues.append(f"P{part_num}: {len(split_hamzas)} همزة منفصلة — مثل 'إ لَى'")
+                script_failed = True
+
+            # فحص 7: تكرار كلمات متتالية (AI stuttering)
+            repeated_w = _check_repeated_words(part_text, TASHKEEL)
+            if repeated_w > repeated_words_threshold:
+                script_issues.append(f"P{part_num}: {repeated_w} كلمة مكررة متتالية — تكرار AI")
+                script_failed = True
+
+            # فحص 8: حروف لاتينية في نص عربي
+            latin = _check_latin_chars(part_text)
+            if len(latin) > latin_threshold:
+                script_issues.append(f"P{part_num}: {len(latin)} كلمة لاتينية — '{', '.join(latin[:3])}'")
+                script_failed = True
+
+            # فحص 9: بقايا Markdown
+            md_artifacts = _check_markdown_artifacts(part_text)
+            if md_artifacts:
+                script_issues.append(f"P{part_num}: بقايا Markdown — {', '.join(md_artifacts)}")
+                script_failed = True
+
+            # فحص 10: غياب التشكيل
+            tashkeel_ratio = _check_missing_tashkeel(part_text, TASHKEEL)
+            if 0 < tashkeel_ratio < min_tashkeel_pct:
+                script_issues.append(f"P{part_num}: تشكيل {tashkeel_ratio:.0f}% فقط — نص بدون تشكيل كافي")
+                script_failed = True
+
+            # فحص 11: تكرار عبارات كاملة (3+ كلمات)
+            repeated_ph = _check_repeated_phrases(part_text, TASHKEEL)
+            if repeated_ph > repeated_phrases_threshold:
+                script_issues.append(f"P{part_num}: {repeated_ph} عبارة مكررة — تكرار محتوى")
+                script_failed = True
+
+            # فحص 12: أرقام digits في النص
+            digits = _check_digit_numbers(part_text)
+            if digits:
+                script_issues.append(f"P{part_num}: أرقام رقمية — '{', '.join(digits[:3])}'")
+                script_failed = True
+
+            # فحص 13: أقواس غير مغلقة
+            unclosed = _check_unclosed_parens(part_text)
+            if unclosed > 0:
+                script_issues.append(f"P{part_num}: {unclosed} قوس غير مغلق")
+                script_failed = True
+
+            # فحص 14: جزء فارغ أو شبه فارغ
+            if word_count < 5:
+                script_issues.append(f"P{part_num}: جزء فارغ ({word_count} كلمات)")
                 script_failed = True
 
             fixed_content_parts.append(f"<<<PART_{part_num}>>>\n{part_text}\n<<<END_PART>>>")
