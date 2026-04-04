@@ -91,7 +91,7 @@ class PipelineContext:
             return resolved
         return [resolved]
 
-    def record_usage(self, step_id: str, call_type: str, provider: str, model: str, token_usage: dict):
+    def record_usage(self, step_id: str, call_type: str, provider: str, model: str, token_usage: dict, send_run_id: str = None):
         """تسجيل استهلاك توكنز من API call"""
         if not token_usage or token_usage.get("total", 0) == 0:
             return
@@ -105,6 +105,8 @@ class PipelineContext:
             "thinking_tokens": token_usage.get("thinking", 0),
             "total_tokens": token_usage.get("total", 0),
         }
+        if send_run_id:
+            record["send_run_id"] = send_run_id
         self.usage_records.append(record)
 
     def save_usage_summary(self):
@@ -677,8 +679,16 @@ def action_batch_retrieve(step, ctx):
             result = batch_retrieve(batch_info_path=batch_info_path)
             if result.success:
                 log(f"  تم استقبال {len(result.data)} نتيجة")
+                # استخراج send_run_id الأصلي من batch_info (اللي اتبعت لجوجل)
+                _send_run_id = None
+                try:
+                    from engine import BatchInfo
+                    _bi = BatchInfo.load(batch_info_path)
+                    _send_run_id = (_bi.extra or {}).get("labels", {}).get("run_id", None)
+                except Exception:
+                    pass
                 # تسجيل استهلاك التوكنز من الباتش
-                ctx.record_usage(step["id"], "batch", result.provider, result.model, result.token_usage)
+                ctx.record_usage(step["id"], "batch", result.provider, result.model, result.token_usage, send_run_id=_send_run_id)
                 return result.data
         except EngineError as e:
             if e.code == "BATCH_JOB_NOT_READY":

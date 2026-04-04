@@ -104,6 +104,7 @@ class ApiUsage(Base):
     thinking_tokens = Column(Integer, default=0)
     total_tokens = Column(Integer, default=0)
     estimated_cost_usd = Column(Float, default=0.0)
+    send_run_id = Column(String, nullable=True)  # run_id الإرسال الأصلي (اللي بيظهر في جوجل)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -132,6 +133,13 @@ def _migrate_db():
         if "user_id" not in existing:
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE shorts_runs ADD COLUMN user_id INTEGER"))
+                conn.commit()
+    # إضافة send_run_id لجدول api_usage
+    if insp.has_table("api_usage"):
+        existing = {col["name"] for col in insp.get_columns("api_usage")}
+        if "send_run_id" not in existing:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE api_usage ADD COLUMN send_run_id TEXT"))
                 conn.commit()
 
 

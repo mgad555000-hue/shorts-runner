@@ -827,10 +827,25 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
     locations_to_try = [location, "global"] if location != "global" else ["global"]
     last_err = None
 
+    # تنظيف Labels حسب شروط Google Cloud (أحرف صغيرة، أرقام، شرطات فقط، max 63 chars)
+    job_labels = {}
+    if labels:
+        import re as _re
+        for k, v in labels.items():
+            clean_key = _re.sub(r'[^a-z0-9_-]', '_', str(k).lower())[:63]
+            clean_val = _re.sub(r'[^a-z0-9_-]', '_', str(v).lower())[:63]
+            if clean_key and clean_val:
+                job_labels[clean_key] = clean_val
+        if job_labels:
+            log(f"  [labels] Gemini Batch Labels: {job_labels}")
+
     for loc in locations_to_try:
         try:
             client = genai.Client(vertexai=True, project=project_id, location=loc)
-            batch_job = client.batches.create(model=model, src=input_uri, config={'display_name': job_name})
+            batch_config = {'display_name': job_name}
+            if job_labels:
+                batch_config['labels'] = job_labels
+            batch_job = client.batches.create(model=model, src=input_uri, config=batch_config)
 
             job_full_name = batch_job.name if hasattr(batch_job, 'name') else ""
             job_id = job_full_name.split('/')[-1] if job_full_name else job_name

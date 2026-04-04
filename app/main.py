@@ -855,8 +855,10 @@ def _estimate_cost(model: str, input_tokens: int, output_tokens: int, thinking_t
         pricing = {"input": 1.00, "output": 5.00, "thinking": 5.00, "batch_discount": 0.5}
 
     # كشف context tier (>200K tokens) — لو الموديل بيدعم tiers
+    # ⚠️ للباتش: مفيش 200K tier لأن input_tokens هنا مجموع كل البرومبتات
+    # وكل برومبت لوحده أقل بكتير من 200K — جوجل بتحسب لكل برومبت
     use_200k_tier = False
-    if "input_200k" in pricing and input_tokens > 200_000:
+    if "input_200k" in pricing and input_tokens > 200_000 and call_type != "batch":
         use_200k_tier = True
 
     if use_200k_tier:
@@ -912,6 +914,7 @@ def _save_usage_from_summary(db, run_id: str, output_dir: Path):
                 thinking_tokens=rec.get("thinking_tokens", 0),
                 total_tokens=rec.get("total_tokens", 0),
                 estimated_cost_usd=cost,
+                send_run_id=rec.get("send_run_id"),
             )
             db.add(usage)
         db.commit()
@@ -1203,14 +1206,16 @@ async def get_usage(
         else:
             by_model[r.model]["direct_calls"] += 1
 
-    # تجميع حسب التشغيلة
+    # تجميع حسب التشغيلة — استخدام send_run_id لو موجود (عشان يطابق جوجل)
     by_run = {}
     for r in records:
-        if r.run_id not in by_run:
-            by_run[r.run_id] = {"total_tokens": 0, "cost": 0, "calls": 0, "created_at": r.created_at.isoformat() if r.created_at else ""}
-        by_run[r.run_id]["total_tokens"] += r.total_tokens
-        by_run[r.run_id]["cost"] += r.estimated_cost_usd
-        by_run[r.run_id]["calls"] += 1
+        # المفتاح = send_run_id (الإرسال) لو موجود، وإلا run_id العادي
+        display_id = r.send_run_id if r.send_run_id else r.run_id
+        if display_id not in by_run:
+            by_run[display_id] = {"total_tokens": 0, "cost": 0, "calls": 0, "created_at": r.created_at.isoformat() if r.created_at else "", "receive_run_id": r.run_id}
+        by_run[display_id]["total_tokens"] += r.total_tokens
+        by_run[display_id]["cost"] += r.estimated_cost_usd
+        by_run[display_id]["calls"] += 1
 
     return {
         "period_days": days,
@@ -1226,7 +1231,8 @@ async def get_usage(
         "by_run": {k: {**v, "cost": round(v["cost"], 4)} for k, v in sorted(by_run.items(), key=lambda x: x[1]["cost"], reverse=True)[:50]},
         "records": [
             {
-                "run_id": r.run_id,
+                "run_id": r.send_run_id if r.send_run_id else r.run_id,
+                "receive_run_id": r.run_id if r.send_run_id else None,
                 "step_id": r.step_id,
                 "call_type": r.call_type,
                 "provider": r.provider,
@@ -1245,8 +1251,11 @@ async def get_usage(
 
 @app.get("/api/usage/run/{run_id}")
 async def get_run_usage(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """جلب استهلاك تشغيلة محددة"""
-    records = db.query(ApiUsage).filter(ApiUsage.run_id == run_id).all()
+    """جلب استهلاك تشغيلة محددة — بيدور بالـ run_id أو send_run_id"""
+    from sqlalchemy import or_
+    records = db.query(ApiUsage).filter(
+        or_(ApiUsage.run_id == run_id, ApiUsage.send_run_id == run_id)
+    ).all()
     if not records:
         return {"run_id": run_id, "records": [], "totals": {"total_tokens": 0, "estimated_cost_usd": 0}}
     total_cost = sum(r.estimated_cost_usd for r in records)
@@ -1276,6 +1285,25 @@ async def get_run_usage(run_id: str, current_user: User = Depends(get_current_us
             for r in records
         ],
     }
+
+
+@app.post("/api/usage/recalculate")
+async def recalculate_costs(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """إعادة حساب كل التكاليف بالمعادلة الصحيحة (بدون 200K tier للباتش)"""
+    records = db.query(ApiUsage).all()
+    updated = 0
+    total_old = 0
+    total_new = 0
+    for r in records:
+        old_cost = r.estimated_cost_usd
+        new_cost = _estimate_cost(r.model, r.input_tokens, r.output_tokens, r.thinking_tokens, call_type=r.call_type)
+        if abs(old_cost - new_cost) > 0.0001:
+            total_old += old_cost
+            total_new += new_cost
+            r.estimated_cost_usd = new_cost
+            updated += 1
+    db.commit()
+    return {"updated": updated, "total_old": round(total_old, 4), "total_new": round(total_new, 4)}
 
 
 @app.post("/api/utilities/cleanup", response_model=CleanupResponse)
