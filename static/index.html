@@ -1541,8 +1541,12 @@ function renderRunDetail(run, log, files) {
             <div class="detail-body">
                 <div class="detail-grid">
                     <div class="detail-field" style="grid-column: 1 / -1;">
-                        <div class="detail-field-label">Run ID</div>
+                        <div class="detail-field-label">Run ID (استقبال)</div>
                         <div class="detail-field-value" style="font-family:monospace; font-size:12px; cursor:pointer; user-select:all;" onclick="navigator.clipboard.writeText('${escJs(run.run_id)}').then(()=>this.style.color='#22c55e')" title="اضغط للنسخ">${esc(run.run_id)} 📋</div>
+                    </div>
+                    <div class="detail-field" style="grid-column: 1 / -1;" id="send-run-id-field-${escJs(run.run_id).substring(0,8)}">
+                        <div class="detail-field-label">Run ID (ارسال - Google Cloud)</div>
+                        <div class="detail-field-value" id="send-run-id-${escJs(run.run_id).substring(0,8)}" style="font-family:monospace; font-size:12px; color:#f7931a;">جاري التحميل...</div>
                     </div>
                     <div class="detail-field">
                         <div class="detail-field-label">المجلد</div>
@@ -1600,6 +1604,19 @@ async function fetchRunUsage(runId) {
                 el.innerHTML = `$${t.estimated_cost_usd.toFixed(4)} <span style="opacity:0.6; font-size:11px;">(${t.total_tokens.toLocaleString()} tokens | ${t.api_calls} calls)</span>`;
             } else {
                 el.textContent = 'لا توجد بيانات';
+            }
+        }
+        // عرض send_run_id (الإرسال اللي بيظهر في Google Cloud)
+        const sendEl = document.getElementById('send-run-id-' + runId.substring(0,8));
+        if (sendEl) {
+            if (data.send_run_id && typeof data.send_run_id === 'string') {
+                sendEl.innerHTML = `<span style="cursor:pointer; user-select:all;" onclick="navigator.clipboard.writeText('${data.send_run_id}').then(()=>this.style.color='#22c55e')" title="اضغط للنسخ">${data.send_run_id} 📋</span>`;
+            } else if (data.send_run_id && Array.isArray(data.send_run_id)) {
+                sendEl.textContent = data.send_run_id.map(id => id.substring(0,8)).join(', ');
+            } else {
+                // مفيش send_run_id = نفس الـ run (الإرسال والاستقبال واحد)
+                const field = document.getElementById('send-run-id-field-' + runId.substring(0,8));
+                if (field) field.style.display = 'none';
             }
         }
     } catch(e) {

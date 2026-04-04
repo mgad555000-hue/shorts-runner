@@ -1259,8 +1259,12 @@ async def get_run_usage(run_id: str, current_user: User = Depends(get_current_us
     if not records:
         return {"run_id": run_id, "records": [], "totals": {"total_tokens": 0, "estimated_cost_usd": 0}}
     total_cost = sum(r.estimated_cost_usd for r in records)
+    # استخراج send_run_id (الإرسال اللي بيظهر في جوجل)
+    send_ids = set(r.send_run_id for r in records if r.send_run_id)
+    send_run_id = send_ids.pop() if len(send_ids) == 1 else (list(send_ids) if send_ids else None)
     return {
         "run_id": run_id,
+        "send_run_id": send_run_id,
         "totals": {
             "input_tokens": sum(r.input_tokens for r in records),
             "output_tokens": sum(r.output_tokens for r in records),
@@ -1280,6 +1284,7 @@ async def get_run_usage(run_id: str, current_user: User = Depends(get_current_us
                 "thinking_tokens": r.thinking_tokens,
                 "total_tokens": r.total_tokens,
                 "estimated_cost_usd": round(r.estimated_cost_usd, 6),
+                "send_run_id": r.send_run_id,
                 "created_at": r.created_at.isoformat() if r.created_at else "",
             }
             for r in records
