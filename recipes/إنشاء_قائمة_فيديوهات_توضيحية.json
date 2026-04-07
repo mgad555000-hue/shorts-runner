@@ -9,8 +9,9 @@
     },
     {
       "id": "topics",
-      "action": "read_json",
-      "file": "topics.json",
+      "action": "read_docx",
+      "reconstruct_markers": true,
+      "marker_prefix": "SCRIPT",
       "label": "قراءة السكريبتات"
     },
     {
