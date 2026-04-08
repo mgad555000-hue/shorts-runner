@@ -1442,13 +1442,21 @@ async def get_host_folder_path(docker_path: str, current_user: User = Depends(ge
 
 @app.get("/api/utilities/runs/{run_id}/output-path")
 async def get_run_output_path(run_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """إرجاع مسار مجلد sandbox الخاص بالتشغيلة — للفتح من الواجهة"""
+    """إرجاع مسار مجلد المخرجات الحقيقي للوصفة (مش الـ sandbox)"""
     run = db.query(Run).filter(Run.run_id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="التشغيل غير موجود")
-    output_dir = get_run_output_dir(run.run_id, run.output_relpath)
-    # تحويل لمسار Docker (لتحويله في الواجهة)
+    # مسار مجلد المخرجات الحقيقي للوصفة
+    channel = run.input_folder
+    if run.recipe_id:
+        recipe = db.query(Recipe).filter(Recipe.id == run.recipe_id).first()
+        if recipe and recipe.input_folder:
+            docker_path = str(get_channel_path(channel) / recipe.input_folder / "output")
+            real_path = Path(docker_path)
+            return {"output_path": docker_path, "exists": real_path.exists()}
+    # fallback: sandbox path
     docker_path = f"/app/{run.output_relpath}"
+    output_dir = get_run_output_dir(run.run_id, run.output_relpath)
     return {"output_path": str(docker_path), "exists": output_dir.exists()}
 
 
