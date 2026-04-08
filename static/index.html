@@ -815,6 +815,7 @@
             <div class="btn-group">
                 <button class="btn btn-primary" id="runBtn" onclick="runCode()">تشغيل</button>
                 <button class="btn btn-ghost" onclick="openInputFolder()">فتح مجلد المدخلات</button>
+                <button class="btn btn-ghost" onclick="openLastRunOutput()">فتح مجلد المخرجات</button>
                 <button class="btn btn-ghost" onclick="clearCode()">مسح</button>
             </div>
         </div>
@@ -2020,6 +2021,16 @@ async function openRunOutputFolder(runId) {
         const data = await res.json();
         await openFolder(data.output_path);
     } catch(e) { showAlert('error', e.message); }
+}
+
+async function openLastRunOutput() {
+    const channel = document.getElementById('inputFolder').value;
+    const recipeId = document.getElementById('recipeSelect').value;
+    if (!channel) return showAlert('error', 'اختر القناة اولا');
+    if (!recipeId) return showAlert('error', 'اختر الوصفة اولا');
+    const recipe = allRecipes.find(r => r.id == recipeId);
+    if (!recipe) return;
+    await openOutputFolder(channel, recipe.name);
 }
 
 function esc(str) {
