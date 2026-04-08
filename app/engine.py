@@ -843,8 +843,6 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
         try:
             client = genai.Client(vertexai=True, project=project_id, location=loc)
             batch_config = {'display_name': job_name}
-            if job_labels:
-                batch_config['labels'] = job_labels
             batch_job = client.batches.create(model=model, src=input_uri, config=batch_config)
 
             job_full_name = batch_job.name if hasattr(batch_job, 'name') else ""
