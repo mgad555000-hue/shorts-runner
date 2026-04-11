@@ -624,10 +624,11 @@ def action_batch_send(step, ctx):
     if step.get("save_as"):
         save_path = ctx.output_path(step["save_as"])
 
-    # Labels للتتبع في Google Cloud Billing
+    # Labels للتتبع في Google Cloud — run_id الكامل يظهر في display_name
     batch_labels = {}
     if ctx.run_id:
         batch_labels["run_id"] = ctx.run_id
+        log(f"  [TRACKING] Run ID → Google Cloud: {ctx.run_id}")
     if ctx.recipe_name:
         batch_labels["recipe"] = ctx.recipe_name
     if ctx.channel_name:

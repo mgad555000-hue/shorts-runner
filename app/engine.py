@@ -809,21 +809,29 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
 
     jsonl_content = "\n".join(jsonl_lines)
 
-    # رفع JSONL إلى GCS
+    # رفع JSONL إلى GCS — مع run_id في المسار للتتبع
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    input_blob_name = f"batch_input/gemini_{timestamp}.jsonl"
+    _rid = (labels or {}).get("run_id", "")
+    if _rid:
+        input_blob_name = f"batch_input/{_rid}/gemini_{timestamp}.jsonl"
+    else:
+        input_blob_name = f"batch_input/gemini_{timestamp}.jsonl"
     input_uri = _upload_to_gcs(bucket_name, input_blob_name, jsonl_content)
 
     log(f"  رفع الطلبات إلى: {input_uri}")
 
     # إنشاء الـ Batch Job — نجرب الـ location الأصلي، ولو NOT_FOUND نجرب global
-    # display_name يحتوي على run_id + recipe للتتبع في Google Cloud Console
+    # display_name يحتوي على run_id الكامل + recipe للتتبع في Google Cloud Console
     run_id = (labels or {}).get("run_id", "")
     recipe = (labels or {}).get("recipe", "")
+    channel = (labels or {}).get("channel", "")
     if run_id:
-        job_name = f"mgr-{run_id[:8]}-{recipe[:20]}-{timestamp}" if recipe else f"mgr-{run_id[:8]}-{timestamp}"
+        job_name = f"mgr-{run_id}-{recipe[:20]}-{timestamp}" if recipe else f"mgr-{run_id}-{timestamp}"
     else:
         job_name = f"mgr-batch-{timestamp}"
+    if run_id:
+        log(f"  [RUN_ID] ✅ Run ID الكامل: {run_id}")
+        log(f"  [RUN_ID] ✅ display_name في Google Cloud: {job_name}")
     locations_to_try = [location, "global"] if location != "global" else ["global"]
     last_err = None
 
@@ -1011,12 +1019,16 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
 
     jsonl_content = "\n".join(jsonl_lines)
 
-    # رفع إلى GCS
+    # رفع إلى GCS — مع run_id في المسار للتتبع
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    input_blob_name = f"batch_input/vertex_{timestamp}.jsonl"
+    _pre_rid = (labels or {}).get("run_id", "")
+    if _pre_rid:
+        input_blob_name = f"batch_input/{_pre_rid}/vertex_{timestamp}.jsonl"
+        output_uri = f"gs://{bucket_name}/batch_output/{_pre_rid}/vertex_{timestamp}/"
+    else:
+        input_blob_name = f"batch_input/vertex_{timestamp}.jsonl"
+        output_uri = f"gs://{bucket_name}/batch_output/vertex_{timestamp}/"
     input_uri = _upload_to_gcs(bucket_name, input_blob_name, jsonl_content)
-
-    output_uri = f"gs://{bucket_name}/batch_output/vertex_{timestamp}/"
 
     log(f"  رفع الطلبات إلى: {input_uri}")
 
@@ -1024,9 +1036,13 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
     _run_id = (labels or {}).get("run_id", "")
     _recipe = (labels or {}).get("recipe", "")
     if _run_id:
-        job_display_name = f"mgr-{_run_id[:8]}-{_recipe[:20]}-{timestamp}" if _recipe else f"mgr-{_run_id[:8]}-{timestamp}"
+        job_display_name = f"mgr-{_run_id}-{_recipe[:20]}-{timestamp}" if _recipe else f"mgr-{_run_id}-{timestamp}"
     else:
         job_display_name = f"mgr-vertex-{timestamp}"
+    if _run_id:
+        log(f"  [RUN_ID] ✅ Run ID الكامل: {_run_id}")
+        log(f"  [RUN_ID] ✅ display_name في Google Cloud: {job_display_name}")
+        log(f"  [RUN_ID] ✅ Labels: {job_labels}")
     job_labels = {}
     if labels:
         # تنظيف Labels حسب شروط Google Cloud (أحرف صغيرة، أرقام، شرطات سفلية فقط، max 63 chars)
