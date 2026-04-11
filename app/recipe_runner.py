@@ -635,6 +635,10 @@ def action_batch_send(step, ctx):
         batch_labels["channel"] = ctx.channel_name
     batch_labels["step"] = step["id"]
 
+    # method: vertex = labels تظهر في Google Cloud Billing، sdk = بدون labels
+    batch_method = step.get("method", "vertex")
+    log(f"  [BATCH] method={batch_method} (vertex = labels في Billing)")
+
     result = batch_send(
         prompts=prompts,
         model=effective_model,
@@ -642,6 +646,7 @@ def action_batch_send(step, ctx):
         temperature=temperature,
         max_tokens=max_tokens,
         save_path=save_path,
+        method=batch_method,
         thinking_budget=thinking_budget,
         thinking_level=thinking_level,
         labels=batch_labels if batch_labels else None,
