@@ -25,7 +25,7 @@
       "input": "{prompt}",
       "model": "gemini-3.1-pro-preview",
       "max_tokens": 65536,
-      "temperature": 0.7,
+      "temperature": 0.5,
       "thinking_level": "high",
       "label": "توليد السكريبتات"
     },
@@ -61,7 +61,7 @@
       "input": "{tashkeel_prompt}",
       "model": "gemini-3.1-pro-preview",
       "max_tokens": 65536,
-      "temperature": 0.7,
+      "temperature": 0.1,
       "thinking_level": "high",
       "label": "تشكيل المقدمات"
     },
