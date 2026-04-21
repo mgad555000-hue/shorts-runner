@@ -176,6 +176,8 @@ run_pipeline(config)
                         "TTS_VOICE_ID": _get_api_env().get("TTS_VOICE_ID", "Achird"),
                         "EXECUTION_MODE": os.getenv("EXECUTION_MODE", "instant"),
                         "TOPIC_IDS": os.getenv("TOPIC_IDS", ""),
+                        "RUN_ID": os.getenv("RUN_ID", ""),
+                        "RECIPE_NAME": os.getenv("RECIPE_NAME", ""),
                         # تمرير مفاتيح API (قراءة .env من المشروع عند كل تشغيلة)
                         "GEMINI_API_KEY": _get_api_env().get("GEMINI_API_KEY", ""),
                         "CLAUDE_API_KEY": _get_api_env().get("CLAUDE_API_KEY", ""),

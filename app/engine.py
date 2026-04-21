@@ -851,6 +851,8 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
         try:
             client = genai.Client(vertexai=True, project=project_id, location=loc)
             batch_config = {'display_name': job_name}
+            if job_labels:
+                batch_config['labels'] = job_labels
             batch_job = client.batches.create(model=model, src=input_uri, config=batch_config)
 
             job_full_name = batch_job.name if hasattr(batch_job, 'name') else ""
@@ -1039,10 +1041,6 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
         job_display_name = f"mgr-{_run_id}-{_recipe[:20]}-{timestamp}" if _recipe else f"mgr-{_run_id}-{timestamp}"
     else:
         job_display_name = f"mgr-vertex-{timestamp}"
-    if _run_id:
-        log(f"  [RUN_ID] ✅ Run ID الكامل: {_run_id}")
-        log(f"  [RUN_ID] ✅ display_name في Google Cloud: {job_display_name}")
-        log(f"  [RUN_ID] ✅ Labels: {job_labels}")
     job_labels = {}
     if labels:
         # تنظيف Labels حسب شروط Google Cloud (أحرف صغيرة، أرقام، شرطات سفلية فقط، max 63 chars)
@@ -1054,6 +1052,10 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
                 job_labels[clean_key] = clean_val
         if job_labels:
             log(f"  [labels] Vertex Batch Labels: {job_labels}")
+    if _run_id:
+        log(f"  [RUN_ID] ✅ Run ID الكامل: {_run_id}")
+        log(f"  [RUN_ID] ✅ display_name في Google Cloud: {job_display_name}")
+        log(f"  [RUN_ID] ✅ Labels: {job_labels}")
 
     batch_job = aiplatform.BatchPredictionJob.create(
         job_display_name=job_display_name,
