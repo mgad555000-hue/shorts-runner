@@ -7,144 +7,225 @@
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: 'Segoe UI', Tahoma, sans-serif; background: #0f1419; color: #e7e9ea; padding: 20px; direction: rtl; }
-        h1 { color: #1d9bf0; margin-bottom: 20px; font-size: 24px; }
-        h2 { color: #8899a6; margin: 20px 0 10px; font-size: 18px; }
-        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+        h1 { color: #1d9bf0; margin-bottom: 16px; font-size: 24px; }
+        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
         .card { background: #1e2732; border-radius: 12px; padding: 16px; text-align: center; }
-        .card .value { font-size: 28px; font-weight: bold; color: #1d9bf0; }
+        .card .value { font-size: 26px; font-weight: bold; color: #1d9bf0; }
         .card .label { font-size: 13px; color: #8899a6; margin-top: 4px; }
         .card.cost .value { color: #f7931a; }
+        .card.actual .value { color: #00ba7c; }
         table { width: 100%; border-collapse: collapse; margin-bottom: 24px; background: #1e2732; border-radius: 12px; overflow: hidden; }
         th { background: #283340; color: #8899a6; font-weight: 600; padding: 10px 12px; text-align: right; font-size: 13px; }
-        td { padding: 8px 12px; border-top: 1px solid #283340; font-size: 13px; }
-        tr:hover { background: #283340; }
-        .cost-col { color: #f7931a; font-weight: 600; }
+        td { padding: 8px 12px; border-top: 1px solid #283340; font-size: 13px; vertical-align: middle; }
+        tr:hover { background: #232b35; }
+        .cost-est { color: #f7931a; font-weight: 600; }
+        .cost-actual { color: #00ba7c; font-weight: 600; }
+        .cost-pending { color: #6e7a85; font-style: italic; }
         .token-col { color: #1d9bf0; }
-        .controls { display: flex; gap: 12px; margin-bottom: 20px; align-items: center; }
+        .controls { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
         select, input { background: #283340; color: #e7e9ea; border: 1px solid #38444d; border-radius: 8px; padding: 8px 12px; font-size: 14px; }
-        button { background: #1d9bf0; color: white; border: none; border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 14px; }
+        button { background: #1d9bf0; color: white; border: none; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 13px; }
         button:hover { background: #1a8cd8; }
-        .run-id { font-family: monospace; font-size: 11px; color: #8899a6; }
+        button.small { padding: 4px 10px; font-size: 11px; background: #283340; color: #1d9bf0; border: 1px solid #38444d; }
+        button.small:hover { background: #38444d; }
+        button.verify-all { background: #00ba7c; }
+        button.verify-all:hover { background: #009e6a; }
+        .run-id { font-family: 'Courier New', monospace; font-size: 11px; color: #8899a6; }
+        .status-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+        .status-completed { background: #00ba7c33; color: #00ba7c; }
+        .status-failed { background: #f4212e33; color: #f4212e; }
+        .status-running { background: #1d9bf033; color: #1d9bf0; }
+        .status-empty { background: #6e7a8533; color: #8899a6; }
         .loading { text-align: center; padding: 40px; color: #8899a6; }
         a { color: #1d9bf0; text-decoration: none; }
         a:hover { text-decoration: underline; }
         .back-link { margin-bottom: 16px; display: inline-block; }
+        .legend { font-size: 12px; color: #8899a6; margin-bottom: 12px; padding: 10px; background: #1e2732; border-radius: 8px; }
+        .legend strong { color: #e7e9ea; }
+        .delta-pos { color: #f4212e; }
+        .delta-neg { color: #00ba7c; }
+        .delta-zero { color: #6e7a85; }
     </style>
 </head>
 <body>
     <a href="/" class="back-link">← العودة للوحة الرئيسية</a>
-    <h1>📊 تتبع التكاليف</h1>
+    <h1>📊 تتبع التكاليف — Timeline (الأحدث أولاً)</h1>
+
+    <div class="legend">
+        <strong>التقديري</strong> = محسوب من توكينز Google × السعر الرسمي (دقيق ~99%)
+        &nbsp;|&nbsp;
+        <strong>الفعلي من Google</strong> = أرقام Vertex AI Batch API مباشرة (100% من جوجل)
+        &nbsp;|&nbsp;
+        اضغط <strong>تحقق</strong> لجلب الفعلي لتشغيلة معينة، أو <strong>تحقق من الكل</strong> للجميع
+    </div>
 
     <div class="controls">
         <label>الفترة:</label>
         <select id="days">
             <option value="1">اليوم</option>
-            <option value="7" selected>آخر أسبوع</option>
-            <option value="30">آخر شهر</option>
+            <option value="7">آخر أسبوع</option>
+            <option value="30" selected>آخر شهر</option>
             <option value="90">آخر 3 شهور</option>
         </select>
-        <input type="text" id="runIdFilter" placeholder="فلترة بـ Run ID..." style="width: 280px;">
-        <button onclick="loadData()">تحديث</button>
+        <label>عدد الصفوف:</label>
+        <select id="limit">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+            <option value="500">500</option>
+        </select>
+        <button onclick="loadData()">🔄 تحديث</button>
+        <button class="verify-all" onclick="verifyAll()">✅ تحقق من الكل (جوجل)</button>
     </div>
 
     <div id="summary" class="cards"></div>
 
-    <h2>حسب الموديل</h2>
-    <table id="byModelTable"><thead><tr><th>الموديل</th><th>الاستدعاءات</th><th>إدخال</th><th>إخراج</th><th>تفكير</th><th>إجمالي</th><th>التكلفة $</th></tr></thead><tbody></tbody></table>
-
-    <h2>حسب التشغيلة (أغلى 50)</h2>
-    <table id="byRunTable"><thead><tr><th>Run ID (إرسال)</th><th>الاستدعاءات</th><th>إجمالي التوكنز</th><th>التكلفة $</th><th>التاريخ</th></tr></thead><tbody></tbody></table>
-
-    <h2>السجل التفصيلي (آخر 200)</h2>
-    <table id="recordsTable"><thead><tr><th>Run ID (ارسال)</th><th>الخطوة</th><th>النوع</th><th>المزود</th><th>الموديل</th><th>إدخال</th><th>إخراج</th><th>تفكير</th><th>التكلفة $</th><th>التاريخ</th></tr></thead><tbody></tbody></table>
+    <table id="timelineTable">
+        <thead>
+            <tr>
+                <th>التاريخ</th>
+                <th>Run ID</th>
+                <th>الوصفة</th>
+                <th>الحالة</th>
+                <th>الموديل</th>
+                <th>الاستدعاءات</th>
+                <th>إدخال</th>
+                <th>إخراج</th>
+                <th>تفكير</th>
+                <th>إجمالي</th>
+                <th>تقديري $</th>
+                <th>فعلي (جوجل) $</th>
+                <th>إجراء</th>
+            </tr>
+        </thead>
+        <tbody><tr><td colspan="13" class="loading">جارٍ التحميل...</td></tr></tbody>
+    </table>
 
     <script>
         const TOKEN = localStorage.getItem('auth_token') || '';
+        if (!TOKEN) window.location.href = '/';
 
-        // لو مفيش توكن → ارجع لصفحة اللوجين
-        if (!TOKEN) {
-            window.location.href = '/';
-        }
+        const fmt = n => n ? Number(n).toLocaleString('en') : '0';
+        const fmtCost = n => (n != null && !isNaN(n)) ? '$' + Number(n).toFixed(4) : '—';
+        const shortId = id => id ? id.substring(0, 8) : '';
+        const fmtDate = iso => {
+            if (!iso) return '—';
+            const d = new Date(iso);
+            return d.toLocaleDateString('ar-EG') + ' ' + d.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+        };
 
-        function fmt(n) { return n ? n.toLocaleString('en') : '0'; }
-        function fmtCost(n) { return n ? '$' + n.toFixed(4) : '$0.0000'; }
-        function shortId(id) { return id ? id.substring(0, 8) : ''; }
-        function shortDate(iso) { if (!iso) return ''; const d = new Date(iso); return d.toLocaleDateString('ar-EG') + ' ' + d.toLocaleTimeString('ar-EG', {hour:'2-digit',minute:'2-digit'}); }
+        let currentRows = [];
+        const actualCache = {};
 
         async function loadData() {
             const days = document.getElementById('days').value;
-            const runId = document.getElementById('runIdFilter').value.trim();
-            let url = `/api/usage?days=${days}`;
-            if (runId) url += `&run_id=${runId}`;
-
+            const limit = document.getElementById('limit').value;
+            const url = `/api/usage/timeline?days=${days}&limit=${limit}`;
             try {
                 const res = await fetch(url, { headers: { 'Authorization': `Bearer ${TOKEN}` } });
                 if (!res.ok) throw new Error(res.status);
                 const data = await res.json();
+                currentRows = data.runs || [];
                 renderSummary(data.totals);
-                renderByModel(data.by_model);
-                renderByRun(data.by_run);
-                renderRecords(data.records);
+                renderTimeline();
             } catch (e) {
-                document.getElementById('summary').innerHTML = `<div class="loading">خطأ في تحميل البيانات: ${e.message}</div>`;
+                document.querySelector('#timelineTable tbody').innerHTML =
+                    `<tr><td colspan="13" class="loading">خطأ: ${e.message}</td></tr>`;
             }
         }
 
         function renderSummary(t) {
+            const actualSum = Object.values(actualCache).reduce((a, b) => a + (b.estimated_cost_usd || 0), 0);
+            const verified = Object.keys(actualCache).length;
             document.getElementById('summary').innerHTML = `
-                <div class="card cost"><div class="value">${fmtCost(t.estimated_cost_usd)}</div><div class="label">التكلفة التقديرية</div></div>
-                <div class="card"><div class="value">${fmt(t.api_calls)}</div><div class="label">عدد الاستدعاءات</div></div>
+                <div class="card"><div class="value">${fmt(t.runs)}</div><div class="label">تشغيلات</div></div>
+                <div class="card cost"><div class="value">${fmtCost(t.estimated_cost_usd)}</div><div class="label">إجمالي تقديري</div></div>
+                <div class="card actual"><div class="value">${verified > 0 ? fmtCost(actualSum) : '—'}</div><div class="label">إجمالي فعلي (${verified} تم التحقق)</div></div>
                 <div class="card"><div class="value">${fmt(t.total_tokens)}</div><div class="label">إجمالي التوكنز</div></div>
-                <div class="card"><div class="value">${fmt(t.input_tokens)}</div><div class="label">توكنز الإدخال</div></div>
-                <div class="card"><div class="value">${fmt(t.output_tokens)}</div><div class="label">توكنز الإخراج</div></div>
-                <div class="card"><div class="value">${fmt(t.thinking_tokens)}</div><div class="label">توكنز التفكير</div></div>
+                <div class="card"><div class="value">${fmt(t.input_tokens)}</div><div class="label">إدخال</div></div>
+                <div class="card"><div class="value">${fmt(t.output_tokens + t.thinking_tokens)}</div><div class="label">إخراج+تفكير</div></div>
             `;
         }
 
-        function renderByModel(byModel) {
-            const tbody = document.querySelector('#byModelTable tbody');
-            tbody.innerHTML = Object.entries(byModel).map(([model, v]) => `
-                <tr>
-                    <td>${model}</td>
-                    <td>${fmt(v.calls)}</td>
-                    <td class="token-col">${fmt(v.input)}</td>
-                    <td class="token-col">${fmt(v.output)}</td>
-                    <td class="token-col">${fmt(v.thinking)}</td>
-                    <td class="token-col">${fmt(v.total)}</td>
-                    <td class="cost-col">${fmtCost(v.cost)}</td>
-                </tr>
-            `).join('');
+        function statusBadge(s) {
+            const cls = s === 'completed' ? 'status-completed'
+                      : s === 'failed' ? 'status-failed'
+                      : s === 'running' ? 'status-running'
+                      : 'status-empty';
+            return `<span class="status-badge ${cls}">${s || '—'}</span>`;
         }
 
-        function renderByRun(byRun) {
-            const tbody = document.querySelector('#byRunTable tbody');
-            tbody.innerHTML = Object.entries(byRun).map(([runId, v]) => `
-                <tr>
-                    <td class="run-id">${shortId(runId)}</td>
-                    <td>${fmt(v.calls)}</td>
-                    <td class="token-col">${fmt(v.total_tokens)}</td>
-                    <td class="cost-col">${fmtCost(v.cost)}</td>
-                    <td>${shortDate(v.created_at)}</td>
-                </tr>
-            `).join('');
+        function actualCell(runId) {
+            const a = actualCache[runId];
+            if (!a) return `<span class="cost-pending">—</span>`;
+            if (a.error) return `<span class="cost-pending" title="${a.error}">خطأ</span>`;
+            if (a.jobs_found === 0) return `<span class="cost-pending" title="لا يوجد batch jobs">لا يوجد</span>`;
+            return `<span class="cost-actual" title="${a.jobs_found} job(s)">${fmtCost(a.estimated_cost_usd)}</span>`;
         }
 
-        function renderRecords(records) {
-            const tbody = document.querySelector('#recordsTable tbody');
-            tbody.innerHTML = records.map(r => `
+        function renderTimeline() {
+            const tbody = document.querySelector('#timelineTable tbody');
+            if (!currentRows.length) {
+                tbody.innerHTML = `<tr><td colspan="13" class="loading">لا توجد بيانات</td></tr>`;
+                return;
+            }
+            tbody.innerHTML = currentRows.map(r => `
                 <tr>
-                    <td class="run-id">${shortId(r.run_id)}</td>
-                    <td>${r.step_id}</td>
-                    <td>${r.call_type}</td>
-                    <td>${r.provider}</td>
+                    <td>${fmtDate(r.last_seen)}</td>
+                    <td class="run-id" title="${r.run_id}">${shortId(r.run_id)}</td>
+                    <td>${r.recipe_name || '—'}</td>
+                    <td>${statusBadge(r.status)}</td>
                     <td>${r.model}</td>
+                    <td>${fmt(r.calls)} (B:${r.batch_calls}/D:${r.direct_calls})</td>
                     <td class="token-col">${fmt(r.input_tokens)}</td>
                     <td class="token-col">${fmt(r.output_tokens)}</td>
                     <td class="token-col">${fmt(r.thinking_tokens)}</td>
-                    <td class="cost-col">${fmtCost(r.estimated_cost_usd)}</td>
-                    <td>${shortDate(r.created_at)}</td>
+                    <td class="token-col">${fmt(r.total_tokens)}</td>
+                    <td class="cost-est">${fmtCost(r.estimated_cost_usd)}</td>
+                    <td>${actualCell(r.run_id)}</td>
+                    <td><button class="small" onclick="verifyOne('${r.run_id}', this)">تحقق</button></td>
                 </tr>
             `).join('');
+        }
+
+        async function verifyOne(runId, btn) {
+            if (btn) { btn.disabled = true; btn.textContent = '...'; }
+            try {
+                const res = await fetch(`/api/usage/google-actual/${runId}`,
+                    { headers: { 'Authorization': `Bearer ${TOKEN}` } });
+                if (!res.ok) throw new Error(res.status);
+                const data = await res.json();
+                actualCache[runId] = {
+                    jobs_found: data.jobs_found,
+                    ...data.actual_from_google,
+                };
+                renderTimeline();
+                renderSummary({
+                    runs: currentRows.length,
+                    estimated_cost_usd: currentRows.reduce((a, b) => a + b.estimated_cost_usd, 0),
+                    total_tokens: currentRows.reduce((a, b) => a + b.total_tokens, 0),
+                    input_tokens: currentRows.reduce((a, b) => a + b.input_tokens, 0),
+                    output_tokens: currentRows.reduce((a, b) => a + b.output_tokens, 0),
+                    thinking_tokens: currentRows.reduce((a, b) => a + b.thinking_tokens, 0),
+                });
+            } catch (e) {
+                actualCache[runId] = { error: e.message };
+                renderTimeline();
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = 'تحقق'; }
+            }
+        }
+
+        async function verifyAll() {
+            const btn = document.querySelector('.verify-all');
+            btn.disabled = true;
+            const original = btn.textContent;
+            for (let i = 0; i < currentRows.length; i++) {
+                btn.textContent = `جارٍ... ${i + 1}/${currentRows.length}`;
+                await verifyOne(currentRows[i].run_id, null);
+            }
+            btn.textContent = original;
+            btn.disabled = false;
         }
 
         loadData();

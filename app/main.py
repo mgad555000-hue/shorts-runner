@@ -1311,6 +1311,186 @@ async def recalculate_costs(current_user: User = Depends(get_current_user), db: 
     return {"updated": updated, "total_old": round(total_old, 4), "total_new": round(total_new, 4)}
 
 
+@app.get("/api/usage/timeline")
+async def get_usage_timeline(
+    days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=200, ge=1, le=1000),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """تشغيلات مجمّعة (send+receive في run واحد) مرتبة زمنياً — الأحدث أولاً.
+    يجمع كل ApiUsage records تحت نفس send_run_id (أو run_id) ويربطهم بـ recipe_name من shorts_runs."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    records = db.query(ApiUsage).filter(ApiUsage.created_at >= cutoff).order_by(ApiUsage.created_at.desc()).all()
+
+    runs_by_id = {r.run_id: r for r in db.query(Run).all()}
+
+    grouped = {}
+    for r in records:
+        key = r.send_run_id if r.send_run_id else r.run_id
+        if key not in grouped:
+            run_meta = runs_by_id.get(key) or runs_by_id.get(r.run_id)
+            grouped[key] = {
+                "run_id": key,
+                "recipe_name": run_meta.recipe_name if run_meta else "",
+                "status": run_meta.status if run_meta else "",
+                "started_at": run_meta.started_at.isoformat() if run_meta and run_meta.started_at else None,
+                "model": r.model,
+                "providers": set(),
+                "models": set(),
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "thinking_tokens": 0,
+                "total_tokens": 0,
+                "estimated_cost_usd": 0.0,
+                "calls": 0,
+                "batch_calls": 0,
+                "direct_calls": 0,
+                "first_seen": r.created_at,
+                "last_seen": r.created_at,
+            }
+        g = grouped[key]
+        g["providers"].add(r.provider or "")
+        g["models"].add(r.model or "")
+        g["input_tokens"] += r.input_tokens
+        g["output_tokens"] += r.output_tokens
+        g["thinking_tokens"] += r.thinking_tokens
+        g["total_tokens"] += r.total_tokens
+        g["estimated_cost_usd"] += r.estimated_cost_usd
+        g["calls"] += 1
+        if r.call_type == "batch":
+            g["batch_calls"] += 1
+        else:
+            g["direct_calls"] += 1
+        if r.created_at and (not g["first_seen"] or r.created_at < g["first_seen"]):
+            g["first_seen"] = r.created_at
+        if r.created_at and (not g["last_seen"] or r.created_at > g["last_seen"]):
+            g["last_seen"] = r.created_at
+
+    rows = []
+    for g in grouped.values():
+        rows.append({
+            "run_id": g["run_id"],
+            "recipe_name": g["recipe_name"],
+            "status": g["status"],
+            "model": ",".join(sorted(g["models"])),
+            "providers": ",".join(sorted(g["providers"])),
+            "input_tokens": g["input_tokens"],
+            "output_tokens": g["output_tokens"],
+            "thinking_tokens": g["thinking_tokens"],
+            "total_tokens": g["total_tokens"],
+            "estimated_cost_usd": round(g["estimated_cost_usd"], 6),
+            "calls": g["calls"],
+            "batch_calls": g["batch_calls"],
+            "direct_calls": g["direct_calls"],
+            "first_seen": g["first_seen"].isoformat() if g["first_seen"] else None,
+            "last_seen": g["last_seen"].isoformat() if g["last_seen"] else None,
+        })
+    rows.sort(key=lambda x: x["last_seen"] or "", reverse=True)
+    rows = rows[:limit]
+
+    totals = {
+        "runs": len(rows),
+        "estimated_cost_usd": round(sum(r["estimated_cost_usd"] for r in rows), 4),
+        "total_tokens": sum(r["total_tokens"] for r in rows),
+        "input_tokens": sum(r["input_tokens"] for r in rows),
+        "output_tokens": sum(r["output_tokens"] for r in rows),
+        "thinking_tokens": sum(r["thinking_tokens"] for r in rows),
+    }
+    return {"period_days": days, "totals": totals, "runs": rows}
+
+
+@app.get("/api/usage/google-actual/{run_id}")
+async def get_usage_google_actual(
+    run_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """يجلب tokenUsageStats الفعلية من Vertex AI Batch Jobs API لكل batch job مرتبط بـ run_id.
+    ده مصدر Google المباشر — أعداد التوكينز اللي Google عدّتها فعلاً."""
+    try:
+        import google.auth
+        import google.auth.transport.requests
+        import httpx
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Missing dependency: {e}")
+
+    project_id = os.getenv("VERTEX_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT") or "gen-lang-client-0008961174"
+    locations = ["global", "us-central1", "us-east1", "europe-west4"]
+
+    try:
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        auth_req = google.auth.transport.requests.Request()
+        creds.refresh(auth_req)
+        token = creds.token
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Google auth failed: {e}")
+
+    headers = {"Authorization": f"Bearer {token}"}
+    short = run_id[:8]
+    found_jobs = []
+    locations_checked = []
+
+    for loc in locations:
+        url = f"https://aiplatform.googleapis.com/v1/projects/{project_id}/locations/{loc}/batchPredictionJobs"
+        params = {"pageSize": 100, "filter": f'display_name:"mgr-{short}"'}
+        try:
+            with httpx.Client(timeout=20) as client:
+                resp = client.get(url, headers=headers, params=params)
+                locations_checked.append({"location": loc, "status": resp.status_code})
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                for job in data.get("batchPredictionJobs", []):
+                    dn = job.get("displayName", "")
+                    if run_id in dn or short in dn:
+                        usage = (job.get("completionStats") or {})
+                        token_stats = job.get("tokenUsageStats") or {}
+                        found_jobs.append({
+                            "location": loc,
+                            "job_name": job.get("name", ""),
+                            "display_name": dn,
+                            "state": job.get("state", ""),
+                            "model": job.get("model", ""),
+                            "create_time": job.get("createTime", ""),
+                            "end_time": job.get("endTime", ""),
+                            "completion_stats": usage,
+                            "token_usage_stats": token_stats,
+                        })
+        except Exception as e:
+            locations_checked.append({"location": loc, "error": str(e)})
+
+    actual_input = 0
+    actual_output = 0
+    actual_total = 0
+    for j in found_jobs:
+        ts = j.get("token_usage_stats") or {}
+        actual_input += int(ts.get("inputTokenCount", 0) or 0)
+        actual_output += int(ts.get("outputTokenCount", 0) or 0)
+        actual_total += int(ts.get("totalTokenCount", 0) or 0)
+
+    actual_cost_usd = 0.0
+    for j in found_jobs:
+        model_name = (j.get("model") or "").split("/")[-1]
+        ts = j.get("token_usage_stats") or {}
+        i_tok = int(ts.get("inputTokenCount", 0) or 0)
+        o_tok = int(ts.get("outputTokenCount", 0) or 0)
+        actual_cost_usd += _estimate_cost(model_name, i_tok, o_tok, 0, call_type="batch")
+
+    return {
+        "run_id": run_id,
+        "project_id": project_id,
+        "locations_checked": locations_checked,
+        "jobs_found": len(found_jobs),
+        "actual_from_google": {
+            "input_tokens": actual_input,
+            "output_tokens": actual_output,
+            "total_tokens": actual_total,
+            "estimated_cost_usd": round(actual_cost_usd, 6),
+        },
+        "jobs": found_jobs,
+    }
+
+
 @app.post("/api/utilities/cleanup", response_model=CleanupResponse)
 async def trigger_cleanup(max_age_days: int = None, keep_last_n: int = None, admin: User = Depends(require_admin)):
     return CleanupResponse(**perform_cleanup(max_age_days, keep_last_n))
