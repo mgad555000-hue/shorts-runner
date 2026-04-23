@@ -27,7 +27,7 @@
       "max_tokens": 65536,
       "temperature": 0.5,
       "thinking_level": "low",
-      "label": "توليد السكريبتات"
+      "label": "توليد السكريبتات (بدون تشكيل)"
     },
     {
       "id": "intros_raw",
@@ -47,13 +47,13 @@
       "id": "tashkeel_rules",
       "action": "read_input",
       "file": "tashkeel_instructions.txt",
-      "label": "قراءة تعليمات التشكيل"
+      "label": "قراءة تعليمات تشكيل المقدمات"
     },
     {
       "id": "tashkeel_prompt",
       "action": "template",
       "text": "{tashkeel_rules}\n\n---\n\nالنصوص المطلوب تشكيلها:\n\n{intros_raw}",
-      "label": "تجميع برومبت التشكيل"
+      "label": "تجميع برومبت تشكيل المقدمات"
     },
     {
       "id": "tashkeel_intros",
@@ -88,9 +88,37 @@
       "label": "تنظيف النصوص"
     },
     {
+      "id": "tashkeel_texts_rules",
+      "action": "read_input",
+      "file": "tashkeel_texts_instructions.txt",
+      "label": "قراءة تعليمات تشكيل النصوص"
+    },
+    {
+      "id": "tashkeel_texts_prompt",
+      "action": "template",
+      "text": "{tashkeel_texts_rules}\n\n---\n\nالنصوص المطلوب تشكيلها (الفصحى):\n\n{texts_clean}",
+      "label": "تجميع برومبت تشكيل النصوص"
+    },
+    {
+      "id": "texts_tashkeeled",
+      "action": "generate",
+      "input": "{tashkeel_texts_prompt}",
+      "model": "gemini-3.1-pro-preview",
+      "max_tokens": 65536,
+      "temperature": 0.1,
+      "thinking_level": "low",
+      "label": "تشكيل النصوص (مرحلة منفصلة)"
+    },
+    {
+      "id": "texts_auto_fixed",
+      "action": "auto_fix_text",
+      "input": "{texts_tashkeeled}",
+      "label": "إصلاح ميكانيكي (Tatweel + مسافات + كلمات طبية)"
+    },
+    {
       "id": "texts_validated",
       "action": "validate_texts",
-      "input": "{texts_clean}",
+      "input": "{texts_auto_fixed}",
       "min_words": 70,
       "max_words": 130,
       "expected_parts": 4,
@@ -101,12 +129,12 @@
       "action": "regenerate_failed",
       "input": "{texts_validated}",
       "failed_ref": "{texts_validated_failed}",
-      "instructions": "{instructions}",
+      "instructions": "{tashkeel_texts_rules}",
       "model": "gemini-3.1-pro-preview",
-      "temperature": 0.3,
+      "temperature": 0.1,
       "thinking_level": "low",
       "max_tokens": 16000,
-      "label": "إعادة توليد الفاشل"
+      "label": "إعادة تشكيل الفاشل"
     },
     {
       "id": "texts_final",
@@ -118,9 +146,16 @@
       "label": "تأكيد نهائي"
     },
     {
+      "id": "assert_texts_clean",
+      "action": "assert_no_failures",
+      "input": "{texts_final}",
+      "failed_refs": ["texts_final_failed", "texts_regenerated_permanently_failed"],
+      "label": "حماية: منع حفظ مواضيع فاشلة"
+    },
+    {
       "id": "docx_texts",
       "action": "save_docx",
-      "input": "{texts_final}",
+      "input": "{assert_texts_clean}",
       "save_as": "texts_output.docx",
       "font_size": 14,
       "label": "حفظ النصوص"

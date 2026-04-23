@@ -233,4 +233,8 @@ shorts-runner/
 | `راجع` | أقرأ آخر ملف Word مخرج |
 | `امسح` | أمسح output قديم |
 | `وصفات` | أعرض قائمة الوصفات من الـ API |
+| `فحص` | أفحص آخر `texts_output.docx` بسكريبت `tools/check_texts_docx.py` |
+| `فحص N` | أفحص ملف `texts_output.docx` في `OneDrive\Desktop\New folder\N` |
+| `فحص <path>` | أفحص الملف في المسار المحدد |
+| `فحص json` | فحص + حفظ JSON تفصيلي + تحليل عميق |
 | **`555000`** | **⚡ TRIGGER تنفيذ وصفة — أقرأ CLAUDE.md + RECIPE_GUIDE + القالب وأنفّذ بالخطوات** |

@@ -2821,11 +2821,156 @@ def action_filter_by_topics(step, ctx):
     return "\n\n".join(filtered)
 
 
+TATWEEL_CHAR = '\u0640'
+
+MEDICAL_WORDS_FIX = {
+    # نمط الكلمة بدون تشكيل → الكلمة بالتشكيل الصحيح
+    'الكلا': 'الْكِلَا',
+    'النفرونات': 'النِّفْرُونَات',
+    'الكيسات': 'الْكِيسَات',
+    'التكيسات': 'التَّكَيُّسَات',
+    'الكرياتينين': 'الْكِرْيَاتِينِين',
+    'الكلوية': 'الْكُلَوِيَّة',
+}
+
+ALLOWED_2_LETTERS_FIX = {
+    'في', 'من', 'أو', 'لا', 'ما', 'هو', 'هي', 'أن', 'إن', 'قد', 'لم', 'لن',
+    'بل', 'كل', 'بس', 'يا', 'عن', 'مع', 'بك', 'لك', 'له', 'لي', 'بي', 'ذا',
+    'دا', 'ده', 'دي', 'إذ', 'أي', 'أى', 'أم', 'إى', 'به', 'بها', 'لها', 'لهم',
+    'فى', 'كم', 'كي', 'هل', 'لو',
+}
+
+
+def _fix_remove_tatweel(text):
+    """يحذف كل أحرف التطويل ـ من النص بدون التأثير على الماركرز."""
+    return text.replace(TATWEEL_CHAR, '')
+
+
+def _fix_mid_word_spaces(text, tashkeel_chars):
+    """يصلح المسافات داخل الكلمات العربية (مثل 'الْأَطِبَّا ء' → 'الْأَطِبَّاء').
+
+    نمط الكشف:
+    - كلمة عربية (4+ حروف) + مسافة + 1-2 حرف عربي
+    - الجزء الثاني ينتهي بـ ء/ة/ى (دلالة على نهاية كلمة مقطوعة)
+    - الجزء الثاني ليس كلمة عربية شائعة قائمة بذاتها
+
+    يرجع: (النص المصلح، عدد الإصلاحات)
+    """
+    fixes = 0
+
+    def replace_match(m):
+        nonlocal fixes
+        before = m.group(1)
+        after = m.group(2)
+        clean_after = re.sub(f'[{tashkeel_chars}]', '', after).strip()
+
+        # استثناء: كلمة معروفة قائمة بذاتها
+        if clean_after in ALLOWED_2_LETTERS_FIX:
+            return m.group(0)
+
+        # حرف وحيد لازم يكون من حروف نهاية الكلمة (ء/ة/ى)
+        if len(clean_after) == 1:
+            if clean_after not in 'ءةى':
+                return m.group(0)
+        elif len(clean_after) == 2:
+            if not re.search(r'[ءةى]$', clean_after):
+                return m.group(0)
+
+        fixes += 1
+        return before + after  # ربط الحرفين بدون مسافة
+
+    pattern = r'([\u0621-\u064A\u0670' + re.escape(tashkeel_chars) + r']{4,})\s([\u0621-\u064A\u0670' + re.escape(tashkeel_chars) + r']{1,2})(?=\s|[.،؟!:؛]|$)'
+    fixed = re.sub(pattern, replace_match, text)
+    return fixed, fixes
+
+
+def _fix_medical_words(text, tashkeel_chars):
+    """يصحح الكلمات الطبية للتشكيل المحدد.
+
+    لو الكلمة موجودة بدون تشكيل (أو بتشكيل خاطئ) ومش في صيغة المعجم → استبدال بالصحيحة.
+    يرجع: (النص المصلح، عدد الإصلاحات)
+    """
+    fixes = 0
+    for raw, expected in MEDICAL_WORDS_FIX.items():
+        # نبحث عن كل ظهور للكلمة بدون تشكيل
+        # نمط: كلمة عربية يكون نواتها = raw بعد إزالة التشكيل
+        # علشان ما نلمسش كلمات أكبر (مثلاً: الكلوية لو فيها كلوية)
+
+        def check_and_fix(m):
+            nonlocal fixes
+            word = m.group(0)
+            # شيل التشكيل وقارن
+            clean_word = re.sub(f'[{tashkeel_chars}]', '', word).strip()
+            if clean_word == raw and word != expected:
+                fixes += 1
+                return expected
+            return word
+
+        # نلتقط الكلمة العربية كاملة (مع تشكيلها)
+        word_pattern = r'[\u0621-\u064A\u0670' + re.escape(tashkeel_chars) + r']+'
+        # فلتر مبدئي: الكلمة لازم تحتوي على raw (بدون تشكيل)
+        text = re.sub(word_pattern, check_and_fix, text)
+
+    return text, fixes
+
+
+def action_auto_fix_text(step, ctx):
+    """إصلاح ميكانيكي للنصوص العربية المشكّلة قبل الـ validation.
+
+    يصلح أوتوماتيكياً (بدون AI):
+    - حذف كل أحرف Tatweel ـ (U+0640)
+    - دمج المسافات داخل الكلمات (مثل 'الْأَطِبَّا ء' → 'الْأَطِبَّاء')
+    - تصحيح الكلمات الطبية بالتشكيل المحدد
+    """
+    text = str(ctx.resolve(step["input"]))
+    tashkeel_chars = '\u064B\u064C\u064D\u064E\u064F\u0650\u0651\u0652\u0670'
+
+    # 1) Tatweel
+    before_tatweel = text.count(TATWEEL_CHAR)
+    text = _fix_remove_tatweel(text)
+
+    # 2) مسافات وسط الكلمة
+    text, mid_space_fixes = _fix_mid_word_spaces(text, tashkeel_chars)
+
+    # 3) كلمات طبية
+    text, medical_fixes = _fix_medical_words(text, tashkeel_chars)
+
+    total = before_tatweel + mid_space_fixes + medical_fixes
+    if total > 0:
+        log(f"  auto_fix_text: {before_tatweel} Tatweel | {mid_space_fixes} مسافة وسط كلمة | {medical_fixes} كلمة طبية | إجمالي: {total} إصلاح")
+    else:
+        log(f"  auto_fix_text: ✓ النص نظيف — مفيش إصلاحات")
+
+    return text
+
+
 def _check_brackets_pattern(part_text):
     """فحص وجود أقواس مربعة حول حروف عربية — مثل: التَّكَيُّسَا[ت]"""
     bracket_matches = re.findall(r'\[[^\[\]]{1,3}\]', part_text)
     arabic_brackets = [m for m in bracket_matches if re.search(r'[\u0621-\u064A]', m)]
     return arabic_brackets
+
+
+def _check_tatweel_in_text(part_text):
+    """فحص وجود حرف التطويل ـ في النص."""
+    return part_text.count(TATWEEL_CHAR)
+
+
+def _check_mid_word_spaces_count(part_text, tashkeel_chars):
+    """عدّاد المسافات داخل الكلمات (نسخة مختصرة من السكريبت)."""
+    pattern = r'([\u0621-\u064A\u0670' + re.escape(tashkeel_chars) + r']{4,})\s([\u0621-\u064A\u0670' + re.escape(tashkeel_chars) + r']{1,2})(?=\s|[.،؟!:؛]|$)'
+    count = 0
+    for m in re.finditer(pattern, part_text):
+        after = m.group(2)
+        clean_after = re.sub(f'[{tashkeel_chars}]', '', after).strip()
+        if clean_after in ALLOWED_2_LETTERS_FIX:
+            continue
+        if len(clean_after) == 1 and clean_after not in 'ءةى':
+            continue
+        if len(clean_after) == 2 and not re.search(r'[ءةى]$', clean_after):
+            continue
+        count += 1
+    return count
 
 
 def _check_single_letters(part_text, tashkeel_chars):
@@ -3099,6 +3244,18 @@ def action_validate_texts(step, ctx):
                 script_issues.append(f"P{part_num}: جزء فارغ ({word_count} كلمات)")
                 script_failed = True
 
+            # فحص 15: حرف التطويل ـ
+            tatweel_count = _check_tatweel_in_text(part_text)
+            if tatweel_count > 0:
+                script_issues.append(f"P{part_num}: {tatweel_count} حرف Tatweel ـ")
+                script_failed = True
+
+            # فحص 16: مسافات وسط الكلمات
+            mid_spaces = _check_mid_word_spaces_count(part_text, TASHKEEL)
+            if mid_spaces > 0:
+                script_issues.append(f"P{part_num}: {mid_spaces} مسافة وسط كلمة")
+                script_failed = True
+
             fixed_content_parts.append(f"<<<PART_{part_num}>>>\n{part_text}\n<<<END_PART>>>")
 
         # تجميع المحتوى المصلح
@@ -3126,20 +3283,24 @@ def action_validate_texts(step, ctx):
 
 
 def action_regenerate_failed(step, ctx):
-    """إعادة توليد الموضوعات الفاشلة فقط.
+    """إعادة توليد الموضوعات الفاشلة فقط مع loop داخلي.
     ياخد النص الأصلي + قائمة الفاشل من validate_texts ويعيد توليدهم.
+    بعد كل generate يفحص عدد parts، لو != expected يعيد المحاولة (max_attempts).
+    لو فشل بعد كل المحاولات يعلّم الموضوع كـ permanently_failed.
     """
     text = str(ctx.resolve(step["input"]))
-    failed_ref = step.get("failed_ref")  # مرجع لخطوة validate (مثل "validated_failed")
-    instructions_ref = step.get("instructions")  # تعليمات التوليد
+    failed_ref = step.get("failed_ref")
+    instructions_ref = step.get("instructions")
 
     if not failed_ref:
         log("  regenerate_failed: مفيش failed_ref محدد — تخطي")
+        ctx.results[step["id"] + "_permanently_failed"] = []
         return text
 
     failed_scripts = ctx.resolve(failed_ref)
     if not failed_scripts or not isinstance(failed_scripts, list):
         log("  regenerate_failed: مفيش موضوعات فاشلة — تخطي")
+        ctx.results[step["id"] + "_permanently_failed"] = []
         return text
 
     instructions = str(ctx.resolve(instructions_ref)) if instructions_ref else ""
@@ -3150,55 +3311,80 @@ def action_regenerate_failed(step, ctx):
     thinking_level = step.get("thinking_level", None)
     step_model = step.get("model", None)
     effective_model = step_model or ctx.model
+    expected_parts = step.get("expected_parts", 4)
+    max_attempts = step.get("max_attempts", 3)
 
     if step_model:
         log(f"  [model override] {step_model}")
 
-    log(f"  regenerate_failed: إعادة توليد {len(failed_scripts)} موضوع: {', '.join(failed_scripts)}")
+    log(f"  regenerate_failed: إعادة توليد {len(failed_scripts)} موضوع (max_attempts={max_attempts}, expected_parts={expected_parts}): {', '.join(failed_scripts)}")
 
-    # استخراج المقدمات/العناوين الأصلية للموضوعات الفاشلة
     pattern = r'(<<<SCRIPT_(\d+)>>>)(.*?)(<<<END_SCRIPT>>>)'
+    part_pattern = r'<<<PART_(\d+)>>>(.*?)<<<END_PART>>>'
+
     original_blocks = {}
     for match in re.finditer(pattern, text, re.DOTALL):
         script_num = match.group(2)
         if script_num in failed_scripts:
             original_blocks[script_num] = match.group(0)
 
-    # توليد كل موضوع فاشل
     regenerated = {}
+    permanently_failed = []
+
     for script_num in failed_scripts:
         fallback_block = "<<<SCRIPT_" + script_num + ">>>\n<<<END_SCRIPT>>>"
         original_block = original_blocks.get(script_num, fallback_block)
         prompt = (
             f"{instructions}\n\n---\n\n"
             "أعد كتابة النصوص التالية مع الالتزام الكامل بجميع القواعد أعلاه. "
-            "تأكد من أن كل موضوع يحتوي على 4 أجزاء بالضبط (PART_1 إلى PART_4)، "
+            f"تأكد من أن كل موضوع يحتوي على {expected_parts} أجزاء بالضبط (PART_1 إلى PART_{expected_parts})، "
             "وأن كل جزء قطعة نصية واحدة متصلة، وأن عدد الكلمات في النطاق المطلوب.\n\n"
             f"الموضوع المطلوب إعادة كتابته:\n\n{original_block}"
         )
 
-        result = generate(
-            prompt=prompt,
-            model=effective_model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            thinking_budget=thinking_budget,
-            thinking_level=thinking_level,
-        )
+        success = False
+        for attempt in range(1, max_attempts + 1):
+            result = generate(
+                prompt=prompt,
+                model=effective_model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                thinking_budget=thinking_budget,
+                thinking_level=thinking_level,
+            )
 
-        if result.success:
-            regenerated[script_num] = result.data
-            ctx.record_usage(f"{step['id']}_SCRIPT_{script_num}", "retry_direct", result.provider, result.model, result.token_usage)
-            log(f"  [✓] SCRIPT_{script_num}: تم إعادة التوليد")
-        else:
-            log(f"  [X] SCRIPT_{script_num}: فشل إعادة التوليد: {result.error}")
+            ctx.record_usage(
+                f"{step['id']}_SCRIPT_{script_num}_try{attempt}",
+                "retry_direct",
+                result.provider,
+                result.model,
+                result.token_usage,
+            )
 
-    # استبدال الموضوعات الفاشلة بالجديدة
+            if not result.success:
+                log(f"  [X] SCRIPT_{script_num} (محاولة {attempt}/{max_attempts}): فشل API: {result.error}")
+                continue
+
+            new_match = re.search(r'<<<SCRIPT_\d+>>>(.*?)<<<END_SCRIPT>>>', result.data, re.DOTALL)
+            new_content = new_match.group(1) if new_match else result.data
+            new_parts = list(re.finditer(part_pattern, new_content, re.DOTALL))
+
+            if len(new_parts) == expected_parts:
+                regenerated[script_num] = result.data
+                success = True
+                log(f"  [✓] SCRIPT_{script_num} (محاولة {attempt}/{max_attempts}): نجح ({len(new_parts)} parts)")
+                break
+            else:
+                log(f"  [!] SCRIPT_{script_num} (محاولة {attempt}/{max_attempts}): طلع {len(new_parts)} parts بدل {expected_parts} — إعادة المحاولة")
+
+        if not success:
+            permanently_failed.append(script_num)
+            log(f"  [XX] SCRIPT_{script_num}: فشل نهائياً بعد {max_attempts} محاولات")
+
     def replace_block(match):
         script_num = match.group(2)
         if script_num in regenerated:
             new_text = regenerated[script_num]
-            # استخراج البلوك الجديد لو فيه ماركرز
             new_match = re.search(r'<<<SCRIPT_\d+>>>(.*?)<<<END_SCRIPT>>>', new_text, re.DOTALL)
             if new_match:
                 return f"<<<SCRIPT_{script_num}>>>{new_match.group(1)}<<<END_SCRIPT>>>"
@@ -3207,8 +3393,48 @@ def action_regenerate_failed(step, ctx):
 
     result_text = re.sub(pattern, replace_block, text, flags=re.DOTALL)
 
-    log(f"  regenerate_failed: تم استبدال {len(regenerated)}/{len(failed_scripts)} موضوع")
+    ctx.results[step["id"] + "_permanently_failed"] = permanently_failed
+
+    log(f"  regenerate_failed: {len(regenerated)}/{len(failed_scripts)} نجح | {len(permanently_failed)} فشل نهائياً")
+    if permanently_failed:
+        log(f"  الفاشل النهائي: {', '.join(permanently_failed)}")
+
     return result_text
+
+
+def action_assert_no_failures(step, ctx):
+    """يتحقق من قائمة الفاشل. لو فيها مواضيع → يرفع exception ويوقف الـ pipeline.
+    يقبل failed_ref واحد أو list من المراجع.
+    """
+    text = str(ctx.resolve(step["input"]))
+    failed_ref = step.get("failed_ref")
+    failed_refs = step.get("failed_refs")
+
+    refs_to_check = []
+    if failed_refs and isinstance(failed_refs, list):
+        refs_to_check = failed_refs
+    elif failed_ref:
+        refs_to_check = [failed_ref]
+
+    if not refs_to_check:
+        log("  assert_no_failures: مفيش failed_ref/failed_refs محدد — تخطي")
+        return text
+
+    all_failures = []
+    for ref in refs_to_check:
+        scripts = ctx.resolve(ref)
+        if scripts and isinstance(scripts, list):
+            all_failures.extend(scripts)
+
+    all_failures = list(dict.fromkeys(all_failures))
+
+    if all_failures:
+        msg = f"توقف الـ pipeline: فيه {len(all_failures)} موضوع فاشل لم يتم إصلاحه: {', '.join(all_failures)}"
+        log(f"  [XX] assert_no_failures: {msg}")
+        raise RuntimeError(msg)
+
+    log(f"  assert_no_failures: ✓ كل المواضيع نجحت")
+    return text
 
 
 # ========== ACTIONS Registry ==========
@@ -3240,6 +3466,8 @@ ACTIONS = {
     "draw_thumbnail": action_draw_thumbnail,
     "validate_texts": action_validate_texts,
     "regenerate_failed": action_regenerate_failed,
+    "assert_no_failures": action_assert_no_failures,
+    "auto_fix_text": action_auto_fix_text,
     "filter_by_topics": action_filter_by_topics,
 }
 
@@ -3272,6 +3500,8 @@ REQUIRED_PARAMS = {
     "draw_thumbnail": ["input"],
     "validate_texts": ["input"],
     "regenerate_failed": ["input"],
+    "assert_no_failures": ["input"],
+    "auto_fix_text": ["input"],
     "filter_by_topics": ["input"],
 }
 
