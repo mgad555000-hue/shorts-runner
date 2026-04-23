@@ -2840,19 +2840,56 @@ ALLOWED_2_LETTERS_FIX = {
     'فى', 'كم', 'كي', 'هل', 'لو',
 }
 
+END_OF_WORD_LETTERS_FIX = set('اىةيوءأؤإ')
+INNER_DIACRITICS_FIX = '\u064E\u064F\u0650'  # فتحة، ضمة، كسرة
+
 
 def _fix_remove_tatweel(text):
     """يحذف كل أحرف التطويل ـ من النص بدون التأثير على الماركرز."""
     return text.replace(TATWEEL_CHAR, '')
 
 
+def _looks_like_split_word_fix(before, after, tashkeel_chars):
+    """يحدد إذا كانت 'before after' كلمة واحدة مقطوعة بمسافة.
+
+    معايير الكشف (أيٌّ منها يكفي):
+    1. الجزء الثاني 1 حرف من حروف نهاية الكلمة (ء/ة/ى)
+    2. الجزء الثاني 2 حرف ينتهي بحرف نهاية كلمة (ء/ة/ى)
+    3. الجزء الأول ينتهي بحرف داخلي + حركة، والجزء الثاني بدون تشكيل تقريباً
+       — مثل: 'تَنْظِ يف' → 'تنظيف'
+    """
+    clean_after = re.sub(f'[{tashkeel_chars}]', '', after).strip()
+    clean_before = re.sub(f'[{tashkeel_chars}]', '', before).strip()
+
+    if clean_after in ALLOWED_2_LETTERS_FIX:
+        return False
+    if len(clean_before) > 12:
+        return False
+    if len(clean_after) == 1:
+        return clean_after in 'ءةى'
+    if len(clean_after) != 2:
+        return False
+    if clean_after[-1] in 'ءةى':
+        return True
+
+    # قاعدة 3: حرف داخلي + حركة + جزء ثاني بتشكيل منخفض
+    last_arabic_match = re.search(r'([\u0621-\u064A])([\u064B-\u0652\u0670]*)$', before)
+    if not last_arabic_match:
+        return False
+    last_letter = last_arabic_match.group(1)
+    trailing_diacritics = last_arabic_match.group(2)
+    if last_letter in END_OF_WORD_LETTERS_FIX:
+        return False
+    has_inner_diacritic = any(d in trailing_diacritics for d in INNER_DIACRITICS_FIX)
+    after_clean = after.strip()
+    after_diacritics = sum(1 for c in after_clean if c in tashkeel_chars)
+    after_letters = sum(1 for c in after_clean if '\u0621' <= c <= '\u064A')
+    low_tashkeel_ratio = (after_diacritics / after_letters) < 0.5 if after_letters else True
+    return has_inner_diacritic and low_tashkeel_ratio
+
+
 def _fix_mid_word_spaces(text, tashkeel_chars):
     """يصلح المسافات داخل الكلمات العربية (مثل 'الْأَطِبَّا ء' → 'الْأَطِبَّاء').
-
-    نمط الكشف:
-    - كلمة عربية (4+ حروف) + مسافة + 1-2 حرف عربي
-    - الجزء الثاني ينتهي بـ ء/ة/ى (دلالة على نهاية كلمة مقطوعة)
-    - الجزء الثاني ليس كلمة عربية شائعة قائمة بذاتها
 
     يرجع: (النص المصلح، عدد الإصلاحات)
     """
@@ -2862,22 +2899,10 @@ def _fix_mid_word_spaces(text, tashkeel_chars):
         nonlocal fixes
         before = m.group(1)
         after = m.group(2)
-        clean_after = re.sub(f'[{tashkeel_chars}]', '', after).strip()
-
-        # استثناء: كلمة معروفة قائمة بذاتها
-        if clean_after in ALLOWED_2_LETTERS_FIX:
-            return m.group(0)
-
-        # حرف وحيد لازم يكون من حروف نهاية الكلمة (ء/ة/ى)
-        if len(clean_after) == 1:
-            if clean_after not in 'ءةى':
-                return m.group(0)
-        elif len(clean_after) == 2:
-            if not re.search(r'[ءةى]$', clean_after):
-                return m.group(0)
-
-        fixes += 1
-        return before + after  # ربط الحرفين بدون مسافة
+        if _looks_like_split_word_fix(before, after, tashkeel_chars):
+            fixes += 1
+            return before + after
+        return m.group(0)
 
     pattern = r'([\u0621-\u064A\u0670' + re.escape(tashkeel_chars) + r']{4,})\s([\u0621-\u064A\u0670' + re.escape(tashkeel_chars) + r']{1,2})(?=\s|[.،؟!:؛]|$)'
     fixed = re.sub(pattern, replace_match, text)
@@ -2957,19 +2982,14 @@ def _check_tatweel_in_text(part_text):
 
 
 def _check_mid_word_spaces_count(part_text, tashkeel_chars):
-    """عدّاد المسافات داخل الكلمات (نسخة مختصرة من السكريبت)."""
+    """عدّاد المسافات داخل الكلمات (يستخدم نفس logic _looks_like_split_word_fix)."""
     pattern = r'([\u0621-\u064A\u0670' + re.escape(tashkeel_chars) + r']{4,})\s([\u0621-\u064A\u0670' + re.escape(tashkeel_chars) + r']{1,2})(?=\s|[.،؟!:؛]|$)'
     count = 0
     for m in re.finditer(pattern, part_text):
+        before = m.group(1)
         after = m.group(2)
-        clean_after = re.sub(f'[{tashkeel_chars}]', '', after).strip()
-        if clean_after in ALLOWED_2_LETTERS_FIX:
-            continue
-        if len(clean_after) == 1 and clean_after not in 'ءةى':
-            continue
-        if len(clean_after) == 2 and not re.search(r'[ءةى]$', clean_after):
-            continue
-        count += 1
+        if _looks_like_split_word_fix(before, after, tashkeel_chars):
+            count += 1
     return count
 
 

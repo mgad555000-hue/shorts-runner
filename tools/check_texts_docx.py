@@ -161,31 +161,45 @@ def check_mid_word_spaces(text):
         'لها', 'لهم', 'فى', 'أت', 'كم', 'كي', 'هل', 'لو', 'بل',
     }
 
+    END_OF_WORD_LETTERS = set('اىةيوءأؤإ')
+    INNER_DIACRITICS = '\u064E\u064F\u0650'
+
     matches = []
-    # نلتقط: كلمة عربية كاملة + مسافة + قطعة قصيرة جداً
     pattern = r'([\u0621-\u064A\u0670' + re.escape(TASHKEEL) + r']{4,})\s([\u0621-\u064A\u0670' + re.escape(TASHKEEL) + r']{1,2})(?=\s|[.،؟!:؛]|$)'
 
     for m in re.finditer(pattern, text):
         before = m.group(1)
         after = m.group(2)
         clean_after = re.sub(f'[{TASHKEEL}]', '', after).strip()
+        clean_before = re.sub(f'[{TASHKEEL}]', '', before).strip()
 
-        # استثناء 1: كلمة معروفة قائمة بذاتها
         if clean_after in ALLOWED_2_LETTERS or clean_after in COMMON_SHORT:
             continue
+        if len(clean_before) > 12:
+            continue
 
-        # استثناء 2: لو الحرف الوحيد عليه حركة كاملة → كلمة قصيرة منفصلة (مش جزء مقطوع)
+        is_split = False
         if len(clean_after) == 1:
-            # حرف واحد لازم يكون من حروف "نهاية كلمة" علشان يبقى مشكلة
-            # ء (همزة)، ة (تاء مربوطة)، ى (ألف مقصورة)
-            if clean_after not in 'ءةى':
-                continue
+            is_split = clean_after in 'ءةى'
         elif len(clean_after) == 2:
-            # حرفين: لازم ينتهي بحرف "نهاية كلمة" تلميحاً إنه قطعة من كلمة
-            if not re.search(r'[ءةى]$', clean_after):
-                continue
+            if clean_after[-1] in 'ءةى':
+                is_split = True
+            else:
+                # قاعدة 3: حرف داخلي + حركة + جزء ثاني بتشكيل منخفض (مثل تَنْظِ يف)
+                last_arabic = re.search(r'([\u0621-\u064A])([\u064B-\u0652\u0670]*)$', before)
+                if last_arabic:
+                    last_letter = last_arabic.group(1)
+                    trailing = last_arabic.group(2)
+                    if last_letter not in END_OF_WORD_LETTERS:
+                        has_inner = any(d in trailing for d in INNER_DIACRITICS)
+                        after_clean = after.strip()
+                        a_dia = sum(1 for c in after_clean if c in TASHKEEL)
+                        a_let = sum(1 for c in after_clean if '\u0621' <= c <= '\u064A')
+                        low_ratio = (a_dia / a_let) < 0.5 if a_let else True
+                        is_split = has_inner and low_ratio
 
-        matches.append(f"{before} {after}")
+        if is_split:
+            matches.append(f"{before} {after}")
 
     return matches
 
