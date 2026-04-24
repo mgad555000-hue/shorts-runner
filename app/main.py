@@ -1491,6 +1491,152 @@ async def get_usage_google_actual(
     }
 
 
+@app.get("/api/usage/billing-actual")
+async def get_billing_actual(
+    days: int = 30,
+    current_user: User = Depends(get_current_user),
+):
+    """يقرأ من BigQuery Billing Export الفعلي اليومي لخدمات Google Cloud.
+    ده مصدر 100% من فاتورة Google — أرقام متطابقة مع اللي Google بيحاسبك عليه.
+
+    بيحاول يقرأ من الجدولين (Standard + Detailed) ويختار اللي فيه بيانات أحدث.
+    """
+    try:
+        from google.cloud import bigquery
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Missing dependency: google-cloud-bigquery ({e})")
+
+    project_id = os.getenv("VERTEX_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT") or "gen-lang-client-0008961174"
+    dataset = os.getenv("BQ_BILLING_DATASET", "billing_export")
+    override_pattern = os.getenv("BQ_BILLING_TABLE")
+
+    try:
+        client = bigquery.Client(project=project_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery client init failed: {e}")
+
+    # اكتشاف الجداول المتاحة (Standard أو Detailed) وأحدث export_time لكل منهم
+    candidates: list = []
+    if override_pattern:
+        candidates = [{"pattern": override_pattern, "kind": "override"}]
+    else:
+        try:
+            tables = list(client.list_tables(dataset))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"BigQuery list_tables failed (dataset={dataset}): {e}")
+
+        has_standard = any(t.table_id.startswith("gcp_billing_export_v1_") for t in tables)
+        has_detailed = any(t.table_id.startswith("gcp_billing_export_resource_v1_") for t in tables)
+        if has_standard:
+            candidates.append({"pattern": "gcp_billing_export_v1_*", "kind": "standard"})
+        if has_detailed:
+            candidates.append({"pattern": "gcp_billing_export_resource_v1_*", "kind": "detailed"})
+
+    if not candidates:
+        return {
+            "project_id": project_id,
+            "dataset": dataset,
+            "days": days,
+            "source": None,
+            "error": "لا يوجد جدول Billing Export في BigQuery. فعّل Standard أو Detailed usage cost export من Google Cloud Console.",
+            "totals": {"cost_usd": 0.0, "credits_usd": 0.0, "net_cost_usd": 0.0},
+            "by_day": [],
+            "items": [],
+            "diagnostics": {"tables_checked": [c["pattern"] for c in candidates]},
+        }
+
+    # قياس "freshness" لكل جدول
+    for c in candidates:
+        try:
+            q = f"""SELECT MAX(export_time) AS latest_export, MAX(usage_start_time) AS latest_usage
+                    FROM `{project_id}.{dataset}.{c["pattern"]}`"""
+            row = list(client.query(q).result())[0]
+            c["latest_export"] = row["latest_export"].isoformat() if row["latest_export"] else None
+            c["latest_usage"] = row["latest_usage"].isoformat() if row["latest_usage"] else None
+        except Exception as e:
+            c["error"] = str(e)
+            c["latest_export"] = None
+
+    # اختيار الجدول اللي فيه أحدث export_time
+    valid = [c for c in candidates if c.get("latest_export")]
+    valid.sort(key=lambda x: x["latest_export"], reverse=True)
+    chosen = valid[0] if valid else candidates[0]
+    table_pattern = chosen["pattern"]
+
+    table_ref = f"`{project_id}.{dataset}.{table_pattern}`"
+    query = f"""
+    SELECT
+      DATE(usage_start_time) AS day,
+      service.description AS service,
+      sku.description AS sku,
+      SUM(cost) AS cost_usd,
+      SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS credits_usd,
+      SUM(usage.amount) AS usage_amount,
+      ANY_VALUE(usage.unit) AS usage_unit,
+      ANY_VALUE(currency) AS currency
+    FROM {table_ref}
+    WHERE usage_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+    GROUP BY day, service, sku
+    ORDER BY day DESC, cost_usd DESC
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("days", "INT64", days)]
+    )
+
+    try:
+        rows = list(client.query(query, job_config=job_config).result())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery query failed (table={table_pattern}): {e}")
+
+    by_day: dict = {}
+    items: list = []
+    total_cost = 0.0
+    total_credits = 0.0
+    for r in rows:
+        day_str = r["day"].isoformat() if r["day"] else None
+        cost = float(r["cost_usd"] or 0.0)
+        credits = float(r["credits_usd"] or 0.0)
+        net = cost + credits
+        total_cost += cost
+        total_credits += credits
+        items.append({
+            "day": day_str,
+            "service": r["service"],
+            "sku": r["sku"],
+            "cost_usd": round(cost, 6),
+            "credits_usd": round(credits, 6),
+            "net_cost_usd": round(net, 6),
+            "usage_amount": float(r["usage_amount"] or 0.0),
+            "usage_unit": r["usage_unit"],
+            "currency": r["currency"],
+        })
+        if day_str:
+            d = by_day.setdefault(day_str, {"day": day_str, "cost_usd": 0.0, "credits_usd": 0.0, "net_cost_usd": 0.0})
+            d["cost_usd"] = round(d["cost_usd"] + cost, 6)
+            d["credits_usd"] = round(d["credits_usd"] + credits, 6)
+            d["net_cost_usd"] = round(d["net_cost_usd"] + net, 6)
+
+    return {
+        "project_id": project_id,
+        "dataset": dataset,
+        "days": days,
+        "source": {
+            "kind": chosen.get("kind"),
+            "pattern": table_pattern,
+            "latest_export_time": chosen.get("latest_export"),
+            "latest_usage_time": chosen.get("latest_usage"),
+        },
+        "totals": {
+            "cost_usd": round(total_cost, 6),
+            "credits_usd": round(total_credits, 6),
+            "net_cost_usd": round(total_cost + total_credits, 6),
+        },
+        "by_day": sorted(by_day.values(), key=lambda x: x["day"], reverse=True),
+        "items": items,
+        "diagnostics": {"candidates": candidates},
+    }
+
+
 @app.post("/api/utilities/cleanup", response_model=CleanupResponse)
 async def trigger_cleanup(max_age_days: int = None, keep_last_n: int = None, admin: User = Depends(require_admin)):
     return CleanupResponse(**perform_cleanup(max_age_days, keep_last_n))

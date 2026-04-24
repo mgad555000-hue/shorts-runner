@@ -20,7 +20,9 @@
         tr:hover { background: #232b35; }
         .cost-est { color: #f7931a; font-weight: 600; }
         .cost-actual { color: #00ba7c; font-weight: 600; }
+        .cost-billing { color: #e0245e; font-weight: 700; }
         .cost-pending { color: #6e7a85; font-style: italic; }
+        .card.billing .value { color: #e0245e; }
         .token-col { color: #1d9bf0; }
         .controls { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
         select, input { background: #283340; color: #e7e9ea; border: 1px solid #38444d; border-radius: 8px; padding: 8px 12px; font-size: 14px; }
@@ -54,9 +56,9 @@
     <div class="legend">
         <strong>التقديري</strong> = محسوب من توكينز Google × السعر الرسمي (دقيق ~99%)
         &nbsp;|&nbsp;
-        <strong>الفعلي من Google</strong> = أرقام Vertex AI Batch API مباشرة (100% من جوجل)
+        <strong>الفعلي (Vertex)</strong> = أرقام Vertex AI Batch API مباشرة
         &nbsp;|&nbsp;
-        اضغط <strong>تحقق</strong> لجلب الفعلي لتشغيلة معينة، أو <strong>تحقق من الكل</strong> للجميع
+        <strong>من فاتورة Google</strong> = BigQuery Billing Export (100% من الفاتورة الفعلية)
     </div>
 
     <div class="controls">
@@ -94,11 +96,12 @@
                 <th>تفكير</th>
                 <th>إجمالي</th>
                 <th>تقديري $</th>
-                <th>فعلي (جوجل) $</th>
+                <th>فعلي (Vertex) $</th>
+                <th>فاتورة Google $</th>
                 <th>إجراء</th>
             </tr>
         </thead>
-        <tbody><tr><td colspan="13" class="loading">جارٍ التحميل...</td></tr></tbody>
+        <tbody><tr><td colspan="14" class="loading">جارٍ التحميل...</td></tr></tbody>
     </table>
 
     <script>
@@ -116,6 +119,8 @@
 
         let currentRows = [];
         const actualCache = {};
+        let billingData = null;  // { totals, by_day: [{day, net_cost_usd, ...}], items }
+        const BQ_START_DATE = '2026-04-22';  // تاريخ تفعيل BigQuery Export
 
         async function loadData() {
             const days = document.getElementById('days').value;
@@ -126,24 +131,58 @@
                 if (!res.ok) throw new Error(res.status);
                 const data = await res.json();
                 currentRows = data.runs || [];
+                await loadBillingActual(days);
                 renderSummary(data.totals);
                 renderTimeline();
             } catch (e) {
                 document.querySelector('#timelineTable tbody').innerHTML =
-                    `<tr><td colspan="13" class="loading">خطأ: ${e.message}</td></tr>`;
+                    `<tr><td colspan="14" class="loading">خطأ: ${e.message}</td></tr>`;
             }
+        }
+
+        async function loadBillingActual(days) {
+            try {
+                const res = await fetch(`/api/usage/billing-actual?days=${days}`,
+                    { headers: { 'Authorization': `Bearer ${TOKEN}` } });
+                if (!res.ok) {
+                    billingData = { error: `HTTP ${res.status}`, by_day: [], totals: {} };
+                    return;
+                }
+                billingData = await res.json();
+            } catch (e) {
+                billingData = { error: e.message, by_day: [], totals: {} };
+            }
+        }
+
+        function billingForDay(isoDate) {
+            if (!billingData || !billingData.by_day) return null;
+            const day = isoDate.substring(0, 10);
+            if (day < BQ_START_DATE) return { pending: true, reason: 'قبل تفعيل BigQuery' };
+            return billingData.by_day.find(d => d.day === day) || { empty: true };
         }
 
         function renderSummary(t) {
             const actualSum = Object.values(actualCache).reduce((a, b) => a + (b.estimated_cost_usd || 0), 0);
             const verified = Object.keys(actualCache).length;
+            const today = new Date().toISOString().substring(0, 10);
+            let billingTotal = '—';
+            let billingToday = '—';
+            let billingLabel = 'فاتورة Google (إجمالي)';
+            if (billingData && !billingData.error && billingData.totals) {
+                billingTotal = fmtCost(billingData.totals.net_cost_usd);
+                const t0 = (billingData.by_day || []).find(d => d.day === today);
+                if (t0) billingToday = fmtCost(t0.net_cost_usd);
+                billingLabel = `فاتورة Google (${billingData.days || '?'} يوم)`;
+            } else if (billingData && billingData.error) {
+                billingTotal = 'غير متاح';
+            }
             document.getElementById('summary').innerHTML = `
                 <div class="card"><div class="value">${fmt(t.runs)}</div><div class="label">تشغيلات</div></div>
                 <div class="card cost"><div class="value">${fmtCost(t.estimated_cost_usd)}</div><div class="label">إجمالي تقديري</div></div>
-                <div class="card actual"><div class="value">${verified > 0 ? fmtCost(actualSum) : '—'}</div><div class="label">إجمالي فعلي (${verified} تم التحقق)</div></div>
+                <div class="card actual"><div class="value">${verified > 0 ? fmtCost(actualSum) : '—'}</div><div class="label">فعلي Vertex (${verified} تم التحقق)</div></div>
+                <div class="card billing"><div class="value">${billingTotal}</div><div class="label">${billingLabel}</div></div>
+                <div class="card billing"><div class="value">${billingToday}</div><div class="label">فاتورة اليوم</div></div>
                 <div class="card"><div class="value">${fmt(t.total_tokens)}</div><div class="label">إجمالي التوكنز</div></div>
-                <div class="card"><div class="value">${fmt(t.input_tokens)}</div><div class="label">إدخال</div></div>
-                <div class="card"><div class="value">${fmt(t.output_tokens + t.thinking_tokens)}</div><div class="label">إخراج+تفكير</div></div>
             `;
         }
 
@@ -163,10 +202,18 @@
             return `<span class="cost-actual" title="${a.jobs_found} job(s)">${fmtCost(a.estimated_cost_usd)}</span>`;
         }
 
+        function billingCell(isoDate) {
+            const b = billingForDay(isoDate);
+            if (!b) return `<span class="cost-pending" title="لم يتم التحميل">—</span>`;
+            if (b.pending) return `<span class="cost-pending" title="${b.reason}">—</span>`;
+            if (b.empty) return `<span class="cost-pending" title="لا بيانات لهذا اليوم بعد">—</span>`;
+            return `<span class="cost-billing" title="إجمالي اليوم من BigQuery">${fmtCost(b.net_cost_usd)}</span>`;
+        }
+
         function renderTimeline() {
             const tbody = document.querySelector('#timelineTable tbody');
             if (!currentRows.length) {
-                tbody.innerHTML = `<tr><td colspan="13" class="loading">لا توجد بيانات</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="14" class="loading">لا توجد بيانات</td></tr>`;
                 return;
             }
             tbody.innerHTML = currentRows.map(r => `
@@ -183,6 +230,7 @@
                     <td class="token-col">${fmt(r.total_tokens)}</td>
                     <td class="cost-est">${fmtCost(r.estimated_cost_usd)}</td>
                     <td>${actualCell(r.run_id)}</td>
+                    <td>${billingCell(r.last_seen || '')}</td>
                     <td><button class="small" onclick="verifyOne('${r.run_id}', this)">تحقق</button></td>
                 </tr>
             `).join('');
