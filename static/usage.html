@@ -82,6 +82,20 @@
 
     <div id="summary" class="cards"></div>
 
+    <h2 style="color: #e0245e; margin: 20px 0 12px; font-size: 18px;">💰 فاتورة Google اليومية (من BigQuery مباشرة)</h2>
+    <div id="billingStatus" style="margin-bottom: 8px; font-size: 13px; color: #8899a6;"></div>
+    <table id="billingTable" style="margin-bottom: 24px;">
+        <thead>
+            <tr>
+                <th>اليوم</th>
+                <th>التكلفة $</th>
+                <th>الخدمات (أعلى 3)</th>
+            </tr>
+        </thead>
+        <tbody><tr><td colspan="3" class="loading">—</td></tr></tbody>
+    </table>
+
+    <h2 style="color: #1d9bf0; margin: 20px 0 12px; font-size: 18px;">📜 Timeline تشغيلاتك</h2>
     <table id="timelineTable">
         <thead>
             <tr>
@@ -132,6 +146,7 @@
                 const data = await res.json();
                 currentRows = data.runs || [];
                 await loadBillingActual(days);
+                renderBillingTable();
                 renderSummary(data.totals);
                 renderTimeline();
             } catch (e) {
@@ -152,6 +167,44 @@
             } catch (e) {
                 billingData = { error: e.message, by_day: [], totals: {} };
             }
+        }
+
+        function renderBillingTable() {
+            const tbody = document.querySelector('#billingTable tbody');
+            const status = document.getElementById('billingStatus');
+            if (!billingData || billingData.error) {
+                tbody.innerHTML = `<tr><td colspan="3" class="loading">${billingData?.error || 'لم يتم التحميل'}</td></tr>`;
+                status.textContent = '';
+                return;
+            }
+            const src = billingData.source || {};
+            const lastExp = src.latest_export_time ? new Date(src.latest_export_time).toLocaleString('ar-EG') : 'غير معروف';
+            status.innerHTML = `
+                <b>المصدر:</b> ${src.kind || '—'} (${src.pattern || '—'})
+                &nbsp;|&nbsp; <b>آخر كتابة من Google:</b> ${lastExp}
+                &nbsp;|&nbsp; <b>عدد الأيام:</b> ${billingData.by_day?.length || 0}
+            `;
+            const byDay = billingData.by_day || [];
+            if (!byDay.length) {
+                tbody.innerHTML = `<tr><td colspan="3" class="loading">لا توجد بيانات فاتورة في هذه الفترة</td></tr>`;
+                return;
+            }
+            const bySvc = {};
+            (billingData.items || []).forEach(it => {
+                const k = it.day;
+                if (!bySvc[k]) bySvc[k] = {};
+                bySvc[k][it.service] = (bySvc[k][it.service] || 0) + it.net_cost_usd;
+            });
+            tbody.innerHTML = byDay.map(d => {
+                const svcs = bySvc[d.day] || {};
+                const top3 = Object.entries(svcs).sort((a,b) => b[1]-a[1]).slice(0,3)
+                    .map(([s,c]) => `${s}: ${fmtCost(c)}`).join(' • ');
+                return `<tr>
+                    <td><b>${d.day}</b></td>
+                    <td class="cost-billing">${fmtCost(d.net_cost_usd)}</td>
+                    <td style="font-size: 12px; color: #8899a6;">${top3 || '—'}</td>
+                </tr>`;
+            }).join('');
         }
 
         function billingForDay(isoDate) {
