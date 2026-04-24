@@ -54,11 +54,11 @@
     <h1>📊 تتبع التكاليف — Timeline (الأحدث أولاً)</h1>
 
     <div class="legend">
-        <strong>التقديري</strong> = محسوب من توكينز Google × السعر الرسمي (دقيق ~99%)
+        <strong>التقديري</strong> = محسوب من توكينز Google × السعر الرسمي
         &nbsp;|&nbsp;
-        <strong>الفعلي (Vertex)</strong> = أرقام Vertex AI Batch API مباشرة
+        <strong>فعلي (Vertex)</strong> = أرقام Vertex AI Batch API (بس للتشغيلات اللي فيها batch calls — B:>0 — خلال آخر 30 يوم)
         &nbsp;|&nbsp;
-        <strong>من فاتورة Google</strong> = BigQuery Billing Export (100% من الفاتورة الفعلية)
+        <strong>فاتورة Google</strong> = نصيب التشغيلة من فاتورة اليوم (موزّع نسبياً على التكلفة التقديرية)
     </div>
 
     <div class="controls">
@@ -134,7 +134,7 @@
         let currentRows = [];
         const actualCache = {};
         let billingData = null;  // { totals, by_day: [{day, net_cost_usd, ...}], items }
-        const BQ_START_DATE = '2026-04-22';  // تاريخ تفعيل BigQuery Export
+        let runShareByDay = {};   // {day: {run_id: share_usd}}
 
         async function loadData() {
             const days = document.getElementById('days').value;
@@ -146,6 +146,7 @@
                 const data = await res.json();
                 currentRows = data.runs || [];
                 await loadBillingActual(days);
+                computeRunShares();
                 renderBillingTable();
                 renderSummary(data.totals);
                 renderTimeline();
@@ -153,6 +154,33 @@
                 document.querySelector('#timelineTable tbody').innerHTML =
                     `<tr><td colspan="14" class="loading">خطأ: ${e.message}</td></tr>`;
             }
+        }
+
+        // توزيع فاتورة اليوم على التشغيلات بنسبة التكلفة التقديرية
+        function computeRunShares() {
+            runShareByDay = {};
+            if (!billingData || !billingData.by_day) return;
+            const byDayTotal = {};
+            billingData.by_day.forEach(d => { byDayTotal[d.day] = d.net_cost_usd; });
+            const runsByDay = {};
+            currentRows.forEach(r => {
+                const day = (r.last_seen || '').substring(0, 10);
+                if (!day) return;
+                (runsByDay[day] = runsByDay[day] || []).push(r);
+            });
+            Object.keys(runsByDay).forEach(day => {
+                const total = byDayTotal[day];
+                if (total == null) return;
+                const runs = runsByDay[day];
+                const sumEst = runs.reduce((a, r) => a + (r.estimated_cost_usd || 0), 0);
+                runShareByDay[day] = {};
+                runs.forEach(r => {
+                    const share = sumEst > 0
+                        ? total * ((r.estimated_cost_usd || 0) / sumEst)
+                        : total / runs.length;
+                    runShareByDay[day][r.run_id] = share;
+                });
+            });
         }
 
         async function loadBillingActual(days) {
@@ -210,7 +238,11 @@
         function billingForDay(isoDate) {
             if (!billingData || !billingData.by_day) return null;
             const day = isoDate.substring(0, 10);
-            if (day < BQ_START_DATE) return { pending: true, reason: 'قبل تفعيل BigQuery' };
+            const src = billingData.source;
+            const lastExport = src && src.latest_usage_time ? src.latest_usage_time.substring(0, 10) : null;
+            if (lastExport && day > lastExport) {
+                return { pending: true, reason: `Google لسه ماكتبش بيانات اليوم ده (آخر يوم: ${lastExport})` };
+            }
             return billingData.by_day.find(d => d.day === day) || { empty: true };
         }
 
@@ -255,11 +287,16 @@
             return `<span class="cost-actual" title="${a.jobs_found} job(s)">${fmtCost(a.estimated_cost_usd)}</span>`;
         }
 
-        function billingCell(isoDate) {
+        function billingCell(isoDate, runId) {
             const b = billingForDay(isoDate);
             if (!b) return `<span class="cost-pending" title="لم يتم التحميل">—</span>`;
             if (b.pending) return `<span class="cost-pending" title="${b.reason}">—</span>`;
-            if (b.empty) return `<span class="cost-pending" title="لا بيانات لهذا اليوم بعد">—</span>`;
+            if (b.empty) return `<span class="cost-pending" title="لا بيانات لهذا اليوم">—</span>`;
+            const day = isoDate.substring(0, 10);
+            const share = runShareByDay[day] && runShareByDay[day][runId];
+            if (share != null) {
+                return `<span class="cost-billing" title="نصيب هذه التشغيلة من فاتورة اليوم ($${b.net_cost_usd.toFixed(4)} موزعة نسبياً على التكلفة التقديرية)">${fmtCost(share)}</span>`;
+            }
             return `<span class="cost-billing" title="إجمالي اليوم من BigQuery">${fmtCost(b.net_cost_usd)}</span>`;
         }
 
@@ -283,7 +320,7 @@
                     <td class="token-col">${fmt(r.total_tokens)}</td>
                     <td class="cost-est">${fmtCost(r.estimated_cost_usd)}</td>
                     <td>${actualCell(r.run_id)}</td>
-                    <td>${billingCell(r.last_seen || '')}</td>
+                    <td>${billingCell(r.last_seen || '', r.run_id)}</td>
                     <td><button class="small" onclick="verifyOne('${r.run_id}', this)">تحقق</button></td>
                 </tr>
             `).join('');
