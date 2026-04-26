@@ -5,7 +5,13 @@
       "id": "instructions",
       "action": "read_input",
       "file": "instructions.txt",
-      "label": "قراءة التعليمات"
+      "label": "قراءة تعليمات التوليد (بدون تشكيل)"
+    },
+    {
+      "id": "tashkeel_texts_rules",
+      "action": "read_input",
+      "file": "tashkeel_texts_instructions.txt",
+      "label": "قراءة تعليمات التشكيل"
     },
     {
       "id": "intros",
@@ -24,7 +30,7 @@
       "id": "prompt",
       "action": "template",
       "text": "{instructions}\n\n---\n\nالمقدمات المطلوب كتابة نصوص فصحى لها:\n\n{intros_filtered}",
-      "label": "تجميع البرومبت"
+      "label": "تجميع برومبت التوليد"
     },
     {
       "id": "texts_raw",
@@ -34,24 +40,47 @@
       "max_tokens": 32000,
       "temperature": 0.3,
       "thinking_level": "low",
-      "label": "توليد النصوص"
-    },
-    {
-      "id": "texts_stripped",
-      "action": "strip_last_letter_diacritic",
-      "input": "{texts_raw}",
-      "label": "إزالة حركة الحرف الأخير من كل كلمة"
+      "label": "توليد النصوص (بدون تشكيل)"
     },
     {
       "id": "texts_clean",
       "action": "clean_text",
-      "input": "{texts_stripped}",
+      "input": "{texts_raw}",
       "label": "تنظيف النصوص"
+    },
+    {
+      "id": "tashkeel_texts_prompt",
+      "action": "template",
+      "text": "{tashkeel_texts_rules}\n\n---\n\nالنصوص المطلوب تشكيلها (الفصحى):\n\n{texts_clean}",
+      "label": "تجميع برومبت التشكيل"
+    },
+    {
+      "id": "texts_tashkeeled",
+      "action": "generate",
+      "input": "{tashkeel_texts_prompt}",
+      "model": "gemini-3.1-pro-preview",
+      "max_tokens": 65536,
+      "temperature": 0.1,
+      "thinking_level": "low",
+      "label": "تشكيل النصوص (مرحلة منفصلة)"
+    },
+    {
+      "id": "texts_restored",
+      "action": "restore_truncated_words",
+      "input": "{texts_tashkeeled}",
+      "original": "{texts_clean}",
+      "label": "إصلاح الكلمات المبتورة (مطابقة بالمدخل)"
+    },
+    {
+      "id": "texts_stripped",
+      "action": "strip_last_letter_diacritic",
+      "input": "{texts_restored}",
+      "label": "إزالة حركة الحرف الأخير من كل كلمة"
     },
     {
       "id": "texts_auto_fixed",
       "action": "auto_fix_text",
-      "input": "{texts_clean}",
+      "input": "{texts_stripped}",
       "label": "إصلاح ميكانيكي (Tatweel + مسافات + كلمات طبية)"
     },
     {
@@ -68,12 +97,12 @@
       "action": "regenerate_failed",
       "input": "{texts_validated}",
       "failed_ref": "{texts_validated_failed}",
-      "instructions": "{instructions}",
+      "instructions": "{tashkeel_texts_rules}",
       "model": "gemini-3.1-pro-preview",
-      "temperature": 0.3,
+      "temperature": 0.1,
       "thinking_level": "low",
       "max_tokens": 16000,
-      "label": "إعادة توليد الفاشل"
+      "label": "إعادة تشكيل الفاشل"
     },
     {
       "id": "texts_final",
