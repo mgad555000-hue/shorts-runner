@@ -37,9 +37,15 @@
       "label": "توليد النصوص"
     },
     {
+      "id": "texts_stripped",
+      "action": "strip_last_letter_diacritic",
+      "input": "{texts_raw}",
+      "label": "إزالة حركة الحرف الأخير من كل كلمة"
+    },
+    {
       "id": "texts_clean",
       "action": "clean_text",
-      "input": "{texts_raw}",
+      "input": "{texts_stripped}",
       "label": "تنظيف النصوص"
     },
     {

@@ -110,9 +110,22 @@
       "label": "تشكيل النصوص (مرحلة منفصلة)"
     },
     {
+      "id": "texts_restored",
+      "action": "restore_truncated_words",
+      "input": "{texts_tashkeeled}",
+      "original": "{texts_clean}",
+      "label": "إصلاح الكلمات المبتورة (مطابقة بالمدخل)"
+    },
+    {
+      "id": "texts_stripped",
+      "action": "strip_last_letter_diacritic",
+      "input": "{texts_restored}",
+      "label": "إزالة حركة الحرف الأخير من كل كلمة"
+    },
+    {
       "id": "texts_auto_fixed",
       "action": "auto_fix_text",
-      "input": "{texts_tashkeeled}",
+      "input": "{texts_stripped}",
       "label": "إصلاح ميكانيكي (Tatweel + مسافات + كلمات طبية)"
     },
     {

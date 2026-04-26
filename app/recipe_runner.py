@@ -2969,6 +2969,139 @@ def action_auto_fix_text(step, ctx):
     return text
 
 
+def action_strip_last_letter_diacritic(step, ctx):
+    """يزيل الحركة فوق الحرف الأخير من كل كلمة عربية في النص.
+
+    الحركة = فتحة/كسرة/ضمة/سكون/تنوين فتح/تنوين كسر/تنوين ضم.
+    الشدة (U+0651) تبقى — لأنها جزء صرفي من الحرف.
+    الحرف نفسه يبقى موجوداً.
+
+    ملاحظة: في يونيكود، الشدة قد تأتي قبل أو بعد الحركة. الكود يلتقط
+    كل الحركات بعد آخر حرف عربي ويزيلها (مع الحفاظ على الشدة).
+    """
+    text = str(ctx.resolve(step["input"]))
+    SHADDA = 'ّ'
+    HARAKAT = 'ًٌٍَُِْ'  # كل أنواع الحركات (بدون شدة)
+
+    fixes = 0
+
+    def _strip(m):
+        nonlocal fixes
+        word = m.group(0)
+        # نلاقي آخر حرف عربي (غير حركة، غير شدة، غير ألف خنجرية)
+        last_letter_idx = -1
+        for i in range(len(word) - 1, -1, -1):
+            ch = word[i]
+            if 'ء' <= ch <= 'ي':
+                last_letter_idx = i
+                break
+        if last_letter_idx == -1:
+            return word
+
+        prefix = word[:last_letter_idx + 1]
+        suffix = word[last_letter_idx + 1:]
+        # نسيب الشدة، نشيل الحركات
+        new_suffix = ''.join(ch for ch in suffix if ch == SHADDA or ch == 'ٰ')
+        if suffix != new_suffix:
+            fixes += 1
+        return prefix + new_suffix
+
+    pattern = r'[ء-يً-ْٰ]+'
+    text = re.sub(pattern, _strip, text)
+
+    if fixes > 0:
+        log(f"  strip_last_letter_diacritic: ✓ {fixes} كلمة تم تنظيف حركة آخر حرف")
+    else:
+        log(f"  strip_last_letter_diacritic: ✓ مفيش حركات على آخر حرف")
+
+    return text
+
+
+def action_restore_truncated_words(step, ctx):
+    """يصطاد الكلمات المبتورة (محذوف منها حرف من النموذج) ويصلحها.
+
+    المنطق:
+    - يقارن المخرج (المُشكَّل من النموذج) بالمدخل الأصلي (بدون تشكيل)
+    - يطابق كلمة بكلمة داخل كل PART
+    - لو كلمة المخرج (بعد إزالة التشكيل) أقصر من كلمة المدخل
+      → يستبدلها بكلمة المدخل (بدون تشكيل، مع الحفاظ على علامات الترقيم)
+    """
+    output_text = str(ctx.resolve(step["input"]))
+    input_text = str(ctx.resolve(step["original"]))
+
+    TASHKEEL = 'ًٌٍَُِّْٰ'
+    PUNCT = '.،؟!:;؛'
+
+    def strip_t(s):
+        return re.sub(f'[{TASHKEEL}]', '', s)
+
+    fixes = 0
+
+    script_pat = r'(<<<SCRIPT_(\d+)>>>)(.*?)(<<<END_SCRIPT>>>)'
+    input_scripts = {}
+    for m in re.finditer(script_pat, input_text, re.DOTALL):
+        input_scripts[m.group(2)] = m.group(3)
+
+    def fix_part(input_part_text, output_part_text):
+        nonlocal fixes
+        input_words = input_part_text.split()
+        output_words = output_part_text.split()
+
+        if len(input_words) != len(output_words):
+            return output_part_text
+
+        fixed = []
+        for inp_w, out_w in zip(input_words, output_words):
+            inp_clean = strip_t(inp_w).strip(PUNCT)
+            out_clean = strip_t(out_w).strip(PUNCT)
+
+            if 0 < len(out_clean) < len(inp_clean) and inp_clean.startswith(out_clean):
+                trailing_punct = ''
+                for ch in reversed(out_w):
+                    if ch in PUNCT:
+                        trailing_punct = ch + trailing_punct
+                    else:
+                        break
+                fixes += 1
+                fixed.append(inp_w.rstrip(PUNCT) + trailing_punct)
+            else:
+                fixed.append(out_w)
+
+        return ' '.join(fixed)
+
+    def fix_script(m):
+        script_id = m.group(2)
+        output_script_content = m.group(3)
+        if script_id not in input_scripts:
+            return m.group(0)
+
+        input_script_content = input_scripts[script_id]
+        part_pat = r'(<<<PART_(\d+)>>>)(.*?)(<<<END_PART>>>)'
+        input_parts = {}
+        for pm in re.finditer(part_pat, input_script_content, re.DOTALL):
+            input_parts[pm.group(2)] = pm.group(3).strip()
+
+        def fix_part_match(pm):
+            part_id = pm.group(2)
+            output_part = pm.group(3).strip()
+            if part_id not in input_parts:
+                return pm.group(0)
+            fixed_text = fix_part(input_parts[part_id], output_part)
+            return f"{pm.group(1)}\n{fixed_text}\n{pm.group(4)}"
+
+        new_content = re.sub(part_pat, fix_part_match, output_script_content, flags=re.DOTALL)
+        return f"{m.group(1)}{new_content}{m.group(4)}"
+
+    output_text = re.sub(script_pat, fix_script, output_text, flags=re.DOTALL)
+
+    if fixes > 0:
+        log(f"  restore_truncated_words: ✓ تم إصلاح {fixes} كلمة مبتورة")
+    else:
+        log(f"  restore_truncated_words: ✓ مفيش كلمات مبتورة")
+
+    return output_text
+
+
 def _check_brackets_pattern(part_text):
     """فحص وجود أقواس مربعة حول حروف عربية — مثل: التَّكَيُّسَا[ت]"""
     bracket_matches = re.findall(r'\[[^\[\]]{1,3}\]', part_text)
@@ -3488,6 +3621,8 @@ ACTIONS = {
     "regenerate_failed": action_regenerate_failed,
     "assert_no_failures": action_assert_no_failures,
     "auto_fix_text": action_auto_fix_text,
+    "strip_last_letter_diacritic": action_strip_last_letter_diacritic,
+    "restore_truncated_words": action_restore_truncated_words,
     "filter_by_topics": action_filter_by_topics,
 }
 
@@ -3522,6 +3657,8 @@ REQUIRED_PARAMS = {
     "regenerate_failed": ["input"],
     "assert_no_failures": ["input"],
     "auto_fix_text": ["input"],
+    "strip_last_letter_diacritic": ["input"],
+    "restore_truncated_words": ["input", "original"],
     "filter_by_topics": ["input"],
 }
 
