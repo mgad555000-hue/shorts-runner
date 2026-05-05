@@ -14,9 +14,15 @@
       "label": "قراءة العناوين"
     },
     {
+      "id": "memory_bank",
+      "action": "read_input",
+      "file": "memory_bank.json",
+      "label": "قراءة بنك الذاكرة"
+    },
+    {
       "id": "prompt",
       "action": "template",
-      "text": "{instructions}\n\n---\n\nقائمة العناوين المطلوب إنشاء سكريبتات لها:\n\n{topics}",
+      "text": "{instructions}\n\n---\n\nبنك ذاكرة الفيديوهات السابقة (ممنوع تكرار محتواه):\n\n{memory_bank}\n\n---\n\nقائمة العناوين المطلوب إنشاء سكريبتات لها:\n\n{topics}",
       "label": "تجميع البرومبت"
     },
     {
@@ -28,6 +34,15 @@
       "temperature": 0.5,
       "thinking_level": "low",
       "label": "توليد السكريبتات (بدون تشكيل)"
+    },
+    {
+      "id": "update_memory",
+      "action": "update_memory_bank",
+      "input": "{scripts}",
+      "topics": "{topics}",
+      "file": "memory_bank.json",
+      "max_entries": 100,
+      "label": "تحديث بنك الذاكرة أوتوماتيكياً"
     },
     {
       "id": "intros_raw",
@@ -69,7 +84,7 @@
       "id": "intros_formatted",
       "action": "format_text",
       "input": "{tashkeel_intros}",
-      "color_words": ["بس", "ده", "دي", "دى", "دول"],
+      "color_words": ["الكلا", "النفرونات", "الكبيبات", "البودوسيت", "الكرياتينين", "الالبومين"],
       "spaces_after_punctuation": 5,
       "label": "تنسيق المقدمات"
     },

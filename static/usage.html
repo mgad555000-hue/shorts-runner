@@ -54,11 +54,9 @@
     <h1>📊 تتبع التكاليف — Timeline (الأحدث أولاً)</h1>
 
     <div class="legend">
-        <strong>التقديري</strong> = محسوب من توكينز Google × السعر الرسمي
+        <strong>التقديري</strong> = محسوب من توكينز Google × السعر الرسمي (يظهر فور التشغيل)
         &nbsp;|&nbsp;
-        <strong>فعلي (Vertex)</strong> = أرقام Vertex AI Batch API (بس للتشغيلات اللي فيها batch calls — B:>0 — خلال آخر 30 يوم)
-        &nbsp;|&nbsp;
-        <strong>فاتورة Google</strong> = نصيب التشغيلة من فاتورة اليوم (موزّع نسبياً على التكلفة التقديرية)
+        <strong>فعلي من Google</strong> = الرقم الحقيقي 100% من فاتورة Google عبر BigQuery، باستخدام custom labels (run_id) المرسلة مع كل طلب. اضغط "تحقق" بعد 24-48 ساعة من التشغيل (وقت تأخر BigQuery).
     </div>
 
     <div class="controls">
@@ -82,18 +80,7 @@
 
     <div id="summary" class="cards"></div>
 
-    <h2 style="color: #e0245e; margin: 20px 0 12px; font-size: 18px;">💰 فاتورة Google اليومية (من BigQuery مباشرة)</h2>
-    <div id="billingStatus" style="margin-bottom: 8px; font-size: 13px; color: #8899a6;"></div>
-    <table id="billingTable" style="margin-bottom: 24px;">
-        <thead>
-            <tr>
-                <th>اليوم</th>
-                <th>التكلفة $</th>
-                <th>الخدمات (أعلى 3)</th>
-            </tr>
-        </thead>
-        <tbody><tr><td colspan="3" class="loading">—</td></tr></tbody>
-    </table>
+    <div id="billingStatus" style="margin: 8px 0 16px; font-size: 13px; color: #8899a6;"></div>
 
     <h2 style="color: #1d9bf0; margin: 20px 0 12px; font-size: 18px;">📜 Timeline تشغيلاتك</h2>
     <table id="timelineTable">
@@ -110,12 +97,11 @@
                 <th>تفكير</th>
                 <th>إجمالي</th>
                 <th>تقديري $</th>
-                <th>فعلي (Vertex) $</th>
-                <th>فاتورة Google $</th>
+                <th>فعلي من Google $</th>
                 <th>إجراء</th>
             </tr>
         </thead>
-        <tbody><tr><td colspan="14" class="loading">جارٍ التحميل...</td></tr></tbody>
+        <tbody><tr><td colspan="13" class="loading">جارٍ التحميل...</td></tr></tbody>
     </table>
 
     <script>
@@ -133,8 +119,7 @@
 
         let currentRows = [];
         const actualCache = {};
-        let billingData = null;  // { totals, by_day: [{day, net_cost_usd, ...}], items }
-        let runShareByDay = {};   // {day: {run_id: share_usd}}
+        let billingData = null;  // إجمالي الفترة من BigQuery — للعرض في الـ summary فقط
 
         async function loadData() {
             const days = document.getElementById('days').value;
@@ -146,41 +131,13 @@
                 const data = await res.json();
                 currentRows = data.runs || [];
                 await loadBillingActual(days);
-                computeRunShares();
-                renderBillingTable();
+                renderBillingStatus();
                 renderSummary(data.totals);
                 renderTimeline();
             } catch (e) {
                 document.querySelector('#timelineTable tbody').innerHTML =
-                    `<tr><td colspan="14" class="loading">خطأ: ${e.message}</td></tr>`;
+                    `<tr><td colspan="13" class="loading">خطأ: ${e.message}</td></tr>`;
             }
-        }
-
-        // توزيع فاتورة اليوم على التشغيلات بنسبة التكلفة التقديرية
-        function computeRunShares() {
-            runShareByDay = {};
-            if (!billingData || !billingData.by_day) return;
-            const byDayTotal = {};
-            billingData.by_day.forEach(d => { byDayTotal[d.day] = d.net_cost_usd; });
-            const runsByDay = {};
-            currentRows.forEach(r => {
-                const day = (r.last_seen || '').substring(0, 10);
-                if (!day) return;
-                (runsByDay[day] = runsByDay[day] || []).push(r);
-            });
-            Object.keys(runsByDay).forEach(day => {
-                const total = byDayTotal[day];
-                if (total == null) return;
-                const runs = runsByDay[day];
-                const sumEst = runs.reduce((a, r) => a + (r.estimated_cost_usd || 0), 0);
-                runShareByDay[day] = {};
-                runs.forEach(r => {
-                    const share = sumEst > 0
-                        ? total * ((r.estimated_cost_usd || 0) / sumEst)
-                        : total / runs.length;
-                    runShareByDay[day][r.run_id] = share;
-                });
-            });
         }
 
         async function loadBillingActual(days) {
@@ -197,66 +154,32 @@
             }
         }
 
-        function renderBillingTable() {
-            const tbody = document.querySelector('#billingTable tbody');
+        function renderBillingStatus() {
             const status = document.getElementById('billingStatus');
             if (!billingData || billingData.error) {
-                tbody.innerHTML = `<tr><td colspan="3" class="loading">${billingData?.error || 'لم يتم التحميل'}</td></tr>`;
-                status.textContent = '';
+                status.innerHTML = `<span style="color:#8899a6">ℹ️ مجموع الفترة من Google غير متاح</span>`;
                 return;
             }
             const src = billingData.source || {};
-            const lastExp = src.latest_export_time ? new Date(src.latest_export_time).toLocaleString('ar-EG') : 'غير معروف';
+            const lastUsage = src.latest_usage_time ? src.latest_usage_time.substring(0, 10) : '—';
+            const totalActual = billingData.totals?.net_cost_usd || 0;
+            const days = billingData.by_day?.length || 0;
             status.innerHTML = `
-                <b>المصدر:</b> ${src.kind || '—'} (${src.pattern || '—'})
-                &nbsp;|&nbsp; <b>آخر كتابة من Google:</b> ${lastExp}
-                &nbsp;|&nbsp; <b>عدد الأيام:</b> ${billingData.by_day?.length || 0}
+                <b>إجمالي فاتورة Google لهذه الفترة (${days} يوم) من BigQuery:</b>
+                <span class="cost-billing" style="font-size:15px">${fmtCost(totalActual)}</span>
+                &nbsp;|&nbsp; آخر يوم متاح في BigQuery: ${lastUsage}
+                &nbsp;|&nbsp; <span style="font-size:11px">(الإجمالي حقيقي 100% من Google. التوزيع لكل تشغيلة على حدة → اضغط "تحقق")</span>
             `;
-            const byDay = billingData.by_day || [];
-            if (!byDay.length) {
-                tbody.innerHTML = `<tr><td colspan="3" class="loading">لا توجد بيانات فاتورة في هذه الفترة</td></tr>`;
-                return;
-            }
-            const bySvc = {};
-            (billingData.items || []).forEach(it => {
-                const k = it.day;
-                if (!bySvc[k]) bySvc[k] = {};
-                bySvc[k][it.service] = (bySvc[k][it.service] || 0) + it.net_cost_usd;
-            });
-            tbody.innerHTML = byDay.map(d => {
-                const svcs = bySvc[d.day] || {};
-                const top3 = Object.entries(svcs).sort((a,b) => b[1]-a[1]).slice(0,3)
-                    .map(([s,c]) => `${s}: ${fmtCost(c)}`).join(' • ');
-                return `<tr>
-                    <td><b>${d.day}</b></td>
-                    <td class="cost-billing">${fmtCost(d.net_cost_usd)}</td>
-                    <td style="font-size: 12px; color: #8899a6;">${top3 || '—'}</td>
-                </tr>`;
-            }).join('');
-        }
-
-        function billingForDay(isoDate) {
-            if (!billingData || !billingData.by_day) return null;
-            const day = isoDate.substring(0, 10);
-            const src = billingData.source;
-            const lastExport = src && src.latest_usage_time ? src.latest_usage_time.substring(0, 10) : null;
-            if (lastExport && day > lastExport) {
-                return { pending: true, reason: `Google لسه ماكتبش بيانات اليوم ده (آخر يوم: ${lastExport})` };
-            }
-            return billingData.by_day.find(d => d.day === day) || { empty: true };
         }
 
         function renderSummary(t) {
-            const actualSum = Object.values(actualCache).reduce((a, b) => a + (b.estimated_cost_usd || 0), 0);
-            const verified = Object.keys(actualCache).length;
-            const today = new Date().toISOString().substring(0, 10);
+            const verifiedRuns = Object.values(actualCache).filter(a => !a.error && !a.pending && (a.line_items || 0) > 0);
+            const actualSum = verifiedRuns.reduce((a, b) => a + (b.net_cost_usd || 0), 0);
+            const verified = verifiedRuns.length;
             let billingTotal = '—';
-            let billingToday = '—';
             let billingLabel = 'فاتورة Google (إجمالي)';
             if (billingData && !billingData.error && billingData.totals) {
                 billingTotal = fmtCost(billingData.totals.net_cost_usd);
-                const t0 = (billingData.by_day || []).find(d => d.day === today);
-                if (t0) billingToday = fmtCost(t0.net_cost_usd);
                 billingLabel = `فاتورة Google (${billingData.days || '?'} يوم)`;
             } else if (billingData && billingData.error) {
                 billingTotal = 'غير متاح';
@@ -264,9 +187,8 @@
             document.getElementById('summary').innerHTML = `
                 <div class="card"><div class="value">${fmt(t.runs)}</div><div class="label">تشغيلات</div></div>
                 <div class="card cost"><div class="value">${fmtCost(t.estimated_cost_usd)}</div><div class="label">إجمالي تقديري</div></div>
-                <div class="card actual"><div class="value">${verified > 0 ? fmtCost(actualSum) : '—'}</div><div class="label">فعلي Vertex (${verified} تم التحقق)</div></div>
+                <div class="card actual"><div class="value">${verified > 0 ? fmtCost(actualSum) : '—'}</div><div class="label">إجمالي الفعلي (${verified} تم التحقق)</div></div>
                 <div class="card billing"><div class="value">${billingTotal}</div><div class="label">${billingLabel}</div></div>
-                <div class="card billing"><div class="value">${billingToday}</div><div class="label">فاتورة اليوم</div></div>
                 <div class="card"><div class="value">${fmt(t.total_tokens)}</div><div class="label">إجمالي التوكنز</div></div>
             `;
         }
@@ -279,31 +201,23 @@
             return `<span class="status-badge ${cls}">${s || '—'}</span>`;
         }
 
-        function actualCell(runId) {
+        function actualCell(r) {
+            const runId = r.run_id;
             const a = actualCache[runId];
-            if (!a) return `<span class="cost-pending">—</span>`;
-            if (a.error) return `<span class="cost-pending" title="${a.error}">خطأ</span>`;
-            if (a.jobs_found === 0) return `<span class="cost-pending" title="لا يوجد batch jobs">لا يوجد</span>`;
-            return `<span class="cost-actual" title="${a.jobs_found} job(s)">${fmtCost(a.estimated_cost_usd)}</span>`;
-        }
-
-        function billingCell(isoDate, runId) {
-            const b = billingForDay(isoDate);
-            if (!b) return `<span class="cost-pending" title="لم يتم التحميل">—</span>`;
-            if (b.pending) return `<span class="cost-pending" title="${b.reason}">—</span>`;
-            if (b.empty) return `<span class="cost-pending" title="لا بيانات لهذا اليوم">—</span>`;
-            const day = isoDate.substring(0, 10);
-            const share = runShareByDay[day] && runShareByDay[day][runId];
-            if (share != null) {
-                return `<span class="cost-billing" title="نصيب هذه التشغيلة من فاتورة اليوم ($${b.net_cost_usd.toFixed(4)} موزعة نسبياً على التكلفة التقديرية)">${fmtCost(share)}</span>`;
+            if (!a) {
+                return `<span class="cost-pending" title="اضغط 'تحقق' لاستعلام BigQuery (التشغيلات حديثة العهد قد تستغرق 24-48 ساعة لظهور بيانات Google)">—</span>`;
             }
-            return `<span class="cost-billing" title="إجمالي اليوم من BigQuery">${fmtCost(b.net_cost_usd)}</span>`;
+            if (a.error) return `<span class="cost-pending" title="${a.error}">خطأ</span>`;
+            if (a.pending) return `<span class="cost-pending" title="${a.reason || 'لسه ما اتكتبتش في BigQuery'}">Pending</span>`;
+            if (a.line_items === 0) return `<span class="cost-pending" title="لا توجد records في BigQuery لـ label run_id=${a.cleaned_run_id} — انتظر 24-48 ساعة">لا توجد</span>`;
+            const tooltip = `رقم 100% من فاتورة Google عبر BigQuery (${a.line_items} line item${a.line_items > 1 ? 's' : ''})\nالخدمات: ${(a.services || []).join(', ')}\nمصدر: ${a.source_kind || 'detailed'}`;
+            return `<span class="cost-actual" title="${tooltip}">${fmtCost(a.net_cost_usd)}</span>`;
         }
 
         function renderTimeline() {
             const tbody = document.querySelector('#timelineTable tbody');
             if (!currentRows.length) {
-                tbody.innerHTML = `<tr><td colspan="14" class="loading">لا توجد بيانات</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="13" class="loading">لا توجد بيانات</td></tr>`;
                 return;
             }
             tbody.innerHTML = currentRows.map(r => `
@@ -319,8 +233,7 @@
                     <td class="token-col">${fmt(r.thinking_tokens)}</td>
                     <td class="token-col">${fmt(r.total_tokens)}</td>
                     <td class="cost-est">${fmtCost(r.estimated_cost_usd)}</td>
-                    <td>${actualCell(r.run_id)}</td>
-                    <td>${billingCell(r.last_seen || '', r.run_id)}</td>
+                    <td>${actualCell(r)}</td>
                     <td><button class="small" onclick="verifyOne('${r.run_id}', this)">تحقق</button></td>
                 </tr>
             `).join('');
@@ -329,13 +242,17 @@
         async function verifyOne(runId, btn) {
             if (btn) { btn.disabled = true; btn.textContent = '...'; }
             try {
-                const res = await fetch(`/api/usage/google-actual/${runId}`,
+                const res = await fetch(`/api/usage/bigquery-actual/${runId}?days=90`,
                     { headers: { 'Authorization': `Bearer ${TOKEN}` } });
                 if (!res.ok) throw new Error(res.status);
                 const data = await res.json();
+                const actual = data.actual_from_google || {};
                 actualCache[runId] = {
-                    jobs_found: data.jobs_found,
-                    ...data.actual_from_google,
+                    cleaned_run_id: data.cleaned_run_id,
+                    source_kind: data.source?.kind,
+                    pending: !!data.pending,
+                    reason: data.reason,
+                    ...actual,
                 };
                 renderTimeline();
                 renderSummary({

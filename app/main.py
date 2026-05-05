@@ -1491,6 +1491,143 @@ async def get_usage_google_actual(
     }
 
 
+@app.get("/api/usage/bigquery-actual/{run_id}")
+async def get_bigquery_actual_for_run(
+    run_id: str,
+    days: int = 90,
+    current_user: User = Depends(get_current_user),
+):
+    """يقرأ التكلفة الفعلية من BigQuery Billing Export لتشغيلة محددة عبر custom labels.
+
+    الفكرة: لما الـ recipe بيشغّل generate، بيرسل label = {"run_id": "<cleaned>"} مع الطلب.
+    BigQuery بيخزّن هذا الـ label في حقل labels (ARRAY<STRUCT<key, value>>).
+    هذا الـ endpoint يستعلم عن كل cost لـ label.value = cleaned run_id → رقم 100% من Google.
+
+    تحفظ: BigQuery Billing Export متأخر 24-48 ساعة. لو التشغيلة حديثة → أرقام صفرية.
+    """
+    try:
+        from google.cloud import bigquery
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Missing dependency: google-cloud-bigquery ({e})")
+
+    # تنظيف run_id بنفس قاعدة Google Cloud labels (lowercase + alphanumeric + _ + -)
+    import re as _re
+    cleaned_run_id = _re.sub(r'[^a-z0-9_-]', '_', run_id.lower())[:63]
+
+    project_id = os.getenv("VERTEX_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT") or "gen-lang-client-0008961174"
+    dataset = os.getenv("BQ_BILLING_DATASET", "billing_export")
+
+    try:
+        client = bigquery.Client(project=project_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery client init failed: {e}")
+
+    # اكتشاف الجدول الأنسب (Detailed أولوية لأنه الوحيد اللي بيحفظ labels — Standard ما يحفظهاش)
+    candidates = []
+    try:
+        tables = list(client.list_tables(dataset))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery list_tables failed: {e}")
+
+    has_detailed = any(t.table_id.startswith("gcp_billing_export_resource_v1_") for t in tables)
+    has_standard = any(t.table_id.startswith("gcp_billing_export_v1_") for t in tables)
+
+    # Detailed أولاً لأنه الوحيد اللي يحفظ labels من generateContent
+    if has_detailed:
+        candidates.append({"pattern": "gcp_billing_export_resource_v1_*", "kind": "detailed"})
+    if has_standard:
+        candidates.append({"pattern": "gcp_billing_export_v1_*", "kind": "standard"})
+
+    if not candidates:
+        return {
+            "run_id": run_id,
+            "cleaned_run_id": cleaned_run_id,
+            "error": "لا يوجد جدول Billing Export في BigQuery",
+            "actual_from_google": None,
+        }
+
+    # نجرّب على كل جدول لحد ما نلاقي بيانات (الأولوية للـ detailed)
+    last_error = None
+    for chosen in candidates:
+        table_pattern = chosen["pattern"]
+        table_ref = f"`{project_id}.{dataset}.{table_pattern}`"
+
+        query = f"""
+        SELECT
+          SUM(cost) AS cost_usd,
+          SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS credits_usd,
+          ANY_VALUE(currency) AS currency,
+          COUNT(*) AS line_items,
+          ARRAY_AGG(DISTINCT service.description IGNORE NULLS LIMIT 10) AS services,
+          ARRAY_AGG(DISTINCT sku.description IGNORE NULLS LIMIT 20) AS skus,
+          MIN(usage_start_time) AS first_usage,
+          MAX(usage_end_time) AS last_usage
+        FROM {table_ref},
+        UNNEST(labels) AS lbl
+        WHERE lbl.key = 'run_id'
+          AND lbl.value = @run_id
+          AND usage_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("run_id", "STRING", cleaned_run_id),
+                bigquery.ScalarQueryParameter("days", "INT64", days),
+            ]
+        )
+
+        try:
+            rows = list(client.query(query, job_config=job_config).result())
+        except Exception as e:
+            last_error = f"{table_pattern}: {e}"
+            continue
+
+        if not rows:
+            continue
+        row = rows[0]
+        line_items = int(row["line_items"] or 0)
+        if line_items == 0:
+            # الجدول ده مفيهوش بيانات لهذه التشغيلة — جرّب التالي
+            continue
+
+        cost = float(row["cost_usd"] or 0.0)
+        credits = float(row["credits_usd"] or 0.0)
+        net = cost + credits
+
+        return {
+            "run_id": run_id,
+            "cleaned_run_id": cleaned_run_id,
+            "source": {"kind": chosen["kind"], "pattern": table_pattern},
+            "actual_from_google": {
+                "cost_usd": round(cost, 6),
+                "credits_usd": round(credits, 6),
+                "net_cost_usd": round(net, 6),
+                "currency": row["currency"],
+                "line_items": line_items,
+                "services": list(row["services"] or []),
+                "skus": list(row["skus"] or []),
+                "first_usage": row["first_usage"].isoformat() if row["first_usage"] else None,
+                "last_usage": row["last_usage"].isoformat() if row["last_usage"] else None,
+            },
+        }
+
+    # ما لقيناش بيانات في أي جدول
+    return {
+        "run_id": run_id,
+        "cleaned_run_id": cleaned_run_id,
+        "source": {"checked": [c["pattern"] for c in candidates]},
+        "actual_from_google": {
+            "cost_usd": 0.0,
+            "credits_usd": 0.0,
+            "net_cost_usd": 0.0,
+            "line_items": 0,
+            "services": [],
+            "skus": [],
+        },
+        "pending": True,
+        "reason": last_error or f"لا توجد بيانات في BigQuery لـ label run_id={cleaned_run_id} (التأخير الطبيعي 24-48 ساعة)",
+    }
+
+
 @app.get("/api/usage/billing-actual")
 async def get_billing_actual(
     days: int = 30,

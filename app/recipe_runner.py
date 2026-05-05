@@ -198,8 +198,19 @@ def action_generate(step, ctx):
     if step_model:
         log(f"  [model override] {step_model}")
 
+    # Labels لتتبع التكلفة الفعلية في BigQuery Billing
+    direct_labels = {}
+    if ctx.run_id:
+        direct_labels["run_id"] = ctx.run_id
+    if ctx.recipe_name:
+        direct_labels["recipe"] = ctx.recipe_name
+    if ctx.channel_name:
+        direct_labels["channel"] = ctx.channel_name
+    if step.get("id"):
+        direct_labels["step"] = step["id"]
+
     # === لو المدخل فيه أكتر من ماركر → توليد كل واحد لوحده بالتوازي ===
-    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, effective_model)
+    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, effective_model, labels=direct_labels)
     if per_marker_result is not None:
         text = per_marker_result
     else:
@@ -212,6 +223,7 @@ def action_generate(step, ctx):
             max_tokens=max_tokens,
             thinking_budget=thinking_budget,
             thinking_level=thinking_level,
+            labels=direct_labels,
         )
         if not result.success:
             raise EngineError(f"فشل التوليد: {result.error}", code="GENERATE_FAILED")
@@ -229,7 +241,7 @@ def action_generate(step, ctx):
     return text
 
 
-def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget=None, thinking_level=None, effective_model=None):
+def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget=None, thinking_level=None, effective_model=None, labels=None):
     """
     لو المدخل فيه أكتر من ماركر SCRIPT/INTRO → يقسّمه ويولّد كل واحد لوحده بالتوازي.
     بيرجع None لو المدخل مش multi-marker (يعني استخدم generate العادي).
@@ -292,6 +304,9 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
         if not section:
             return marker, None, {}
         single_prompt = instructions_part + section
+        # نحط marker كـ label إضافي لكل طلب (يفيد للتتبع داخل التشغيلة الواحدة)
+        per_call_labels = dict(labels) if labels else {}
+        per_call_labels["marker"] = marker.lower()
         result = generate(
             prompt=single_prompt,
             model=model_to_use,
@@ -300,6 +315,7 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
             max_tokens=max_tokens,
             thinking_budget=thinking_budget,
             thinking_level=thinking_level,
+            labels=per_call_labels,
         )
         return marker, result.data if result.success else None, result.token_usage if result.success else {}
 
@@ -3590,6 +3606,135 @@ def action_assert_no_failures(step, ctx):
     return text
 
 
+# ========== Memory Bank Auto-Update ==========
+
+SECTION_KEYWORDS = {
+    "الفشل_الكلوي": ["فشل كلوي", "الفشل الكلوي", "قصور كلوي", "القصور الكلوي", "كلوي نهائي", "مرحلة نهائية"],
+    "التهاب_الكبيبات": ["التهاب الكبيبات", "كبيبات الكلى", "نفروني", "نيفريت"],
+    "تكيسات_الكلى": ["تكيس", "تكيسات", "كيسات الكلى"],
+    "حصوات_الكلى": ["حصوة", "حصوات", "الحصى", "ترسبات الكلى"],
+    "البروتين_في_البول": ["بروتين في البول", "البروتين في البول", "زلال البول", "البومين", "ألبومين", "بيلة بروتينية"],
+    "ارتفاع_الكرياتينين": ["كرياتينين", "كراتينين"],
+    "اليوريا_والنيتروجين": ["يوريا", "نيتروجين"],
+    "السكري_والكلى": ["سكري", "السكر", "ديابيت", "ديابتيك"],
+    "ضغط_الدم_والكلى": ["ضغط الدم", "ارتفاع الضغط", "ضغطي"],
+    "غسيل_الكلى": ["غسيل", "ديال", "dialysis"],
+    "زراعة_الكلى": ["زراعة الكلى", "زرع الكلى", "متبرع", "transplant"],
+    "أدوية_الكلى": ["دواء", "أدوية", "عقار"],
+    "التغذية_للكلى": ["غذاء", "تغذية", "حمية", "نظام غذائي", "ريجيم"],
+    "ماء_وسوائل_الكلى": ["جفاف", "ترطيب", "السوائل"],
+    "الفحوصات_الكلوية": ["فحص", "تحليل", "اختبار", "تشخيص", "GFR", "سونار", "أشعة"],
+    "أعراض_الكلى": ["أعراض", "علامات", "تورم", "رغوة"],
+}
+
+
+def _normalize_arabic_text(s):
+    return s.replace("ى", "ي").replace("ة", "ه").replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+
+
+def _detect_section(title):
+    """تحديد القسم تلقائياً من العنوان — keyword matching بسيط مع normalization عربي"""
+    if not title:
+        return "_غير_مصنف"
+    title_norm = _normalize_arabic_text(title)
+    for section, keywords in SECTION_KEYWORDS.items():
+        for kw in keywords:
+            if _normalize_arabic_text(kw) in title_norm:
+                return section
+    return "_غير_مصنف"
+
+
+def _extract_block_summary(body, max_chars=400):
+    """استخراج ملخص قصير من نص بلوك (نص أو مقدمة)"""
+    if not body:
+        return ""
+    clean = re.sub(r'<<<(?:PART|END_PART)[^>]*>>>', '', body)
+    clean = re.sub(r'<<<END_(?:SCRIPT|INTRO)>>>', '', clean)
+    clean = re.sub(r'\.---\.---\.---[^\n]*', '', clean)
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    if len(clean) > max_chars:
+        return clean[:max_chars].rsplit(' ', 1)[0] + "..."
+    return clean
+
+
+def action_update_memory_bank(step, ctx):
+    """تحديث memory_bank.json بإضافة معلومات الفيديوهات المُنتجة حالياً"""
+    text = str(ctx.resolve(step["input"]))
+    bank_file = step.get("file", "memory_bank.json")
+    max_entries = int(step.get("max_entries", 100))
+
+    pattern = r'<<<(SCRIPT|INTRO)_(\d+)>>>(.*?)<<<END_\1>>>'
+    matches = re.findall(pattern, text, re.DOTALL)
+
+    if not matches:
+        log(f"  update_memory_bank: مفيش ماركرز — تخطي")
+        return text
+
+    titles = {}
+    topics_ref = step.get("topics")
+    if topics_ref:
+        try:
+            topics_raw = ctx.resolve(topics_ref)
+            tdata = json.loads(topics_raw) if isinstance(topics_raw, str) else topics_raw
+            items = _extract_items(tdata) or []
+            for item in items:
+                if isinstance(item, dict) and "id" in item:
+                    titles[int(item["id"])] = str(item.get("title", ""))
+        except Exception as e:
+            log(f"  update_memory_bank: تعذر قراءة topics ({e})")
+
+    bank_path = ctx.input_path(bank_file)
+    if os.path.exists(bank_path):
+        try:
+            with open(bank_path, "r", encoding="utf-8") as f:
+                bank = json.load(f)
+        except Exception:
+            bank = {}
+    else:
+        bank = {}
+
+    if not isinstance(bank, dict):
+        bank = {}
+    bank.setdefault("_description", "بنك ذاكرة أوتوماتيكي - يُحدَّث ذاتياً بعد كل تشغيل ناجح. لا تعدّل يدوياً.")
+    bank.setdefault("_max_entries", max_entries)
+    bank.setdefault("history", [])
+    if not isinstance(bank["history"], list):
+        bank["history"] = []
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    new_entries = []
+    for marker_type, vid_id, body in matches:
+        try:
+            vid = int(vid_id)
+        except ValueError:
+            continue
+        title = titles.get(vid, "")
+        section = _detect_section(title)
+        summary = _extract_block_summary(body, max_chars=400)
+        new_entries.append({
+            "video_id": vid,
+            "title": title,
+            "section": section,
+            "summary": summary,
+            "date": today,
+        })
+
+    bank["history"].extend(new_entries)
+
+    cap = int(bank.get("_max_entries", max_entries) or max_entries)
+    if len(bank["history"]) > cap:
+        bank["history"] = bank["history"][-cap:]
+
+    try:
+        with open(bank_path, "w", encoding="utf-8") as f:
+            json.dump(bank, f, ensure_ascii=False, indent=2)
+        log(f"  update_memory_bank: أضيف {len(new_entries)} entry — إجمالي: {len(bank['history'])}")
+    except Exception as e:
+        log(f"  update_memory_bank: فشل الحفظ ({e})")
+
+    return text
+
+
 # ========== ACTIONS Registry ==========
 
 ACTIONS = {
@@ -3624,6 +3769,7 @@ ACTIONS = {
     "strip_last_letter_diacritic": action_strip_last_letter_diacritic,
     "restore_truncated_words": action_restore_truncated_words,
     "filter_by_topics": action_filter_by_topics,
+    "update_memory_bank": action_update_memory_bank,
 }
 
 # ========== REQUIRED_PARAMS ==========
@@ -3660,6 +3806,7 @@ REQUIRED_PARAMS = {
     "strip_last_letter_diacritic": ["input"],
     "restore_truncated_words": ["input", "original"],
     "filter_by_topics": ["input"],
+    "update_memory_bank": ["input"],
 }
 
 

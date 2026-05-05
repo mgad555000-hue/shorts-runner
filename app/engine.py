@@ -344,12 +344,44 @@ def _get_api_key_for_provider(provider: str) -> str:
 
 # ========== الدوال الستة الرئيسية (هيكل فارغ - يتملأ في المراحل التالية) ==========
 
-def generate(prompt: str, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = None, thinking_budget: int = None, thinking_level: str = None) -> EngineResult:
+def _clean_label_value(s: str) -> str:
+    """تنظيف قيمة label حسب شروط Google Cloud:
+    أحرف صغيرة + أرقام + شرطة + شرطة سفلية فقط، حد أقصى 63 حرف.
+    """
+    if not s:
+        return ""
+    import re as _re
+    return _re.sub(r'[^a-z0-9_-]', '_', str(s).lower())[:63]
+
+
+def _build_clean_labels(labels: dict) -> dict:
+    """بناء dict من labels نظيفة تطابق شروط Google Cloud.
+    يتجاهل القيم اللي بقت كلها underscores بعد التنظيف (مثلاً اسم عربي بحت)
+    لتجنب labels غير مفيدة في BigQuery."""
+    if not labels:
+        return {}
+    out = {}
+    for k, v in labels.items():
+        ck = _clean_label_value(k)
+        cv = _clean_label_value(v)
+        if not ck or not cv:
+            continue
+        # رفض القيم اللي كلها underscore (محصلة تنظيف نص غير ASCII فقط)
+        if all(c == '_' for c in cv):
+            continue
+        out[ck] = cv
+    return out
+
+
+def generate(prompt: str, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = None, thinking_budget: int = None, thinking_level: str = None, labels: dict = None) -> EngineResult:
     """
     الدالة 1: توليد نص من برومبت
     تدعم: Gemini, OpenAI, Claude, GLM, Vertex AI
 
     ملاحظة: لاستخدام Vertex AI، استخدم "vertex:gemini-2.5-pro" مثلاً
+
+    labels: dict اختياري — يُرسل لـ Google Cloud Billing عبر Gemini API
+            (مثل {"run_id": "abc123"}) لتتبع التكلفة الفعلية لكل تشغيلة في BigQuery.
     """
     start_time = time.time()
 
@@ -368,7 +400,7 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
 
         if provider == "gemini":
             result_tuple = _retry_call(
-                lambda: _generate_gemini(prompt, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level),
+                lambda: _generate_gemini(prompt, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, labels=labels),
                 max_retries=3, base_delay=3.0, description=f"Gemini {model}"
             )
         elif provider == "vertex":
@@ -425,7 +457,7 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
 
 # ========== دوال الربط الفعلية (منسوخة من الكود المجرب) ==========
 
-def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None) -> str:
+def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None, labels: dict = None) -> str:
     """ربط Gemini عبر google.genai SDK الجديدة"""
     from google import genai
     from google.genai import types
@@ -435,6 +467,12 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
     config_params = {"temperature": temperature, "top_p": 0.95}
     if max_tokens:
         config_params["max_output_tokens"] = max_tokens
+
+    # Custom Metadata Labels — تتبع تكلفة كل تشغيلة في BigQuery Billing Export
+    clean_labels = _build_clean_labels(labels)
+    if clean_labels:
+        config_params["labels"] = clean_labels
+        log(f"  [labels] Direct call labels: {clean_labels}")
     # تحكم في التفكير — thinking_budget=0 له الأولوية القصوى (إلغاء التفكير)
     is_gemini_3 = any(x in model for x in ["gemini-3", "gemini-3.0", "gemini-3.1"])
     if thinking_budget == 0:

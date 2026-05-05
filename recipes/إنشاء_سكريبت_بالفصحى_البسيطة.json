@@ -1,5 +1,5 @@
 {
-  "name": "إنشاء سكريبت بالعامية",
+  "name": "إنشاء سكريبت بالفصحى البسيطة",
   "steps": [
     {
       "id": "instructions",
@@ -14,9 +14,15 @@
       "label": "قراءة العناوين"
     },
     {
+      "id": "memory_bank",
+      "action": "read_input",
+      "file": "memory_bank.json",
+      "label": "قراءة بنك الذاكرة"
+    },
+    {
       "id": "prompt",
       "action": "template",
-      "text": "{instructions}\n\n---\n\nقائمة العناوين المطلوب إنشاء سكريبتات لها:\n\n{topics}",
+      "text": "{instructions}\n\n---\n\nبنك ذاكرة الفيديوهات السابقة (ممنوع تكرار محتواه):\n\n{memory_bank}\n\n---\n\nقائمة العناوين المطلوب إنشاء سكريبتات لها:\n\n{topics}",
       "label": "تجميع البرومبت"
     },
     {
@@ -25,9 +31,18 @@
       "input": "{prompt}",
       "model": "gemini-3.1-pro-preview",
       "max_tokens": 16000,
-      "temperature": 0.7,
+      "temperature": 0.3,
       "thinking_level": "low",
       "label": "توليد السكريبتات"
+    },
+    {
+      "id": "update_memory",
+      "action": "update_memory_bank",
+      "input": "{scripts}",
+      "topics": "{topics}",
+      "file": "memory_bank.json",
+      "max_entries": 100,
+      "label": "تحديث بنك الذاكرة أوتوماتيكياً"
     },
     {
       "id": "tashkeel_rules",
@@ -55,7 +70,7 @@
       "id": "formatted",
       "action": "format_text",
       "input": "{tashkeel_scripts}",
-      "color_words": ["بس", "ده", "دي", "دى", "دول"],
+      "color_words": ["الكلا", "النفرونات", "الكبيبات", "البودوسيت", "الكرياتينين", "الالبومين"],
       "spaces_after_punctuation": 5,
       "label": "تنسيق النص"
     },
