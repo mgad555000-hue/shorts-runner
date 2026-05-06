@@ -585,20 +585,21 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
     if system_prompt:
         kwargs["system"] = system_prompt
 
-    # Extended thinking — يدعمها Claude Sonnet/Opus 4.x
-    # adaptive (الموصى به على Sonnet 4.6) — الموديل يقرر العمق حسب صعوبة المهمة
-    # ملاحظة حرجة: max_tokens لازم يكون كبير كفاية لاحتواء thinking + output معاً
-    # على Sonnet 4.6 الحد الأقصى = 64000 توكن
+    # Extended thinking — Sonnet 4.6
+    # نستخدم enabled mode بـ budget محدد (لا adaptive) لأن adaptive بيستهلك كل max_tokens المتاح
+    # القاعدة الذهبية: max_tokens = budget + مساحة output كافية (لا تتجاوز 16K بدون داعي)
     if thinking_level:
-        # لو max_tokens صغير، نرفعه للحد الأمن (16000) عشان يستوعب thinking + output
-        if final_max_tokens < 16000:
-            kwargs["max_tokens"] = 16000
-        kwargs["thinking"] = {"type": "adaptive"}
+        level_map = {"low": 2048, "medium": 5000, "high": 10000}
+        budget = level_map.get(thinking_level.lower(), 5000)
+        # نضمن مساحة output كافية بعد thinking (4K توكن على الأقل)
+        if final_max_tokens < budget + 4096:
+            kwargs["max_tokens"] = budget + 4096
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
         kwargs["temperature"] = 1.0
-        log(f"  [thinking] Claude adaptive (level hint={thinking_level}) max_tokens={kwargs['max_tokens']}")
+        log(f"  [thinking] Claude enabled budget={budget} (level={thinking_level}) max_tokens={kwargs['max_tokens']}")
     elif thinking_budget is not None and thinking_budget > 0:
         if thinking_budget >= final_max_tokens:
-            kwargs["max_tokens"] = thinking_budget + 8192
+            kwargs["max_tokens"] = thinking_budget + 4096
         kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
         kwargs["temperature"] = 1.0
         log(f"  [thinking] Claude enabled budget={thinking_budget} max_tokens={kwargs['max_tokens']}")
