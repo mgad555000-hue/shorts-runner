@@ -29,11 +29,11 @@
       "id": "scripts",
       "action": "generate",
       "input": "{prompt}",
-      "model": "gemini-3.1-pro-preview",
-      "max_tokens": 65536,
+      "model": "claude-sonnet-4-6",
+      "max_tokens": 32000,
       "temperature": 0.5,
-      "thinking_level": "low",
-      "label": "توليد السكريبتات (بدون تشكيل)"
+      "thinking_level": "medium",
+      "label": "توليد السكريبتات (Sonnet 4.6 مع التفكير)"
     },
     {
       "id": "update_memory",
@@ -74,11 +74,11 @@
       "id": "tashkeel_intros",
       "action": "generate",
       "input": "{tashkeel_prompt}",
-      "model": "gemini-2.5-pro",
-      "max_tokens": 65536,
+      "model": "claude-sonnet-4-6",
+      "max_tokens": 32000,
       "temperature": 0.1,
       "thinking_level": "medium",
-      "label": "تشكيل المقدمات"
+      "label": "تشكيل المقدمات (Sonnet 4.6 مع التفكير)"
     },
     {
       "id": "intros_formatted",
@@ -118,11 +118,11 @@
       "id": "texts_tashkeeled",
       "action": "generate",
       "input": "{tashkeel_texts_prompt}",
-      "model": "gemini-3.1-pro-preview",
-      "max_tokens": 65536,
+      "model": "claude-sonnet-4-6",
+      "max_tokens": 32000,
       "temperature": 0.1,
-      "thinking_level": "low",
-      "label": "تشكيل النصوص (مرحلة منفصلة)"
+      "thinking_level": "medium",
+      "label": "تشكيل النصوص (Sonnet 4.6 مع التفكير)"
     },
     {
       "id": "texts_restored",
@@ -158,11 +158,11 @@
       "input": "{texts_validated}",
       "failed_ref": "{texts_validated_failed}",
       "instructions": "{tashkeel_texts_rules}",
-      "model": "gemini-3.1-pro-preview",
+      "model": "claude-sonnet-4-6",
       "temperature": 0.1,
-      "thinking_level": "low",
+      "thinking_level": "medium",
       "max_tokens": 16000,
-      "label": "إعادة تشكيل الفاشل"
+      "label": "إعادة تشكيل الفاشل (Sonnet 4.6 مع التفكير)"
     },
     {
       "id": "texts_final",

@@ -417,7 +417,7 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
             )
         elif provider == "claude":
             result_tuple = _retry_call(
-                lambda: _generate_claude(prompt, model, api_key, system_prompt, temperature, max_tokens),
+                lambda: _generate_claude(prompt, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level),
                 max_retries=3, base_delay=3.0, description=f"Claude {model}"
             )
         elif provider == "glm":
@@ -568,35 +568,56 @@ def _generate_openai(prompt: str, model: str, api_key: str, system_prompt: str, 
     return response.choices[0].message.content, _token_usage
 
 
-def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None) -> str:
     """ربط Claude عبر anthropic SDK"""
     import anthropic
 
     client = anthropic.Anthropic(api_key=api_key)
 
+    final_max_tokens = max_tokens or 16384
+
     kwargs = {
         "model": model,
-        "max_tokens": max_tokens or 16384,
+        "max_tokens": final_max_tokens,
         "temperature": temperature,
         "messages": [{"role": "user", "content": prompt}],
     }
     if system_prompt:
         kwargs["system"] = system_prompt
 
+    # Extended thinking — يدعمها Claude Sonnet/Opus 4.x
+    budget = None
+    if thinking_budget is not None and thinking_budget > 0:
+        budget = thinking_budget
+    elif thinking_level:
+        level_map = {"low": 2048, "medium": 5000, "high": 10000}
+        budget = level_map.get(thinking_level.lower(), 5000)
+
+    if budget is not None:
+        if budget >= final_max_tokens:
+            kwargs["max_tokens"] = budget + 4096
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        kwargs["temperature"] = 1.0
+        log(f"  [thinking] Claude budget={budget} max_tokens={kwargs['max_tokens']}")
+
     message = client.messages.create(**kwargs)
 
-    if not message.content or not message.content[0].text:
+    text_out = ""
+    for block in (message.content or []):
+        if getattr(block, "type", None) == "text":
+            text_out += getattr(block, "text", "") or ""
+    if not text_out:
         raise ValueError("Claude returned empty response")
 
-    # استخراج التوكنز
     _token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
     if hasattr(message, 'usage') and message.usage:
         _token_usage["input"] = getattr(message.usage, 'input_tokens', 0) or 0
         _token_usage["output"] = getattr(message.usage, 'output_tokens', 0) or 0
+        _token_usage["thinking"] = getattr(message.usage, 'cache_creation_input_tokens', 0) or 0
         _token_usage["total"] = _token_usage["input"] + _token_usage["output"]
         log(f"  [tokens] input={_token_usage['input']} output={_token_usage['output']} total={_token_usage['total']}")
 
-    return message.content[0].text, _token_usage
+    return text_out, _token_usage
 
 
 def _generate_glm(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
