@@ -468,11 +468,8 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
     if max_tokens:
         config_params["max_output_tokens"] = max_tokens
 
-    # Custom Metadata Labels — تتبع تكلفة كل تشغيلة في BigQuery Billing Export
-    clean_labels = _build_clean_labels(labels)
-    if clean_labels:
-        config_params["labels"] = clean_labels
-        log(f"  [labels] Direct call labels: {clean_labels}")
+    # Custom Metadata Labels — مدعوم في Vertex/Batch فقط، مش في Direct Gemini API
+    # ملاحظة: محاولة إضافتها هنا بترجع 400 — لذلك نتخطاها
     # تحكم في التفكير — thinking_budget=0 له الأولوية القصوى (إلغاء التفكير)
     is_gemini_3 = any(x in model for x in ["gemini-3", "gemini-3.0", "gemini-3.1"])
     if thinking_budget == 0:
