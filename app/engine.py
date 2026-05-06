@@ -603,7 +603,15 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
         kwargs["temperature"] = 1.0
         log(f"  [thinking] Claude budget={thinking_budget} max_tokens={kwargs['max_tokens']}")
 
-    message = client.messages.create(**kwargs)
+    # Streaming إجباري لما thinking مفعل + max_tokens كبير (SDK يرفض غير streaming لو متوقع > 10 دقائق)
+    use_stream = "thinking" in kwargs and kwargs["max_tokens"] >= 8192
+
+    if use_stream:
+        log(f"  [stream] Claude streaming mode (thinking + max_tokens={kwargs['max_tokens']})")
+        with client.messages.stream(**kwargs) as stream:
+            message = stream.get_final_message()
+    else:
+        message = client.messages.create(**kwargs)
 
     text_out = ""
     for block in (message.content or []):
