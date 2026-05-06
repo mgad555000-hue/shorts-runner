@@ -586,19 +586,22 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
         kwargs["system"] = system_prompt
 
     # Extended thinking — يدعمها Claude Sonnet/Opus 4.x
-    budget = None
-    if thinking_budget is not None and thinking_budget > 0:
-        budget = thinking_budget
-    elif thinking_level:
-        level_map = {"low": 2048, "medium": 5000, "high": 10000}
-        budget = level_map.get(thinking_level.lower(), 5000)
-
-    if budget is not None:
-        if budget >= final_max_tokens:
-            kwargs["max_tokens"] = budget + 4096
-        kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+    # adaptive (effort=low/medium/high) = الموديل يقرر العمق حسب صعوبة المهمة
+    # ملاحظة API: effort هو top-level parameter، مش جوا thinking object
+    # enabled (budget_tokens=N) = legacy mode — يُستخدم لو thinking_budget معطى صراحة
+    if thinking_level:
+        # adaptive thinking — الموديل يقرر العمق حسب صعوبة المهمة
+        # ملاحظة: على Sonnet 4.6، الـ API لا يقبل effort مع adaptive (مرفوض بـ 400)
+        # effort متاح فقط على Opus 4.7+ — هنا نسيب الموديل يقرر لوحده
+        kwargs["thinking"] = {"type": "adaptive"}
         kwargs["temperature"] = 1.0
-        log(f"  [thinking] Claude budget={budget} max_tokens={kwargs['max_tokens']}")
+        log(f"  [thinking] Claude adaptive (model decides) hint={thinking_level} max_tokens={kwargs['max_tokens']}")
+    elif thinking_budget is not None and thinking_budget > 0:
+        if thinking_budget >= final_max_tokens:
+            kwargs["max_tokens"] = thinking_budget + 4096
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+        kwargs["temperature"] = 1.0
+        log(f"  [thinking] Claude budget={thinking_budget} max_tokens={kwargs['max_tokens']}")
 
     message = client.messages.create(**kwargs)
 
