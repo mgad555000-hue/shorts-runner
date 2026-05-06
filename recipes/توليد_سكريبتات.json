@@ -74,11 +74,11 @@
       "id": "tashkeel_intros",
       "action": "generate",
       "input": "{tashkeel_prompt}",
-      "model": "gemini-3-flash-preview",
+      "model": "gemini-3.1-pro-preview",
       "max_tokens": 15000,
       "temperature": 0.1,
-      "thinking_level": "medium",
-      "label": "تشكيل المقدمات (Gemini 3 Flash Preview + thinking=medium)"
+      "thinking_level": "low",
+      "label": "تشكيل المقدمات (Gemini 3.1 Pro Preview + thinking=low)"
     },
     {
       "id": "intros_formatted",
@@ -118,11 +118,11 @@
       "id": "texts_tashkeeled",
       "action": "generate",
       "input": "{tashkeel_texts_prompt}",
-      "model": "gemini-3-flash-preview",
+      "model": "gemini-3.1-pro-preview",
       "max_tokens": 15000,
       "temperature": 0.1,
-      "thinking_level": "medium",
-      "label": "تشكيل النصوص (Gemini 3 Flash Preview + thinking=medium)"
+      "thinking_level": "low",
+      "label": "تشكيل النصوص (Gemini 3.1 Pro Preview + thinking=low)"
     },
     {
       "id": "texts_restored",
@@ -158,11 +158,11 @@
       "input": "{texts_validated}",
       "failed_ref": "{texts_validated_failed}",
       "instructions": "{tashkeel_texts_rules}",
-      "model": "gemini-3-flash-preview",
+      "model": "gemini-3.1-pro-preview",
       "temperature": 0.1,
-      "thinking_level": "medium",
+      "thinking_level": "low",
       "max_tokens": 15000,
-      "label": "إعادة تشكيل الفاشل (Gemini 3 Flash Preview + thinking=medium)"
+      "label": "إعادة تشكيل الفاشل (Gemini 3.1 Pro Preview + thinking=low)"
     },
     {
       "id": "texts_final",

@@ -830,6 +830,12 @@ def action_save_docx(step, ctx):
         filename += ".docx"
     filepath = ctx.output_path(filename)
 
+    # حماية: رفض حفظ docx فاضي
+    if not text or not text.strip():
+        msg = f"رفض حفظ {filename}: الـ input فاضي تماماً — احتمال فشل في خطوة سابقة"
+        log(f"  [XX] save_docx: {msg}")
+        raise RuntimeError(msg)
+
     doc = Document()
 
     # ضبط RTL للمستند
@@ -3437,7 +3443,21 @@ def action_validate_texts(step, ctx):
             for issue in script_issues:
                 log(f"  [!] SCRIPT_{script_num}: {issue}")
 
-    result_text = '\n\n'.join(fixed_blocks)
+    # Edge case: لو ما لقاش match (الموديل قطع قبل END_SCRIPT)
+    # نرجع النص الأصلي + نعلّم الـ SCRIPTs المفتوحة كفاشلة عشان regenerate_failed يشتغل
+    if not fixed_blocks:
+        open_markers = re.findall(r'<<<SCRIPT_(\d+)>>>', text)
+        if open_markers:
+            for sn in open_markers:
+                if sn not in failed_scripts:
+                    failed_scripts.append(sn)
+            log(f"  [!] validate_texts: نص ناقص END_SCRIPT — markers مفتوحة={open_markers} → إضافتها للفاشل")
+            result_text = text
+        else:
+            log(f"  [!] validate_texts: النص فاضي تماماً — مفيش SCRIPT markers")
+            result_text = ""
+    else:
+        result_text = '\n\n'.join(fixed_blocks)
 
     # حفظ قائمة الفاشل في ctx
     failed_key = step["id"] + "_failed"
@@ -3574,8 +3594,16 @@ def action_regenerate_failed(step, ctx):
 def action_assert_no_failures(step, ctx):
     """يتحقق من قائمة الفاشل. لو فيها مواضيع → يرفع exception ويوقف الـ pipeline.
     يقبل failed_ref واحد أو list من المراجع.
+    كمان يرفض النص الفاضي حتى لو مفيش failed_scripts (حماية إضافية).
     """
     text = str(ctx.resolve(step["input"]))
+
+    # حماية: لو النص فاضي تماماً → الـ pipeline ضاع منه المحتوى
+    if not text or not text.strip():
+        msg = "توقف الـ pipeline: الـ input فاضي تماماً — احتمال أن validate_texts أو خطوة سابقة فقدت المحتوى"
+        log(f"  [XX] assert_no_failures: {msg}")
+        raise RuntimeError(msg)
+
     failed_ref = step.get("failed_ref")
     failed_refs = step.get("failed_refs")
 
