@@ -32,8 +32,7 @@
       "model": "claude-sonnet-4-6",
       "max_tokens": 32000,
       "temperature": 0.5,
-      "thinking_level": "medium",
-      "label": "توليد السكريبتات (Sonnet 4.6 مع التفكير)"
+      "label": "توليد السكريبتات (Sonnet 4.6 بدون thinking)"
     },
     {
       "id": "update_memory",

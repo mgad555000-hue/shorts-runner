@@ -586,19 +586,21 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
         kwargs["system"] = system_prompt
 
     # Extended thinking — يدعمها Claude Sonnet/Opus 4.x
-    # adaptive (effort=low/medium/high) = الموديل يقرر العمق حسب صعوبة المهمة
-    # ملاحظة API: effort هو top-level parameter، مش جوا thinking object
-    # enabled (budget_tokens=N) = legacy mode — يُستخدم لو thinking_budget معطى صراحة
+    # نستخدم enabled بـ budget محدد علشان نضمن output (adaptive ممكن يستهلك كل max_tokens في thinking)
+    # thinking_level → budget mapping
     if thinking_level:
-        # adaptive thinking — الموديل يقرر العمق حسب صعوبة المهمة
-        # ملاحظة: على Sonnet 4.6، الـ API لا يقبل effort مع adaptive (مرفوض بـ 400)
-        # effort متاح فقط على Opus 4.7+ — هنا نسيب الموديل يقرر لوحده
-        kwargs["thinking"] = {"type": "adaptive"}
+        level_map = {"low": 2048, "medium": 5000, "high": 10000}
+        budget = level_map.get(thinking_level.lower(), 5000)
+        # نضمن إن الـ output مساحته كافية: على الأقل 8192 توكن بعد thinking
+        min_output = 8192
+        if final_max_tokens < budget + min_output:
+            kwargs["max_tokens"] = budget + min_output
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
         kwargs["temperature"] = 1.0
-        log(f"  [thinking] Claude adaptive (model decides) hint={thinking_level} max_tokens={kwargs['max_tokens']}")
+        log(f"  [thinking] Claude enabled budget={budget} (level={thinking_level}) max_tokens={kwargs['max_tokens']}")
     elif thinking_budget is not None and thinking_budget > 0:
         if thinking_budget >= final_max_tokens:
-            kwargs["max_tokens"] = thinking_budget + 4096
+            kwargs["max_tokens"] = thinking_budget + 8192
         kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
         kwargs["temperature"] = 1.0
         log(f"  [thinking] Claude budget={thinking_budget} max_tokens={kwargs['max_tokens']}")
@@ -614,11 +616,16 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
         message = client.messages.create(**kwargs)
 
     text_out = ""
+    block_types = []
     for block in (message.content or []):
-        if getattr(block, "type", None) == "text":
+        bt = getattr(block, "type", None)
+        block_types.append(bt)
+        if bt == "text":
             text_out += getattr(block, "text", "") or ""
+    stop_reason = getattr(message, "stop_reason", None)
     if not text_out:
-        raise ValueError("Claude returned empty response")
+        log(f"  [debug] empty text — stop_reason={stop_reason} blocks={block_types}")
+        raise ValueError(f"Claude returned empty response (stop_reason={stop_reason}, blocks={block_types})")
 
     _token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
     if hasattr(message, 'usage') and message.usage:
