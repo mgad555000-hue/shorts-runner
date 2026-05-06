@@ -32,8 +32,8 @@
       "model": "gemini-3.1-pro-preview",
       "max_tokens": 65536,
       "temperature": 0.5,
-      "thinking_level": "medium",
-      "label": "توليد السكريبتات (Gemini 3.1 Pro Preview)"
+      "thinking_level": "high",
+      "label": "توليد السكريبتات (Gemini 3.1 Pro Preview + thinking=high)"
     },
     {
       "id": "update_memory",
@@ -77,8 +77,8 @@
       "model": "gemini-3-flash-preview",
       "max_tokens": 65536,
       "temperature": 0.1,
-      "thinking_level": "medium",
-      "label": "تشكيل المقدمات (Gemini 3 Flash Preview)"
+      "thinking_level": "high",
+      "label": "تشكيل المقدمات (Gemini 3 Flash Preview + thinking=high)"
     },
     {
       "id": "intros_formatted",
@@ -121,8 +121,8 @@
       "model": "gemini-3-flash-preview",
       "max_tokens": 65536,
       "temperature": 0.1,
-      "thinking_level": "medium",
-      "label": "تشكيل النصوص (Gemini 3 Flash Preview)"
+      "thinking_level": "high",
+      "label": "تشكيل النصوص (Gemini 3 Flash Preview + thinking=high)"
     },
     {
       "id": "texts_restored",
@@ -160,9 +160,9 @@
       "instructions": "{tashkeel_texts_rules}",
       "model": "gemini-3-flash-preview",
       "temperature": 0.1,
-      "thinking_level": "medium",
+      "thinking_level": "high",
       "max_tokens": 16000,
-      "label": "إعادة تشكيل الفاشل (Gemini 3 Flash Preview)"
+      "label": "إعادة تشكيل الفاشل (Gemini 3 Flash Preview + thinking=high)"
     },
     {
       "id": "texts_final",
