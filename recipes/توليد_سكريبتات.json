@@ -30,9 +30,10 @@
       "action": "generate",
       "input": "{prompt}",
       "model": "claude-sonnet-4-6",
-      "max_tokens": 32000,
+      "max_tokens": 64000,
       "temperature": 0.5,
-      "label": "توليد السكريبتات (Sonnet 4.6 بدون thinking)"
+      "thinking_level": "medium",
+      "label": "توليد السكريبتات (Sonnet 4.6 + adaptive thinking)"
     },
     {
       "id": "update_memory",

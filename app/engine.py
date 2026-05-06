@@ -586,24 +586,22 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
         kwargs["system"] = system_prompt
 
     # Extended thinking — يدعمها Claude Sonnet/Opus 4.x
-    # نستخدم enabled بـ budget محدد علشان نضمن output (adaptive ممكن يستهلك كل max_tokens في thinking)
-    # thinking_level → budget mapping
+    # adaptive (الموصى به على Sonnet 4.6) — الموديل يقرر العمق حسب صعوبة المهمة
+    # ملاحظة حرجة: max_tokens لازم يكون كبير كفاية لاحتواء thinking + output معاً
+    # على Sonnet 4.6 الحد الأقصى = 64000 توكن
     if thinking_level:
-        level_map = {"low": 2048, "medium": 5000, "high": 10000}
-        budget = level_map.get(thinking_level.lower(), 5000)
-        # نضمن إن الـ output مساحته كافية: على الأقل 8192 توكن بعد thinking
-        min_output = 8192
-        if final_max_tokens < budget + min_output:
-            kwargs["max_tokens"] = budget + min_output
-        kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        # لو max_tokens صغير، نرفعه للحد الأمن (16000) عشان يستوعب thinking + output
+        if final_max_tokens < 16000:
+            kwargs["max_tokens"] = 16000
+        kwargs["thinking"] = {"type": "adaptive"}
         kwargs["temperature"] = 1.0
-        log(f"  [thinking] Claude enabled budget={budget} (level={thinking_level}) max_tokens={kwargs['max_tokens']}")
+        log(f"  [thinking] Claude adaptive (level hint={thinking_level}) max_tokens={kwargs['max_tokens']}")
     elif thinking_budget is not None and thinking_budget > 0:
         if thinking_budget >= final_max_tokens:
             kwargs["max_tokens"] = thinking_budget + 8192
         kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
         kwargs["temperature"] = 1.0
-        log(f"  [thinking] Claude budget={thinking_budget} max_tokens={kwargs['max_tokens']}")
+        log(f"  [thinking] Claude enabled budget={thinking_budget} max_tokens={kwargs['max_tokens']}")
 
     # Streaming إجباري لما thinking مفعل + max_tokens كبير (SDK يرفض غير streaming لو متوقع > 10 دقائق)
     use_stream = "thinking" in kwargs and kwargs["max_tokens"] >= 8192
