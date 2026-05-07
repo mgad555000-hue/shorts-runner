@@ -821,6 +821,27 @@ def _set_paragraph_rtl(paragraph):
     pPr.append(bidi)
 
 
+def _set_document_rtl(doc):
+    """ضبط اتجاه RTL على مستوى المستند كله (Section + Default Style)"""
+    # ضبط Section لـ RTL (يخلي أي فقرة جديدة تكون RTL تلقائياً)
+    for section in doc.sections:
+        sectPr = section._sectPr
+        bidi = OxmlElement('w:bidi')
+        sectPr.append(bidi)
+
+    # ضبط Default Paragraph Style لـ RTL
+    try:
+        normal_style = doc.styles["Normal"]
+        pPr = normal_style.element.get_or_add_pPr()
+        existing_bidi = pPr.find(qn('w:bidi'))
+        if existing_bidi is None:
+            bidi = OxmlElement('w:bidi')
+            bidi.set(qn('w:val'), '1')
+            pPr.append(bidi)
+    except Exception:
+        pass
+
+
 def _set_run_rtl(run):
     """ضبط اتجاه RTL على Run في Word"""
     rPr = run._element.get_or_add_rPr()
@@ -875,6 +896,9 @@ def action_save_docx(step, ctx):
 
     font_name = step.get("font_name", "Arial")
     font_size = step.get("font_size", 14)
+
+    # ضبط RTL على مستوى المستند كله (Section + Default Style)
+    _set_document_rtl(doc)
 
     # ضبط RTL للمستند + خط Normal style
     style = doc.styles["Normal"]
