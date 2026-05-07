@@ -814,14 +814,25 @@ def action_format_text(step, ctx):
 
 
 def _set_paragraph_rtl(paragraph):
-    """ضبط اتجاه RTL + bidi + Align Right الصريح لفقرة Word"""
+    """ضبط اتجاه RTL + bidi + Align Right الصريح لفقرة Word (مع إزالة أي إعداد سابق)"""
+    # 1) استخدام python-docx high-level API (ينشئ jc في الموضع الصحيح schema-wise)
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    paragraph.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+
+    # 2) ضبط XML مباشرة لضمان المسح الكامل لأي إعداد متضارب
     pPr = paragraph._element.get_or_add_pPr()
-    # bidi (RTL direction)
-    if pPr.find(qn('w:bidi')) is None:
-        bidi = OxmlElement('w:bidi')
-        bidi.set(qn('w:val'), '1')
-        pPr.append(bidi)
-    # Justification صريحة = right (مش justify)
+
+    # إزالة كل bidi / textDirection سابقة (لمنع التضارب)
+    for tag in ('w:bidi', 'w:textDirection'):
+        for el in pPr.findall(qn(tag)):
+            pPr.remove(el)
+
+    # إضافة bidi لتفعيل RTL
+    bidi = OxmlElement('w:bidi')
+    bidi.set(qn('w:val'), '1')
+    pPr.append(bidi)
+
+    # ضمان أن jc موجود وقيمته right (في حال لم يضعها python-docx)
     jc = pPr.find(qn('w:jc'))
     if jc is None:
         jc = OxmlElement('w:jc')
