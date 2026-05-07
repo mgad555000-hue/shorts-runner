@@ -889,10 +889,13 @@ def _set_run_rtl(run):
 
 def _post_process_docx_force_rtl(filepath):
     """
-    ضمانة نهائية: إعادة بناء كل pPr بترتيب OOXML schema الصارم،
-    مع إجبار bidi=1 و jc=right في موضعهما الصحيح بالضبط.
-    Word بيتجاهل jc لو موضعه بعد rPr/sectPr في pPr — وده سبب
-    إن "Align Right" مكانش بيتفعّل في الواجهة.
+    ضمانة نهائية تطابق نمط Word-native بالضبط:
+    - paragraph: bidi=0 + jc=right (مش bidi=1 — ده اللي كان بيخلي COM يقول Left)
+    - paragraph mark rPr: <w:lang w:bidi="ar-SA"/>
+    - run rPr: <w:rtl/> + <w:lang w:bidi="ar-SA"/>
+    - Normal style: <w:lang w:bidi="ar-EG"/>
+
+    اكتشفت ده بعد ما خليت Word ينشئ ملف RTL وعملت compare للـ XML.
     """
     import zipfile
     from lxml import etree as ET
@@ -926,35 +929,37 @@ def _post_process_docx_force_rtl(filepath):
     def _local(tag):
         return tag.split('}', 1)[-1] if '}' in tag else tag
 
-    def _ensure_rtl_in_rPr(rPr):
-        """ضمان <w:rtl w:val="1"/> داخل rPr (مع إزالة القديم لو موجود)."""
-        for el in list(rPr.findall(f'{W}rtl')):
-            rPr.remove(el)
-        rtl = ET.SubElement(rPr, f'{W}rtl')
-        rtl.set(f'{W}val', '1')
+    LANG_CODE = 'ar-SA'
+
+    def _ensure_lang_in_rPr(rPr, with_rtl=False):
+        """ضمان <w:lang w:bidi='ar-SA'/> + اختياري <w:rtl/> في rPr."""
+        # إزالة lang/rtl قديمة
+        for tag in ('lang', 'rtl'):
+            for el in list(rPr.findall(f'{W}{tag}')):
+                rPr.remove(el)
+        if with_rtl:
+            ET.SubElement(rPr, f'{W}rtl')
+        lang = ET.SubElement(rPr, f'{W}lang')
+        lang.set(f'{W}bidi', LANG_CODE)
 
     def _rebuild_pPr(pPr):
-        """إعادة بناء pPr بترتيب schema مع إجبار bidi=1 و jc=right
-        + ضمان <w:rPr><w:rtl/></w:rPr> على paragraph mark
-        (ده اللي بيخلي Word يعتبر الفقرة RTL أصلية ويفعّل Align Right في الواجهة)."""
+        """نمط Word-native: bidi=0 + jc=right + paragraph mark rPr فيه lang (بدون rtl)."""
         children = list(pPr)
-        # إزالة الكل
         for child in children:
             pPr.remove(child)
-        # إزالة bidi/jc القديمة (هنبنيهم من جديد)
         children = [c for c in children if _local(c.tag) not in ('bidi', 'jc')]
 
-        # bidi=1 جديد
+        # bidi=0 (LTR paragraph — زي اللي Word بيكتب لـ Arabic right-aligned)
         bidi = ET.Element(f'{W}bidi')
-        bidi.set(f'{W}val', '1')
+        bidi.set(f'{W}val', '0')
         children.append(bidi)
 
-        # jc=right جديد
+        # jc=right
         jc = ET.Element(f'{W}jc')
         jc.set(f'{W}val', 'right')
         children.append(jc)
 
-        # paragraph mark rPr — لازم يكون فيه <w:rtl/>
+        # paragraph mark rPr — lang بس (مش rtl)
         existing_rPr = None
         for c in children:
             if _local(c.tag) == 'rPr':
@@ -963,32 +968,16 @@ def _post_process_docx_force_rtl(filepath):
         if existing_rPr is None:
             existing_rPr = ET.Element(f'{W}rPr')
             children.append(existing_rPr)
-        _ensure_rtl_in_rPr(existing_rPr)
+        _ensure_lang_in_rPr(existing_rPr, with_rtl=False)
 
-        # ترتيب stable حسب schema
         children.sort(key=lambda c: PPR_ORDER_INDEX.get(_local(c.tag), 999))
-
         for c in children:
             pPr.append(c)
 
-    def _rebuild_run_rPr(rPr):
-        """ضمان <w:rtl/> في rPr الخاص بالـ runs (المحتوى الفعلي)."""
-        _ensure_rtl_in_rPr(rPr)
-
     def _rebuild_sectPr(sectPr):
-        """إعادة بناء sectPr بترتيب schema مع إجبار bidi."""
-        children = list(sectPr)
-        for child in children:
-            sectPr.remove(child)
-        children = [c for c in children if _local(c.tag) != 'bidi']
-
-        bidi = ET.Element(f'{W}bidi')
-        children.append(bidi)
-
-        children.sort(key=lambda c: SECTPR_ORDER_INDEX.get(_local(c.tag), 999))
-
-        for c in children:
-            sectPr.append(c)
+        """نمط Word-native: مفيش <w:bidi/> على section."""
+        for el in list(sectPr.findall(f'{W}bidi')):
+            sectPr.remove(el)
 
     with zipfile.ZipFile(filepath, 'r') as zin:
         contents = {name: zin.read(name) for name in zin.namelist()}
@@ -1028,16 +1017,15 @@ def _post_process_docx_force_rtl(filepath):
         for sectPr in root.iter(f'{W}sectPr'):
             _rebuild_sectPr(sectPr)
 
-        # ضمان <w:rtl/> على كل run بداخل المستند (مش بس paragraph marks)
+        # ضمان <w:rtl/> + <w:lang w:bidi='ar-SA'/> على كل run في المستند
         for r in root.iter(f'{W}r'):
-            # استثناء: run داخل pPr هو الـ paragraph mark (متعالج فوق)
             if r.getparent() is not None and _local(r.getparent().tag) == 'pPr':
                 continue
             rPr = r.find(f'{W}rPr')
             if rPr is None:
                 rPr = ET.Element(f'{W}rPr')
                 r.insert(0, rPr)
-            _ensure_rtl_in_rPr(rPr)
+            _ensure_lang_in_rPr(rPr, with_rtl=True)
 
         contents[tf] = ET.tostring(
             root, xml_declaration=True, encoding='UTF-8', standalone=True
