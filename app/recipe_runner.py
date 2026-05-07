@@ -829,6 +829,34 @@ def _set_run_rtl(run):
     rPr.append(rtl)
 
 
+def _set_run_arabic_font(run, font_name, font_size):
+    """ضبط الخط للنص العربي على مستوى Run (Complex Script font)"""
+    if not font_name and not font_size:
+        return
+    rPr = run._element.get_or_add_rPr()
+    if font_name:
+        rFonts = rPr.find(qn('w:rFonts'))
+        if rFonts is None:
+            rFonts = OxmlElement('w:rFonts')
+            rPr.insert(0, rFonts)
+        rFonts.set(qn('w:ascii'), font_name)
+        rFonts.set(qn('w:hAnsi'), font_name)
+        rFonts.set(qn('w:cs'), font_name)
+        rFonts.set(qn('w:eastAsia'), font_name)
+    if font_size:
+        size_half_points = str(int(font_size * 2))
+        sz = rPr.find(qn('w:sz'))
+        if sz is None:
+            sz = OxmlElement('w:sz')
+            rPr.append(sz)
+        sz.set(qn('w:val'), size_half_points)
+        szCs = rPr.find(qn('w:szCs'))
+        if szCs is None:
+            szCs = OxmlElement('w:szCs')
+            rPr.append(szCs)
+        szCs.set(qn('w:val'), size_half_points)
+
+
 def action_save_docx(step, ctx):
     """حفظ النص المنسق كملف Word مع تلوين <r> بالأحمر"""
     text = str(ctx.resolve(step["input"]))
@@ -845,10 +873,13 @@ def action_save_docx(step, ctx):
 
     doc = Document()
 
-    # ضبط RTL للمستند
+    font_name = step.get("font_name", "Arial")
+    font_size = step.get("font_size", 14)
+
+    # ضبط RTL للمستند + خط Normal style
     style = doc.styles["Normal"]
-    style.font.size = Pt(step.get("font_size", 14))
-    style.font.name = step.get("font_name", "Arial")
+    style.font.size = Pt(font_size)
+    style.font.name = font_name
 
     # تقسيم النص بالماركر (SCRIPT أو INTRO أو أي prefix تاني)
     prefix = step.get("marker_prefix", "SCRIPT")
@@ -872,10 +903,12 @@ def action_save_docx(step, ctx):
                 run = para.add_run(m.group(1))
                 run.font.color.rgb = RGBColor(255, 0, 0)
                 _set_run_rtl(run)
+                _set_run_arabic_font(run, font_name, font_size)
             else:
                 if part:
                     run = para.add_run(part)
                     _set_run_rtl(run)
+                    _set_run_arabic_font(run, font_name, font_size)
 
     line_spacing = step.get("line_spacing", 28)
 
