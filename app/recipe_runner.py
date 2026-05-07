@@ -814,30 +814,47 @@ def action_format_text(step, ctx):
 
 
 def _set_paragraph_rtl(paragraph):
-    """ضبط اتجاه RTL + bidi لفقرة Word"""
+    """ضبط اتجاه RTL + bidi + Align Right الصريح لفقرة Word"""
     pPr = paragraph._element.get_or_add_pPr()
-    bidi = OxmlElement('w:bidi')
-    bidi.set(qn('w:val'), '1')
-    pPr.append(bidi)
+    # bidi (RTL direction)
+    if pPr.find(qn('w:bidi')) is None:
+        bidi = OxmlElement('w:bidi')
+        bidi.set(qn('w:val'), '1')
+        pPr.append(bidi)
+    # Justification صريحة = right (مش justify)
+    jc = pPr.find(qn('w:jc'))
+    if jc is None:
+        jc = OxmlElement('w:jc')
+        pPr.append(jc)
+    jc.set(qn('w:val'), 'right')
 
 
 def _set_document_rtl(doc):
-    """ضبط اتجاه RTL على مستوى المستند كله (Section + Default Style)"""
-    # ضبط Section لـ RTL (يخلي أي فقرة جديدة تكون RTL تلقائياً)
+    """ضبط اتجاه RTL + Align Right على مستوى المستند كله (Section + Default Style)"""
+    # ضبط Section لـ RTL
     for section in doc.sections:
         sectPr = section._sectPr
-        bidi = OxmlElement('w:bidi')
-        sectPr.append(bidi)
+        if sectPr.find(qn('w:bidi')) is None:
+            bidi = OxmlElement('w:bidi')
+            sectPr.append(bidi)
 
-    # ضبط Default Paragraph Style لـ RTL
+    # ضبط Default Paragraph Style لـ RTL + Align Right
     try:
         normal_style = doc.styles["Normal"]
         pPr = normal_style.element.get_or_add_pPr()
-        existing_bidi = pPr.find(qn('w:bidi'))
-        if existing_bidi is None:
+        # bidi
+        if pPr.find(qn('w:bidi')) is None:
             bidi = OxmlElement('w:bidi')
             bidi.set(qn('w:val'), '1')
             pPr.append(bidi)
+        # Align Right الصريح في النمط الافتراضي
+        jc = pPr.find(qn('w:jc'))
+        if jc is None:
+            jc = OxmlElement('w:jc')
+            pPr.append(jc)
+        jc.set(qn('w:val'), 'right')
+        # منع Justify (لو موجود من Word default)
+        normal_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     except Exception:
         pass
 
