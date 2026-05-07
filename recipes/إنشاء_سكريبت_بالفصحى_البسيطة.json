@@ -79,7 +79,9 @@
       "action": "save_docx",
       "input": "{formatted}",
       "save_as": "scripts_output.docx",
-      "font_size": 14,
+      "font_name": "Simplified Arabic",
+      "font_size": 28,
+      "line_spacing": 1.0,
       "label": "حفظ ملف Word"
     },
     {

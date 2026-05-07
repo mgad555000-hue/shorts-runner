@@ -771,6 +771,13 @@ def action_format_text(step, ctx):
                     continue
             # فاصلة أو نقطة
             if t[i] in ("،", ",", "."):
+                # تجاهل لو الفاصلة/النقطة بين رقمين (مثل: 100,000 أو 1.5)
+                prev_char = t[i-1] if i > 0 else ""
+                next_char = t[i+1] if i+1 < len(t) else ""
+                if prev_char.isdigit() and next_char.isdigit():
+                    result.append(t[i])
+                    i += 1
+                    continue
                 result.append(t[i])
                 # شيل المسافات الموجودة بعدها
                 j = i + 1
@@ -853,7 +860,10 @@ def action_save_docx(step, ctx):
         para = doc.add_paragraph()
         para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         _set_paragraph_rtl(para)
-        para.paragraph_format.line_spacing = Pt(line_spacing)
+        if isinstance(line_spacing, (int, float)) and line_spacing <= 5:
+            para.paragraph_format.line_spacing = float(line_spacing)
+        else:
+            para.paragraph_format.line_spacing = Pt(line_spacing)
 
         parts = re.split(r'(<r>.*?</r>)', content)
         for part in parts:
