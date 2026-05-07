@@ -934,8 +934,17 @@ def _post_process_docx_force_rtl(filepath):
     def _local(tag):
         return tag.split('}', 1)[-1] if '}' in tag else tag
 
+    def _ensure_rtl_in_rPr(rPr):
+        """ضمان <w:rtl w:val="1"/> داخل rPr (مع إزالة القديم لو موجود)."""
+        for el in list(rPr.findall(f'{W}rtl')):
+            rPr.remove(el)
+        rtl = ET.SubElement(rPr, f'{W}rtl')
+        rtl.set(f'{W}val', '1')
+
     def _rebuild_pPr(pPr):
-        """إعادة بناء pPr بترتيب schema مع إجبار bidi=1 و jc=right."""
+        """إعادة بناء pPr بترتيب schema مع إجبار bidi=1 و jc=right
+        + ضمان <w:rPr><w:rtl/></w:rPr> على paragraph mark
+        (ده اللي بيخلي Word يعتبر الفقرة RTL أصلية ويفعّل Align Right في الواجهة)."""
         children = list(pPr)
         # إزالة الكل
         for child in children:
@@ -953,11 +962,26 @@ def _post_process_docx_force_rtl(filepath):
         jc.set(f'{W}val', 'right')
         children.append(jc)
 
+        # paragraph mark rPr — لازم يكون فيه <w:rtl/>
+        existing_rPr = None
+        for c in children:
+            if _local(c.tag) == 'rPr':
+                existing_rPr = c
+                break
+        if existing_rPr is None:
+            existing_rPr = ET.Element(f'{W}rPr')
+            children.append(existing_rPr)
+        _ensure_rtl_in_rPr(existing_rPr)
+
         # ترتيب stable حسب schema
         children.sort(key=lambda c: PPR_ORDER_INDEX.get(_local(c.tag), 999))
 
         for c in children:
             pPr.append(c)
+
+    def _rebuild_run_rPr(rPr):
+        """ضمان <w:rtl/> في rPr الخاص بالـ runs (المحتوى الفعلي)."""
+        _ensure_rtl_in_rPr(rPr)
 
     def _rebuild_sectPr(sectPr):
         """إعادة بناء sectPr بترتيب schema مع إجبار bidi."""
@@ -997,6 +1021,17 @@ def _post_process_docx_force_rtl(filepath):
 
         for sectPr in root.iter(f'{W}sectPr'):
             _rebuild_sectPr(sectPr)
+
+        # ضمان <w:rtl/> على كل run بداخل المستند (مش بس paragraph marks)
+        for r in root.iter(f'{W}r'):
+            # استثناء: run داخل pPr هو الـ paragraph mark (متعالج فوق)
+            if r.getparent() is not None and _local(r.getparent().tag) == 'pPr':
+                continue
+            rPr = r.find(f'{W}rPr')
+            if rPr is None:
+                rPr = ET.Element(f'{W}rPr')
+                r.insert(0, rPr)
+            _ensure_rtl_in_rPr(rPr)
 
         contents[tf] = ET.tostring(
             root, xml_declaration=True, encoding='UTF-8', standalone=True
