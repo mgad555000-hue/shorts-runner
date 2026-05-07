@@ -858,31 +858,23 @@ def _set_paragraph_rtl(paragraph):
 
 
 def _set_document_rtl(doc):
-    """ضبط اتجاه RTL + Align Right على مستوى المستند كله (Section + Default Style)"""
-    # ضبط Section لـ RTL
+    """ضبط اتجاه RTL على مستوى المستند (Section بس).
+    ⚠️ مش بنلمس Normal style — لازم يفضل default علشان الفقرات
+    اللي فيها bidi/jc تبان كـ override → Word يظلّل زرار Align Right."""
     for section in doc.sections:
         sectPr = section._sectPr
         if sectPr.find(qn('w:bidi')) is None:
             bidi = OxmlElement('w:bidi')
             sectPr.append(bidi)
 
-    # ضبط Default Paragraph Style لـ RTL + Align Right
+    # تنظيف Normal style لو فيه bidi/jc من تشغيل قديم
     try:
         normal_style = doc.styles["Normal"]
-        pPr = normal_style.element.get_or_add_pPr()
-        # bidi
-        if pPr.find(qn('w:bidi')) is None:
-            bidi = OxmlElement('w:bidi')
-            bidi.set(qn('w:val'), '1')
-            pPr.append(bidi)
-        # Align Right الصريح في النمط الافتراضي
-        jc = pPr.find(qn('w:jc'))
-        if jc is None:
-            jc = OxmlElement('w:jc')
-            pPr.append(jc)
-        jc.set(qn('w:val'), 'right')
-        # منع Justify (لو موجود من Word default)
-        normal_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        pPr = normal_style.element.find(qn('w:pPr'))
+        if pPr is not None:
+            for tag in ('w:bidi', 'w:jc'):
+                for el in pPr.findall(qn(tag)):
+                    pPr.remove(el)
     except Exception:
         pass
 
@@ -1001,14 +993,28 @@ def _post_process_docx_force_rtl(filepath):
     with zipfile.ZipFile(filepath, 'r') as zin:
         contents = {name: zin.read(name) for name in zin.namelist()}
 
-    # كل ملفات XML اللي ممكن تحتوي pPr / sectPr
+    # ⚠️ نلمس بس document.xml + headers/footers — مش styles.xml
+    # علشان الـ Normal style يفضل default، فالـ direct formatting يبان كـ override
     target_files = [
         n for n in contents
         if n.startswith('word/') and n.endswith('.xml') and (
-            'document' in n or 'styles' in n or
-            'header' in n or 'footer' in n or 'numbering' in n
+            'document' in n or 'header' in n or 'footer' in n
         )
     ]
+
+    # رفع compatibilityMode من 14 (Word 2010) لـ 15 (Word 2013+)
+    # علشان "Compatibility Mode" ميتفعّلش في Word
+    if 'word/settings.xml' in contents:
+        try:
+            settings_root = ET.fromstring(contents['word/settings.xml'])
+            for cs in settings_root.iter(f'{W}compatSetting'):
+                if cs.get(f'{W}name') == 'compatibilityMode':
+                    cs.set(f'{W}val', '15')
+            contents['word/settings.xml'] = ET.tostring(
+                settings_root, xml_declaration=True, encoding='UTF-8', standalone=True
+            )
+        except Exception:
+            pass
 
     for tf in target_files:
         try:
