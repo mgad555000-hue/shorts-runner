@@ -814,25 +814,42 @@ def action_format_text(step, ctx):
 
 
 def _set_paragraph_rtl(paragraph):
-    """ضبط اتجاه RTL + bidi + Align Right الصريح لفقرة Word (مع إزالة أي إعداد سابق)"""
-    # 1) استخدام python-docx high-level API (ينشئ jc في الموضع الصحيح schema-wise)
+    """ضبط RTL + Right Alignment على فقرة Word مع احترام ترتيب OOXML schema"""
     paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     paragraph.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
-    # 2) ضبط XML مباشرة لضمان المسح الكامل لأي إعداد متضارب
     pPr = paragraph._element.get_or_add_pPr()
 
-    # إزالة كل bidi / textDirection سابقة (لمنع التضارب)
+    # إزالة bidi و textDirection القديمة
     for tag in ('w:bidi', 'w:textDirection'):
         for el in pPr.findall(qn(tag)):
             pPr.remove(el)
 
-    # إضافة bidi لتفعيل RTL
+    # العناصر التي تأتي بعد bidi في OOXML schema — bidi يجب أن يكون قبلها
+    elements_after_bidi = (
+        'w:adjustRightInd', 'w:snapToGrid', 'w:spacing', 'w:ind',
+        'w:contextualSpacing', 'w:mirrorIndents', 'w:suppressOverlap',
+        'w:jc', 'w:textDirection', 'w:textAlignment', 'w:textboxTightWrap',
+        'w:outlineLvl', 'w:divId', 'w:cnfStyle', 'w:rPr', 'w:sectPr',
+    )
+
     bidi = OxmlElement('w:bidi')
     bidi.set(qn('w:val'), '1')
-    pPr.append(bidi)
 
-    # ضمان أن jc موجود وقيمته right (في حال لم يضعها python-docx)
+    # إيجاد أول عنصر يأتي بعد bidi في الـ schema، وإدراج bidi قبله
+    insert_before = None
+    for el in pPr:
+        tag_local = el.tag.split('}', 1)[-1]
+        if f'w:{tag_local}' in elements_after_bidi:
+            insert_before = el
+            break
+
+    if insert_before is not None:
+        insert_before.addprevious(bidi)
+    else:
+        pPr.append(bidi)
+
+    # ضمان jc=right (في حال لم يضعه python-docx)
     jc = pPr.find(qn('w:jc'))
     if jc is None:
         jc = OxmlElement('w:jc')
@@ -876,6 +893,73 @@ def _set_run_rtl(run):
     rtl = OxmlElement('w:rtl')
     rtl.set(qn('w:val'), '1')
     rPr.append(rtl)
+
+
+def _post_process_docx_force_rtl(filepath):
+    """
+    ضمانة نهائية: فتح docx بعد الحفظ وإعادة ترتيب bidi/jc في كل pPr
+    لتطابق OOXML schema بحيث Word يفسرها كـ Right Alignment.
+    """
+    import zipfile
+    from lxml import etree as ET
+
+    W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    W = f'{{{W_NS}}}'
+
+    elements_after_bidi = {
+        f'{W}adjustRightInd', f'{W}snapToGrid', f'{W}spacing', f'{W}ind',
+        f'{W}contextualSpacing', f'{W}mirrorIndents', f'{W}suppressOverlap',
+        f'{W}jc', f'{W}textDirection', f'{W}textAlignment',
+    }
+
+    with zipfile.ZipFile(filepath, 'r') as zin:
+        contents = {name: zin.read(name) for name in zin.namelist()}
+
+    target_files = ('word/document.xml', 'word/styles.xml')
+
+    for tf in target_files:
+        if tf not in contents:
+            continue
+        try:
+            root = ET.fromstring(contents[tf])
+        except Exception:
+            continue
+
+        for pPr in root.iter(f'{W}pPr'):
+            # إزالة bidi و jc الموجودة
+            for tag in (f'{W}bidi', f'{W}jc'):
+                for el in pPr.findall(tag):
+                    pPr.remove(el)
+
+            # إنشاء bidi جديد
+            bidi = ET.Element(f'{W}bidi')
+            bidi.set(f'{W}val', '1')
+
+            # إدراج bidi قبل أول عنصر يأتي بعده في الـ schema
+            insert_before = None
+            for child in pPr:
+                if child.tag in elements_after_bidi:
+                    insert_before = child
+                    break
+
+            if insert_before is not None:
+                insert_before.addprevious(bidi)
+            else:
+                pPr.append(bidi)
+
+            # إضافة jc=right في النهاية (موضعها الصحيح في الـ schema)
+            jc = ET.Element(f'{W}jc')
+            jc.set(f'{W}val', 'right')
+            pPr.append(jc)
+
+        contents[tf] = ET.tostring(
+            root, xml_declaration=True, encoding='UTF-8', standalone=True
+        )
+
+    # كتابة الـ docx من جديد
+    with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zout:
+        for name, data in contents.items():
+            zout.writestr(name, data)
 
 
 def _set_run_arabic_font(run, font_name, font_size):
@@ -1000,6 +1084,14 @@ def action_save_docx(step, ctx):
             _add_text_to_doc(doc, section, line_spacing)
 
     doc.save(filepath)
+
+    # ضمانة نهائية: post-process لإجبار RTL + Right Alignment على كل XML
+    try:
+        _post_process_docx_force_rtl(filepath)
+        log(f"  تم تطبيق post-process لـ RTL/Right Alignment")
+    except Exception as e:
+        log(f"  [!] post-process فشل (الملف محفوظ بدون post-process): {e}")
+
     log(f"  تم حفظ Word: {filepath}")
     return filepath
 
