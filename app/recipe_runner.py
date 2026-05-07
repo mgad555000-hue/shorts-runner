@@ -897,8 +897,10 @@ def _set_run_rtl(run):
 
 def _post_process_docx_force_rtl(filepath):
     """
-    ضمانة نهائية: فتح docx بعد الحفظ وإعادة ترتيب bidi/jc في كل pPr
-    لتطابق OOXML schema بحيث Word يفسرها كـ Right Alignment.
+    ضمانة نهائية: إعادة بناء كل pPr بترتيب OOXML schema الصارم،
+    مع إجبار bidi=1 و jc=right في موضعهما الصحيح بالضبط.
+    Word بيتجاهل jc لو موضعه بعد rPr/sectPr في pPr — وده سبب
+    إن "Align Right" مكانش بيتفعّل في الواجهة.
     """
     import zipfile
     from lxml import etree as ET
@@ -906,51 +908,95 @@ def _post_process_docx_force_rtl(filepath):
     W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     W = f'{{{W_NS}}}'
 
-    elements_after_bidi = {
-        f'{W}adjustRightInd', f'{W}snapToGrid', f'{W}spacing', f'{W}ind',
-        f'{W}contextualSpacing', f'{W}mirrorIndents', f'{W}suppressOverlap',
-        f'{W}jc', f'{W}textDirection', f'{W}textAlignment',
-    }
+    # ترتيب OOXML schema الكامل لـ CT_PPr / CT_PPrBase children
+    PPR_ORDER = [
+        'pStyle', 'keepNext', 'keepLines', 'pageBreakBefore', 'framePr',
+        'widowControl', 'numPr', 'suppressLineNumbers', 'pBdr', 'shd',
+        'tabs', 'suppressAutoHyphens', 'kinsoku', 'wordWrap', 'overflowPunct',
+        'topLinePunct', 'autoSpaceDE', 'autoSpaceDN', 'bidi',
+        'adjustRightInd', 'snapToGrid', 'spacing', 'ind', 'contextualSpacing',
+        'mirrorIndents', 'suppressOverlap', 'jc', 'textDirection',
+        'textAlignment', 'textboxTightWrap', 'outlineLvl', 'divId', 'cnfStyle',
+        'rPr', 'sectPr', 'pPrChange',
+    ]
+    PPR_ORDER_INDEX = {tag: idx for idx, tag in enumerate(PPR_ORDER)}
+
+    # ترتيب OOXML schema لـ CT_SectPr children (للأقسام)
+    SECTPR_ORDER = [
+        'headerReference', 'footerReference', 'footnotePr', 'endnotePr',
+        'type', 'pgSz', 'pgMar', 'paperSrc', 'pgBorders', 'lnNumType',
+        'pgNumType', 'cols', 'formProt', 'vAlign', 'noEndnote', 'titlePg',
+        'textDirection', 'bidi', 'rtlGutter', 'docGrid', 'printerSettings',
+        'sectPrChange',
+    ]
+    SECTPR_ORDER_INDEX = {tag: idx for idx, tag in enumerate(SECTPR_ORDER)}
+
+    def _local(tag):
+        return tag.split('}', 1)[-1] if '}' in tag else tag
+
+    def _rebuild_pPr(pPr):
+        """إعادة بناء pPr بترتيب schema مع إجبار bidi=1 و jc=right."""
+        children = list(pPr)
+        # إزالة الكل
+        for child in children:
+            pPr.remove(child)
+        # إزالة bidi/jc القديمة (هنبنيهم من جديد)
+        children = [c for c in children if _local(c.tag) not in ('bidi', 'jc')]
+
+        # bidi=1 جديد
+        bidi = ET.Element(f'{W}bidi')
+        bidi.set(f'{W}val', '1')
+        children.append(bidi)
+
+        # jc=right جديد
+        jc = ET.Element(f'{W}jc')
+        jc.set(f'{W}val', 'right')
+        children.append(jc)
+
+        # ترتيب stable حسب schema
+        children.sort(key=lambda c: PPR_ORDER_INDEX.get(_local(c.tag), 999))
+
+        for c in children:
+            pPr.append(c)
+
+    def _rebuild_sectPr(sectPr):
+        """إعادة بناء sectPr بترتيب schema مع إجبار bidi."""
+        children = list(sectPr)
+        for child in children:
+            sectPr.remove(child)
+        children = [c for c in children if _local(c.tag) != 'bidi']
+
+        bidi = ET.Element(f'{W}bidi')
+        children.append(bidi)
+
+        children.sort(key=lambda c: SECTPR_ORDER_INDEX.get(_local(c.tag), 999))
+
+        for c in children:
+            sectPr.append(c)
 
     with zipfile.ZipFile(filepath, 'r') as zin:
         contents = {name: zin.read(name) for name in zin.namelist()}
 
-    target_files = ('word/document.xml', 'word/styles.xml')
+    # كل ملفات XML اللي ممكن تحتوي pPr / sectPr
+    target_files = [
+        n for n in contents
+        if n.startswith('word/') and n.endswith('.xml') and (
+            'document' in n or 'styles' in n or
+            'header' in n or 'footer' in n or 'numbering' in n
+        )
+    ]
 
     for tf in target_files:
-        if tf not in contents:
-            continue
         try:
             root = ET.fromstring(contents[tf])
         except Exception:
             continue
 
         for pPr in root.iter(f'{W}pPr'):
-            # إزالة bidi و jc الموجودة
-            for tag in (f'{W}bidi', f'{W}jc'):
-                for el in pPr.findall(tag):
-                    pPr.remove(el)
+            _rebuild_pPr(pPr)
 
-            # إنشاء bidi جديد
-            bidi = ET.Element(f'{W}bidi')
-            bidi.set(f'{W}val', '1')
-
-            # إدراج bidi قبل أول عنصر يأتي بعده في الـ schema
-            insert_before = None
-            for child in pPr:
-                if child.tag in elements_after_bidi:
-                    insert_before = child
-                    break
-
-            if insert_before is not None:
-                insert_before.addprevious(bidi)
-            else:
-                pPr.append(bidi)
-
-            # إضافة jc=right في النهاية (موضعها الصحيح في الـ schema)
-            jc = ET.Element(f'{W}jc')
-            jc.set(f'{W}val', 'right')
-            pPr.append(jc)
+        for sectPr in root.iter(f'{W}sectPr'):
+            _rebuild_sectPr(sectPr)
 
         contents[tf] = ET.tostring(
             root, xml_declaration=True, encoding='UTF-8', standalone=True
