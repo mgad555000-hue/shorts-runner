@@ -79,8 +79,8 @@
       "model": "gemini-3.1-pro-preview",
       "max_tokens": 15000,
       "temperature": 0.1,
-      "thinking_level": "low",
-      "label": "تشكيل المقدمات (Gemini 3.1 Pro Preview + thinking=low + cache)"
+      "thinking_budget": 512,
+      "label": "تشكيل المقدمات (Gemini 3.1 Pro + thinking_budget=512 + cache)"
     },
     {
       "id": "intros_restored",
@@ -106,7 +106,7 @@
       "instructions": "{tashkeel_rules}",
       "model": "gemini-3.1-pro-preview",
       "temperature": 0.1,
-      "thinking_level": "low",
+      "thinking_budget": 512,
       "max_tokens": 15000,
       "max_attempts": 3,
       "label": "Layer 1 — إعادة تشكيل السكريبتات الفاشلة (max 3 attempts)"
@@ -183,8 +183,8 @@
       "model": "gemini-3.1-pro-preview",
       "max_tokens": 15000,
       "temperature": 0.1,
-      "thinking_level": "low",
-      "label": "تشكيل النصوص (Gemini 3.1 Pro Preview + thinking=low + cache)"
+      "thinking_budget": 512,
+      "label": "تشكيل النصوص (Gemini 3.1 Pro + thinking_budget=512 + cache)"
     },
     {
       "id": "texts_restored",
@@ -222,9 +222,9 @@
       "instructions": "{tashkeel_texts_rules}",
       "model": "gemini-3.1-pro-preview",
       "temperature": 0.1,
-      "thinking_level": "low",
+      "thinking_budget": 512,
       "max_tokens": 15000,
-      "label": "إعادة تشكيل الفاشل (Gemini 3.1 Pro Preview + thinking=low)"
+      "label": "إعادة تشكيل الفاشل (Gemini 3.1 Pro + thinking_budget=512)"
     },
     {
       "id": "texts_final",

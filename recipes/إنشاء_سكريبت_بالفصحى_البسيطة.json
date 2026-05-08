@@ -65,8 +65,8 @@
       "model": "gemini-3.1-pro-preview",
       "max_tokens": 32000,
       "temperature": 0.3,
-      "thinking_level": "low",
-      "label": "تشكيل السكريبتات (+ cache)"
+      "thinking_budget": 512,
+      "label": "تشكيل السكريبتات (thinking_budget=512 + cache)"
     },
     {
       "id": "formatted",
