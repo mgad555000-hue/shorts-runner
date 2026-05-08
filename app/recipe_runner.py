@@ -3413,6 +3413,234 @@ def action_restore_truncated_words(step, ctx):
     return output_text
 
 
+def action_validate_intros_truncation(step, ctx):
+    """يفحص المقدمات بعد restore_truncated_words ويلتقط أي كلمات لسه فيها
+    حروف ناقصة (مثل ة محذوفة) لم يستطع restore إصلاحها (لاختلاف عدد الكلمات).
+
+    يقارن كلمة بكلمة بين الـ input (raw) و الـ output (tashkeeled+restored).
+    يحدد السكريبتات الفاشلة ويحفظها في ctx.results[step_id + '_failed']
+    لتُمرّر لـ regenerate_failed_intros.
+
+    يرجع النص كما هو (مش بيعدّل) — العمل بس على tracking.
+    """
+    output_text = str(ctx.resolve(step["input"]))
+    input_text = str(ctx.resolve(step["original"]))
+
+    TASHKEEL = 'ًٌٍَُِّْٰ'
+    PUNCT = '.،؟!:;؛'
+
+    def strip_t(s):
+        return re.sub(f'[{TASHKEEL}]', '', s)
+
+    def clean(s):
+        return strip_t(s).strip(PUNCT)
+
+    script_pat = r'(<<<SCRIPT_(\d+)>>>)(.*?)(<<<END_SCRIPT>>>)'
+
+    input_scripts = {}
+    for m in re.finditer(script_pat, input_text, re.DOTALL):
+        input_scripts[m.group(2)] = m.group(3)
+
+    output_scripts = {}
+    for m in re.finditer(script_pat, output_text, re.DOTALL):
+        output_scripts[m.group(2)] = m.group(3)
+
+    failed_scripts = []
+    issues_per_script = {}
+
+    for sid, out_content in output_scripts.items():
+        if sid not in input_scripts:
+            continue
+        inp_content = input_scripts[sid]
+        inp_words = inp_content.split()
+        out_words = out_content.split()
+
+        issues = []
+
+        # فحص 1: عدد الكلمات (بعد إزالة التشكيل والترقيم)
+        inp_clean_words = [clean(w) for w in inp_words if clean(w)]
+        out_clean_words = [clean(w) for w in out_words if clean(w)]
+        if len(inp_clean_words) != len(out_clean_words):
+            issues.append(f"عدد الكلمات: input={len(inp_clean_words)} output={len(out_clean_words)}")
+
+        # فحص 2: كلمات لسه فيها truncation (output أقصر من input في نفس الموضع)
+        truncated_words = []
+        if len(inp_clean_words) == len(out_clean_words):
+            for i, (inp_c, out_c) in enumerate(zip(inp_clean_words, out_clean_words)):
+                if 0 < len(out_c) < len(inp_c) and inp_c.startswith(out_c):
+                    truncated_words.append(f"'{out_words[i]}' → expected '{inp_words[i]}'")
+
+        if truncated_words:
+            issues.append(f"{len(truncated_words)} كلمة مبتورة: {'; '.join(truncated_words[:3])}")
+
+        # فحص 3: ة محذوفة بشكل واضح — أي كلمة تنتهي بـ ة في input
+        # ولا تنتهي بـ ة في output في نفس الموضع
+        if len(inp_clean_words) == len(out_clean_words):
+            ta_marbouta_lost = 0
+            for inp_c, out_c in zip(inp_clean_words, out_clean_words):
+                if inp_c.endswith('ة') and not out_c.endswith('ة') and not out_c.endswith('ه'):
+                    ta_marbouta_lost += 1
+            if ta_marbouta_lost > 0:
+                issues.append(f"{ta_marbouta_lost} ة محذوفة")
+
+        if issues:
+            failed_scripts.append(sid)
+            issues_per_script[sid] = issues
+            log(f"  [!] SCRIPT_{sid} فاشل: {' | '.join(issues)}")
+
+    ctx.results[step["id"] + "_failed"] = failed_scripts
+
+    if failed_scripts:
+        log(f"  validate_intros_truncation: ✗ {len(failed_scripts)} سكريبت فاشل: {', '.join(failed_scripts)}")
+    else:
+        log(f"  validate_intros_truncation: ✓ كل المقدمات سليمة (مفيش كلمات مبتورة)")
+
+    return output_text
+
+
+def action_regenerate_failed_intros(step, ctx):
+    """إعادة توليد المقدمات الفاشلة فقط (السكريبتات اللي validate_intros_truncation
+    حدّدها كفاشلة). يعيد التشكيل من جديد بنفس البرومبت ويستبدل في النص.
+
+    بعد كل محاولة، يفحص لو السكريبت الجديد فيه truncation برضو — لو فيه
+    يعيد المحاولة (max_attempts).
+    """
+    text = str(ctx.resolve(step["input"]))
+    original_ref = step.get("original")  # raw intros (للمقارنة)
+    failed_ref = step.get("failed_ref")
+    instructions_ref = step.get("instructions")
+
+    if not failed_ref:
+        log("  regenerate_failed_intros: مفيش failed_ref محدد — تخطي")
+        ctx.results[step["id"] + "_permanently_failed"] = []
+        return text
+
+    failed_scripts = ctx.resolve(failed_ref)
+    if not failed_scripts or not isinstance(failed_scripts, list):
+        log("  regenerate_failed_intros: مفيش سكريبتات فاشلة — تخطي")
+        ctx.results[step["id"] + "_permanently_failed"] = []
+        return text
+
+    instructions = str(ctx.resolve(instructions_ref)) if instructions_ref else ""
+    original_text = str(ctx.resolve(original_ref)) if original_ref else ""
+
+    temperature = step.get("temperature", 0.1)
+    max_tokens = step.get("max_tokens", 15000)
+    thinking_level = step.get("thinking_level", "low")
+    thinking_budget = step.get("thinking_budget", None)
+    step_model = step.get("model", None)
+    effective_model = step_model or ctx.model
+    max_attempts = step.get("max_attempts", 3)
+
+    TASHKEEL = 'ًٌٍَُِّْٰ'
+    PUNCT = '.،؟!:;؛'
+
+    def strip_t(s):
+        return re.sub(f'[{TASHKEEL}]', '', s)
+
+    def clean(s):
+        return strip_t(s).strip(PUNCT)
+
+    script_pat = r'(<<<SCRIPT_(\d+)>>>)(.*?)(<<<END_SCRIPT>>>)'
+
+    # نجيب السكريبتات الأصلية (raw input) لإعادة التشكيل عليها
+    raw_scripts = {}
+    for m in re.finditer(script_pat, original_text, re.DOTALL):
+        raw_scripts[m.group(2)] = m.group(0)  # السكريبت كامل بـ markers
+
+    log(f"  regenerate_failed_intros: إعادة تشكيل {len(failed_scripts)} سكريبت (max_attempts={max_attempts})")
+
+    regenerated = {}
+    permanently_failed = []
+
+    def has_truncation(raw_block, new_block):
+        """يفحص لو في truncation بين raw و new"""
+        rm = re.search(script_pat, raw_block, re.DOTALL)
+        nm = re.search(script_pat, new_block, re.DOTALL)
+        if not rm or not nm:
+            return True  # نتيجة غير متوقعة → نعتبرها فاشلة
+        rw = [clean(w) for w in rm.group(3).split() if clean(w)]
+        nw = [clean(w) for w in nm.group(3).split() if clean(w)]
+        if len(rw) != len(nw):
+            return True
+        for r, n in zip(rw, nw):
+            if 0 < len(n) < len(r) and r.startswith(n):
+                return True
+            if r.endswith('ة') and not n.endswith('ة') and not n.endswith('ه'):
+                return True
+        return False
+
+    for sid in failed_scripts:
+        raw_block = raw_scripts.get(sid)
+        if not raw_block:
+            log(f"  [!] SCRIPT_{sid}: السكريبت الأصلي مش موجود — تخطي")
+            permanently_failed.append(sid)
+            continue
+
+        prompt = (
+            f"{instructions}\n\n---\n\n"
+            "أعد تشكيل النص التالي مع الالتزام الكامل بقواعد التشكيل أعلاه. "
+            "**الأهم**: حافظ على كل حرف في كل كلمة بدون استثناء — خصوصاً ة في آخر "
+            "الكلمات المؤنثة. لا تحذف أي حرف.\n\n"
+            f"النص:\n\n{raw_block}"
+        )
+
+        success = False
+        for attempt in range(1, max_attempts + 1):
+            result = generate(
+                prompt=prompt,
+                model=effective_model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                thinking_budget=thinking_budget,
+                thinking_level=thinking_level,
+            )
+
+            ctx.record_usage(
+                f"{step['id']}_SCRIPT_{sid}_try{attempt}",
+                "retry_intros",
+                result.provider,
+                result.model,
+                result.token_usage,
+            )
+
+            if not result.success:
+                log(f"  [X] SCRIPT_{sid} (محاولة {attempt}/{max_attempts}): فشل API: {result.error}")
+                continue
+
+            new_text = result.data
+            new_match = re.search(script_pat, new_text, re.DOTALL)
+            if not new_match:
+                log(f"  [!] SCRIPT_{sid} (محاولة {attempt}/{max_attempts}): مفيش markers في الناتج")
+                continue
+
+            new_block = new_match.group(0)
+            if has_truncation(raw_block, new_block):
+                log(f"  [!] SCRIPT_{sid} (محاولة {attempt}/{max_attempts}): لسه فيها truncation — إعادة المحاولة")
+                continue
+
+            regenerated[sid] = new_block
+            success = True
+            log(f"  [✓] SCRIPT_{sid} (محاولة {attempt}/{max_attempts}): نجح — مفيش truncation")
+            break
+
+        if not success:
+            permanently_failed.append(sid)
+            log(f"  [XX] SCRIPT_{sid}: فشل نهائياً بعد {max_attempts} محاولات")
+
+    def replace_block(match):
+        sid = match.group(2)
+        if sid in regenerated:
+            return regenerated[sid]
+        return match.group(0)
+
+    result_text = re.sub(script_pat, replace_block, text, flags=re.DOTALL)
+    ctx.results[step["id"] + "_permanently_failed"] = permanently_failed
+
+    log(f"  regenerate_failed_intros: {len(regenerated)}/{len(failed_scripts)} نجح | {len(permanently_failed)} فشل نهائياً")
+    return result_text
+
+
 def _check_brackets_pattern(part_text):
     """فحص وجود أقواس مربعة حول حروف عربية — مثل: التَّكَيُّسَا[ت]"""
     bracket_matches = re.findall(r'\[[^\[\]]{1,3}\]', part_text)
@@ -4085,6 +4313,8 @@ ACTIONS = {
     "auto_fix_text": action_auto_fix_text,
     "strip_last_letter_diacritic": action_strip_last_letter_diacritic,
     "restore_truncated_words": action_restore_truncated_words,
+    "validate_intros_truncation": action_validate_intros_truncation,
+    "regenerate_failed_intros": action_regenerate_failed_intros,
     "filter_by_topics": action_filter_by_topics,
     "update_memory_bank": action_update_memory_bank,
 }
@@ -4122,6 +4352,8 @@ REQUIRED_PARAMS = {
     "auto_fix_text": ["input"],
     "strip_last_letter_diacritic": ["input"],
     "restore_truncated_words": ["input", "original"],
+    "validate_intros_truncation": ["input", "original"],
+    "regenerate_failed_intros": ["input"],
     "filter_by_topics": ["input"],
     "update_memory_bank": ["input"],
 }

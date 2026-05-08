@@ -86,13 +86,56 @@
       "input": "{tashkeel_intros}",
       "original": "{intros_raw}",
       "mode": "intros",
-      "label": "إصلاح الكلمات المبتورة في المقدمات (ة المحذوفة)"
+      "label": "Layer 2 — إصلاح ميكانيكي للكلمات المبتورة (ة المحذوفة)"
+    },
+    {
+      "id": "intros_validated",
+      "action": "validate_intros_truncation",
+      "input": "{intros_restored}",
+      "original": "{intros_raw}",
+      "label": "كشف المقدمات اللي لسه فيها كلمات مبتورة"
+    },
+    {
+      "id": "intros_regenerated",
+      "action": "regenerate_failed_intros",
+      "input": "{intros_validated}",
+      "original": "{intros_raw}",
+      "failed_ref": "{intros_validated_failed}",
+      "instructions": "{tashkeel_rules}",
+      "model": "gemini-3.1-pro-preview",
+      "temperature": 0.1,
+      "thinking_level": "low",
+      "max_tokens": 15000,
+      "max_attempts": 3,
+      "label": "Layer 1 — إعادة تشكيل السكريبتات الفاشلة (max 3 attempts)"
+    },
+    {
+      "id": "intros_restored_final",
+      "action": "restore_truncated_words",
+      "input": "{intros_regenerated}",
+      "original": "{intros_raw}",
+      "mode": "intros",
+      "label": "إصلاح ميكانيكي بعد إعادة التوليد"
+    },
+    {
+      "id": "intros_final_validated",
+      "action": "validate_intros_truncation",
+      "input": "{intros_restored_final}",
+      "original": "{intros_raw}",
+      "label": "تأكيد نهائي: مفيش كلمات مبتورة"
+    },
+    {
+      "id": "assert_intros_clean",
+      "action": "assert_no_failures",
+      "input": "{intros_final_validated}",
+      "failed_refs": ["intros_final_validated_failed", "intros_regenerated_permanently_failed"],
+      "label": "Layer 3 — حماية: منع حفظ مقدمات فيها كلمات مبتورة"
     },
     {
       "id": "intros_auto_fixed",
       "action": "auto_fix_text",
-      "input": "{intros_restored}",
-      "label": "إصلاح ميكانيكي للمقدمات (Tatweel + مسافات + كلمات طبية)"
+      "input": "{assert_intros_clean}",
+      "label": "إصلاح ميكانيكي (Tatweel + مسافات + كلمات طبية)"
     },
     {
       "id": "intros_formatted",
