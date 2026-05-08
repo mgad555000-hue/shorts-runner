@@ -41,8 +41,8 @@
       "max_tokens": 16000,
       "temperature": 0.3,
       "thinking_level": "high",
-      "max_workers": 30,
-      "label": "توليد السكريبتات (per-marker × 30 parallel + cache)"
+      "max_workers": 15,
+      "label": "توليد السكريبتات (per-marker × 15 parallel + cache)"
     },
     {
       "id": "update_memory",
@@ -74,8 +74,8 @@
       "max_tokens": 32000,
       "temperature": 0.3,
       "thinking_level": "low",
-      "max_workers": 30,
-      "label": "تشكيل السكريبتات (per-marker × 30 + 2.5 Pro + low + cache)"
+      "max_workers": 15,
+      "label": "تشكيل السكريبتات (per-marker × 15 + 2.5 Pro + low + cache)"
     },
     {
       "id": "formatted",
