@@ -468,8 +468,27 @@ _GEMINI_CACHE_MAP = {}  # {(model, content_hash): cache_name} — process-level 
 
 def _get_or_create_gemini_cache(client, model: str, content: str, ttl_seconds: int = 3600):
     """يجيب cache موجود أو ينشئ جديد لنفس المحتوى.
-    يرجع cache.name (string) أو None لو فشل الإنشاء."""
+    يرجع cache.name (string) أو None لو فشل الإنشاء أو المحتوى أصغر من الحد الأدنى.
+
+    حدود Gemini Cache (تم تحديدها مسبقاً لتجنب API calls فاشلة):
+    - Gemini 2.5/3.x Pro: ≥ 4,096 توكن
+    - Gemini 2.5/3.x Flash: ≥ 1,024 توكن
+    """
     from google.genai import types
+
+    # فحص استباقي للحد الأدنى — يوفر API call فاشل
+    is_flash = 'flash' in model.lower()
+    min_tokens_required = 1024 if is_flash else 4096
+    # تقدير التوكنز عبر count_tokens API call (دقيق + مجاني)
+    try:
+        token_count = client.models.count_tokens(model=model, contents=content).total_tokens
+    except Exception:
+        # fallback: تقدير من حجم النص (Arabic ~2.5 chars/token)
+        token_count = len(content) // 2
+
+    if token_count < min_tokens_required:
+        log(f"  [cache] skip: {token_count} توكن < الحد الأدنى {min_tokens_required} لـ {model}")
+        return None
 
     h = _hashlib.md5(f"{model}:{content}".encode('utf-8')).hexdigest()
     map_key = (model, h)
@@ -494,7 +513,7 @@ def _get_or_create_gemini_cache(client, model: str, content: str, ttl_seconds: i
             )
         )
         _GEMINI_CACHE_MAP[map_key] = cache.name
-        log(f"  [cache] created {cache.name[-12:]} ({len(content)} chars, ttl={ttl_seconds}s)")
+        log(f"  [cache] created {cache.name[-12:]} ({token_count} توكن، ttl={ttl_seconds}s)")
         return cache.name
     except Exception as e:
         log(f"  [cache] FAILED to create: {str(e)[:200]}")
