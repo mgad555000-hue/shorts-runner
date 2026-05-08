@@ -29,11 +29,12 @@
       "id": "scripts",
       "action": "generate",
       "input": "{prompt}",
+      "cache_content": "{instructions}",
       "model": "gemini-3.1-pro-preview",
       "max_tokens": 65536,
       "temperature": 0.5,
       "thinking_level": "high",
-      "label": "توليد السكريبتات (Gemini 3.1 Pro Preview + thinking=high)"
+      "label": "توليد السكريبتات (Gemini 3.1 Pro Preview + thinking=high + cache)"
     },
     {
       "id": "update_memory",
@@ -74,11 +75,12 @@
       "id": "tashkeel_intros",
       "action": "generate",
       "input": "{tashkeel_prompt}",
+      "cache_content": "{tashkeel_rules}",
       "model": "gemini-3.1-pro-preview",
       "max_tokens": 15000,
       "temperature": 0.1,
       "thinking_level": "low",
-      "label": "تشكيل المقدمات (Gemini 3.1 Pro Preview + thinking=low)"
+      "label": "تشكيل المقدمات (Gemini 3.1 Pro Preview + thinking=low + cache)"
     },
     {
       "id": "intros_restored",
@@ -177,11 +179,12 @@
       "id": "texts_tashkeeled",
       "action": "generate",
       "input": "{tashkeel_texts_prompt}",
+      "cache_content": "{tashkeel_texts_rules}",
       "model": "gemini-3.1-pro-preview",
       "max_tokens": 15000,
       "temperature": 0.1,
       "thinking_level": "low",
-      "label": "تشكيل النصوص (Gemini 3.1 Pro Preview + thinking=low)"
+      "label": "تشكيل النصوص (Gemini 3.1 Pro Preview + thinking=low + cache)"
     },
     {
       "id": "texts_restored",

@@ -373,7 +373,7 @@ def _build_clean_labels(labels: dict) -> dict:
     return out
 
 
-def generate(prompt: str, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = None, thinking_budget: int = None, thinking_level: str = None, labels: dict = None) -> EngineResult:
+def generate(prompt: str, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = None, thinking_budget: int = None, thinking_level: str = None, labels: dict = None, cache_content: str = None) -> EngineResult:
     """
     الدالة 1: توليد نص من برومبت
     تدعم: Gemini, OpenAI, Claude, GLM, Vertex AI
@@ -382,6 +382,10 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
 
     labels: dict اختياري — يُرسل لـ Google Cloud Billing عبر Gemini API
             (مثل {"run_id": "abc123"}) لتتبع التكلفة الفعلية لكل تشغيلة في BigQuery.
+
+    cache_content: نص اختياري للـ caching (Gemini فقط) — لو مُحدّد، يتم
+            إنشاء/استخدام explicit cache لتقليل تكلفة input tokens.
+            الـ cache يُعاد استخدامه تلقائياً لو نفس المحتوى تم تخزينه قبل كده.
     """
     start_time = time.time()
 
@@ -393,14 +397,14 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
     # Vertex AI مش بيحتاج API key - بيستخدم Google Cloud credentials
     api_key = None if provider == "vertex" else _get_api_key_for_provider(provider)
 
-    log(f"-> generate | model: {model} | provider: {provider} | prompt: {len(prompt)} chars")
+    log(f"-> generate | model: {model} | provider: {provider} | prompt: {len(prompt)} chars" + (" | cache=ON" if cache_content else ""))
 
     try:
         token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
 
         if provider == "gemini":
             result_tuple = _retry_call(
-                lambda: _generate_gemini(prompt, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, labels=labels),
+                lambda: _generate_gemini(prompt, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, labels=labels, cache_content=cache_content),
                 max_retries=3, base_delay=3.0, description=f"Gemini {model}"
             )
         elif provider == "vertex":
@@ -457,7 +461,47 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
 
 # ========== دوال الربط الفعلية (منسوخة من الكود المجرب) ==========
 
-def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None, labels: dict = None) -> str:
+# ========== Gemini Explicit Cache Management ==========
+import hashlib as _hashlib
+_GEMINI_CACHE_MAP = {}  # {(model, content_hash): cache_name} — process-level reuse
+
+
+def _get_or_create_gemini_cache(client, model: str, content: str, ttl_seconds: int = 3600):
+    """يجيب cache موجود أو ينشئ جديد لنفس المحتوى.
+    يرجع cache.name (string) أو None لو فشل الإنشاء."""
+    from google.genai import types
+
+    h = _hashlib.md5(f"{model}:{content}".encode('utf-8')).hexdigest()
+    map_key = (model, h)
+
+    # حاول استخدم cache موجود
+    if map_key in _GEMINI_CACHE_MAP:
+        cache_name = _GEMINI_CACHE_MAP[map_key]
+        try:
+            client.caches.get(name=cache_name)
+            log(f"  [cache] reusing {cache_name[-12:]} (hit)")
+            return cache_name
+        except Exception:
+            del _GEMINI_CACHE_MAP[map_key]
+
+    # أنشئ cache جديد
+    try:
+        cache = client.caches.create(
+            model=model,
+            config=types.CreateCachedContentConfig(
+                contents=[content],
+                ttl=f'{ttl_seconds}s',
+            )
+        )
+        _GEMINI_CACHE_MAP[map_key] = cache.name
+        log(f"  [cache] created {cache.name[-12:]} ({len(content)} chars, ttl={ttl_seconds}s)")
+        return cache.name
+    except Exception as e:
+        log(f"  [cache] FAILED to create: {str(e)[:200]}")
+        return None
+
+
+def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None, labels: dict = None, cache_content: str = None) -> str:
     """ربط Gemini عبر google.genai SDK الجديدة"""
     from google import genai
     from google.genai import types
@@ -467,6 +511,17 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
     config_params = {"temperature": temperature, "top_p": 0.95}
     if max_tokens:
         config_params["max_output_tokens"] = max_tokens
+
+    # ===== Explicit Caching (Gemini فقط) =====
+    cached_name = None
+    if cache_content and len(cache_content) > 4000:  # min ~4K chars (~1K tokens)
+        cached_name = _get_or_create_gemini_cache(client, model, cache_content)
+        if cached_name:
+            config_params['cached_content'] = cached_name
+            # شيل cache_content من بداية الـ prompt لو موجود (لتجنب التكرار)
+            if prompt.startswith(cache_content):
+                prompt = prompt[len(cache_content):].lstrip()
+                log(f"  [cache] stripped cached prefix; remaining prompt: {len(prompt)} chars")
 
     # Custom Metadata Labels — مدعوم في Vertex/Batch فقط، مش في Direct Gemini API
     # ملاحظة: محاولة إضافتها هنا بترجع 400 — لذلك نتخطاها
@@ -490,7 +545,9 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
         budget = level_to_budget.get(thinking_level.lower(), 1024)
         config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
     config = types.GenerateContentConfig(**config_params)
-    if system_prompt:
+    # ملاحظة: لما تستخدم cached_content، system_instruction بيكون متخزّن جوّا الـ cache
+    # فلازم نتخطّاه هنا لتجنب double-instruction
+    if system_prompt and not cached_name:
         config.system_instruction = system_prompt
 
     response = client.models.generate_content(
@@ -503,14 +560,16 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
         raise ValueError("Gemini returned empty response")
 
     # تسجيل واستخراج استهلاك التوكنز
-    _token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
+    _token_usage = {"input": 0, "output": 0, "thinking": 0, "cached": 0, "total": 0}
     if hasattr(response, 'usage_metadata') and response.usage_metadata:
         um = response.usage_metadata
         _token_usage["input"] = getattr(um, 'prompt_token_count', 0) or 0
         _token_usage["output"] = getattr(um, 'candidates_token_count', 0) or 0
         _token_usage["thinking"] = getattr(um, 'thoughts_token_count', 0) or 0
+        _token_usage["cached"] = getattr(um, 'cached_content_token_count', 0) or 0
         _token_usage["total"] = getattr(um, 'total_token_count', 0) or 0
-        log(f"  [tokens] input={_token_usage['input']} output={_token_usage['output']} thinking={_token_usage['thinking']} total={_token_usage['total']}")
+        cached_str = f" cached={_token_usage['cached']}" if _token_usage['cached'] else ""
+        log(f"  [tokens] input={_token_usage['input']} output={_token_usage['output']} thinking={_token_usage['thinking']}{cached_str} total={_token_usage['total']}")
 
     # كشف القطع — لو finish_reason=MAX_TOKENS يبقى المخرج ناقص أكيد
     if response.candidates and response.candidates[0].finish_reason:

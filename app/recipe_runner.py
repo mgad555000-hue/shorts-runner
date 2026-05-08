@@ -103,6 +103,7 @@ class PipelineContext:
             "input_tokens": token_usage.get("input", 0),
             "output_tokens": token_usage.get("output", 0),
             "thinking_tokens": token_usage.get("thinking", 0),
+            "cached_tokens": token_usage.get("cached", 0),
             "total_tokens": token_usage.get("total", 0),
         }
         if send_run_id:
@@ -121,6 +122,7 @@ class PipelineContext:
                 "input_tokens": sum(r["input_tokens"] for r in self.usage_records),
                 "output_tokens": sum(r["output_tokens"] for r in self.usage_records),
                 "thinking_tokens": sum(r["thinking_tokens"] for r in self.usage_records),
+                "cached_tokens": sum(r.get("cached_tokens", 0) for r in self.usage_records),
                 "total_tokens": sum(r["total_tokens"] for r in self.usage_records),
                 "api_calls": len(self.usage_records),
             }
@@ -195,6 +197,12 @@ def action_generate(step, ctx):
     effective_model = step_model or ctx.model
     prompt_str = str(prompt)
 
+    # cache_content للـ explicit Gemini caching (يقلل تكلفة input بـ 60-80%)
+    cache_content_ref = step.get("cache_content")
+    cache_content = ctx.resolve(cache_content_ref) if cache_content_ref else None
+    if cache_content:
+        cache_content = str(cache_content)
+
     if step_model:
         log(f"  [model override] {step_model}")
 
@@ -210,7 +218,7 @@ def action_generate(step, ctx):
         direct_labels["step"] = step["id"]
 
     # === لو المدخل فيه أكتر من ماركر → توليد كل واحد لوحده بالتوازي ===
-    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, effective_model, labels=direct_labels)
+    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, effective_model, labels=direct_labels, cache_content=cache_content)
     if per_marker_result is not None:
         text = per_marker_result
     else:
@@ -224,6 +232,7 @@ def action_generate(step, ctx):
             thinking_budget=thinking_budget,
             thinking_level=thinking_level,
             labels=direct_labels,
+            cache_content=cache_content,
         )
         if not result.success:
             raise EngineError(f"فشل التوليد: {result.error}", code="GENERATE_FAILED")
@@ -241,7 +250,7 @@ def action_generate(step, ctx):
     return text
 
 
-def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget=None, thinking_level=None, effective_model=None, labels=None):
+def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget=None, thinking_level=None, effective_model=None, labels=None, cache_content=None):
     """
     لو المدخل فيه أكتر من ماركر SCRIPT/INTRO → يقسّمه ويولّد كل واحد لوحده بالتوازي.
     بيرجع None لو المدخل مش multi-marker (يعني استخدم generate العادي).
@@ -316,6 +325,7 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
             thinking_budget=thinking_budget,
             thinking_level=thinking_level,
             labels=per_call_labels,
+            cache_content=cache_content,
         )
         return marker, result.data if result.success else None, result.token_usage if result.success else {}
 
