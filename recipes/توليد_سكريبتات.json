@@ -81,9 +81,23 @@
       "label": "تشكيل المقدمات (Gemini 3.1 Pro Preview + thinking=low)"
     },
     {
+      "id": "intros_restored",
+      "action": "restore_truncated_words",
+      "input": "{tashkeel_intros}",
+      "original": "{intros_raw}",
+      "mode": "intros",
+      "label": "إصلاح الكلمات المبتورة في المقدمات (ة المحذوفة)"
+    },
+    {
+      "id": "intros_auto_fixed",
+      "action": "auto_fix_text",
+      "input": "{intros_restored}",
+      "label": "إصلاح ميكانيكي للمقدمات (Tatweel + مسافات + كلمات طبية)"
+    },
+    {
       "id": "intros_formatted",
       "action": "format_text",
-      "input": "{tashkeel_intros}",
+      "input": "{intros_auto_fixed}",
       "color_words": ["الكلا", "النفرونات", "الكبيبات", "البودوسيت", "الكرياتينين", "الالبومين"],
       "spaces_after_punctuation": 5,
       "label": "تنسيق المقدمات"
@@ -93,8 +107,10 @@
       "action": "save_docx",
       "input": "{intros_formatted}",
       "save_as": "intros_output.docx",
-      "font_size": 14,
-      "label": "حفظ المقدمات"
+      "font_name": "Simplified Arabic",
+      "font_size": 28,
+      "line_spacing": 1.0,
+      "label": "حفظ المقدمات (Simplified Arabic 28pt line-spacing 1.0)"
     },
     {
       "id": "texts_clean",
@@ -185,8 +201,10 @@
       "action": "save_docx",
       "input": "{assert_texts_clean}",
       "save_as": "texts_output.docx",
-      "font_size": 14,
-      "label": "حفظ النصوص"
+      "font_name": "Simplified Arabic",
+      "font_size": 28,
+      "line_spacing": 1.0,
+      "label": "حفظ النصوص (Simplified Arabic 28pt line-spacing 1.0)"
     },
     {
       "id": "topics_json",

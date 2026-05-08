@@ -3304,14 +3304,17 @@ def action_strip_last_letter_diacritic(step, ctx):
 def action_restore_truncated_words(step, ctx):
     """يصطاد الكلمات المبتورة (محذوف منها حرف من النموذج) ويصلحها.
 
-    المنطق:
-    - يقارن المخرج (المُشكَّل من النموذج) بالمدخل الأصلي (بدون تشكيل)
-    - يطابق كلمة بكلمة داخل كل PART
-    - لو كلمة المخرج (بعد إزالة التشكيل) أقصر من كلمة المدخل
-      → يستبدلها بكلمة المدخل (بدون تشكيل، مع الحفاظ على علامات الترقيم)
+    الـ modes:
+    - "parts" (افتراضي): يطابق داخل كل PART داخل كل SCRIPT (للنصوص)
+    - "intros": يطابق محتوى السكريبت كله بدون PARTs (للمقدمات)
+
+    التحسين الجديد: لو الكلمة فقدت سفس فقط (مثل ة في آخر الكلمة) →
+    يضيف الحرف الناقص للمخرج المشكّل (يحافظ على التشكيل) بدل
+    استبدال الكلمة كلها بالمدخل.
     """
     output_text = str(ctx.resolve(step["input"]))
     input_text = str(ctx.resolve(step["original"]))
+    mode = step.get("mode", "parts")
 
     TASHKEEL = 'ًٌٍَُِّْٰ'
     PUNCT = '.،؟!:;؛'
@@ -3320,6 +3323,30 @@ def action_restore_truncated_words(step, ctx):
         return re.sub(f'[{TASHKEEL}]', '', s)
 
     fixes = 0
+
+    def restore_word(inp_w, out_w):
+        """يستعيد الكلمة المبتورة مع الحفاظ على التشكيل قدر الإمكان."""
+        # افصل علامات الترقيم في آخر out_w
+        trailing_punct = ''
+        out_core = out_w
+        for ch in reversed(out_core):
+            if ch in PUNCT:
+                trailing_punct = ch + trailing_punct
+            else:
+                break
+        if trailing_punct:
+            out_core = out_core[:len(out_core) - len(trailing_punct)]
+
+        out_clean = strip_t(out_core).strip(PUNCT)
+        inp_clean = strip_t(inp_w).strip(PUNCT)
+
+        if 0 < len(out_clean) < len(inp_clean) and inp_clean.startswith(out_clean):
+            # الجزء المبتور (مثل: ة)
+            missing_suffix = inp_clean[len(out_clean):]
+            # ألحقه بالمخرج المشكّل بدل استبدال الكلمة بالكامل
+            return out_core + missing_suffix + trailing_punct, True
+
+        return out_w, False
 
     script_pat = r'(<<<SCRIPT_(\d+)>>>)(.*?)(<<<END_SCRIPT>>>)'
     input_scripts = {}
@@ -3336,20 +3363,10 @@ def action_restore_truncated_words(step, ctx):
 
         fixed = []
         for inp_w, out_w in zip(input_words, output_words):
-            inp_clean = strip_t(inp_w).strip(PUNCT)
-            out_clean = strip_t(out_w).strip(PUNCT)
-
-            if 0 < len(out_clean) < len(inp_clean) and inp_clean.startswith(out_clean):
-                trailing_punct = ''
-                for ch in reversed(out_w):
-                    if ch in PUNCT:
-                        trailing_punct = ch + trailing_punct
-                    else:
-                        break
+            new_w, was_fixed = restore_word(inp_w, out_w)
+            if was_fixed:
                 fixes += 1
-                fixed.append(inp_w.rstrip(PUNCT) + trailing_punct)
-            else:
-                fixed.append(out_w)
+            fixed.append(new_w)
 
         return ' '.join(fixed)
 
@@ -3360,6 +3377,16 @@ def action_restore_truncated_words(step, ctx):
             return m.group(0)
 
         input_script_content = input_scripts[script_id]
+
+        if mode == "intros":
+            # المقدمات: مفيش PARTs — قارن محتوى السكريبت كله ككتلة واحدة
+            fixed_content = fix_part(
+                input_script_content.strip(),
+                output_script_content.strip()
+            )
+            return f"{m.group(1)}\n{fixed_content}\n{m.group(4)}"
+
+        # mode == "parts" (السلوك الأصلي للنصوص)
         part_pat = r'(<<<PART_(\d+)>>>)(.*?)(<<<END_PART>>>)'
         input_parts = {}
         for pm in re.finditer(part_pat, input_script_content, re.DOTALL):
@@ -3379,9 +3406,9 @@ def action_restore_truncated_words(step, ctx):
     output_text = re.sub(script_pat, fix_script, output_text, flags=re.DOTALL)
 
     if fixes > 0:
-        log(f"  restore_truncated_words: ✓ تم إصلاح {fixes} كلمة مبتورة")
+        log(f"  restore_truncated_words [{mode}]: ✓ تم إصلاح {fixes} كلمة مبتورة")
     else:
-        log(f"  restore_truncated_words: ✓ مفيش كلمات مبتورة")
+        log(f"  restore_truncated_words [{mode}]: ✓ مفيش كلمات مبتورة")
 
     return output_text
 
