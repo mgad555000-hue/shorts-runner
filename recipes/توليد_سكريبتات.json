@@ -76,11 +76,11 @@
       "action": "generate",
       "input": "{tashkeel_prompt}",
       "cache_content": "{tashkeel_rules}",
-      "model": "gemini-3.1-pro-preview",
+      "model": "gemini-2.5-pro",
       "max_tokens": 15000,
       "temperature": 0.1,
-      "thinking_budget": 1024,
-      "label": "تشكيل المقدمات (Gemini 3.1 Pro + thinking_budget=1024 + cache)"
+      "thinking_level": "low",
+      "label": "تشكيل المقدمات (Gemini 2.5 Pro + thinking=low + cache)"
     },
     {
       "id": "intros_restored",
@@ -104,12 +104,12 @@
       "original": "{intros_raw}",
       "failed_ref": "{intros_validated_failed}",
       "instructions": "{tashkeel_rules}",
-      "model": "gemini-3.1-pro-preview",
+      "model": "gemini-2.5-pro",
       "temperature": 0.1,
-      "thinking_budget": 1024,
+      "thinking_level": "low",
       "max_tokens": 15000,
       "max_attempts": 3,
-      "label": "Layer 1 — إعادة تشكيل السكريبتات الفاشلة (max 3 attempts)"
+      "label": "Layer 1 — إعادة تشكيل السكريبتات الفاشلة (Gemini 2.5 Pro + thinking=low)"
     },
     {
       "id": "intros_restored_final",
@@ -180,11 +180,11 @@
       "action": "generate",
       "input": "{tashkeel_texts_prompt}",
       "cache_content": "{tashkeel_texts_rules}",
-      "model": "gemini-3.1-pro-preview",
+      "model": "gemini-2.5-pro",
       "max_tokens": 15000,
       "temperature": 0.1,
-      "thinking_budget": 1024,
-      "label": "تشكيل النصوص (Gemini 3.1 Pro + thinking_budget=1024 + cache)"
+      "thinking_level": "low",
+      "label": "تشكيل النصوص (Gemini 2.5 Pro + thinking=low + cache)"
     },
     {
       "id": "texts_restored",
@@ -220,11 +220,11 @@
       "input": "{texts_validated}",
       "failed_ref": "{texts_validated_failed}",
       "instructions": "{tashkeel_texts_rules}",
-      "model": "gemini-3.1-pro-preview",
+      "model": "gemini-2.5-pro",
       "temperature": 0.1,
-      "thinking_budget": 1024,
+      "thinking_level": "low",
       "max_tokens": 15000,
-      "label": "إعادة تشكيل الفاشل (Gemini 3.1 Pro + thinking_budget=1024)"
+      "label": "إعادة تشكيل الفاشل (Gemini 2.5 Pro + thinking=low)"
     },
     {
       "id": "texts_final",

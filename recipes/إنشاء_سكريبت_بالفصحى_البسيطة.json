@@ -62,11 +62,11 @@
       "action": "generate",
       "input": "{tashkeel_prompt}",
       "cache_content": "{tashkeel_rules}",
-      "model": "gemini-3.1-pro-preview",
+      "model": "gemini-2.5-pro",
       "max_tokens": 32000,
       "temperature": 0.3,
-      "thinking_budget": 1024,
-      "label": "تشكيل السكريبتات (thinking_budget=1024 + cache)"
+      "thinking_level": "low",
+      "label": "تشكيل السكريبتات (Gemini 2.5 Pro + thinking=low + cache)"
     },
     {
       "id": "formatted",
