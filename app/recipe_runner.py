@@ -1155,8 +1155,13 @@ def action_save_docx(step, ctx):
                 if part_content:
                     _add_text_to_doc(doc, part_content, line_spacing)
         else:
-            # مفيش PART markers — نص عادي
-            _add_text_to_doc(doc, section, line_spacing)
+            # مفيش PART markers — قسّم بالسطور الفارغة (كل قطعة = paragraph)
+            # ده مهم للمقدمات الأربع علشان تطلع كـ 4 paragraphs منفصلة
+            blocks = re.split(r'\n\s*\n+', section)
+            for block in blocks:
+                block = block.strip()
+                if block:
+                    _add_text_to_doc(doc, block, line_spacing)
 
     doc.save(filepath)
 
@@ -3354,21 +3359,39 @@ def action_restore_truncated_words(step, ctx):
         input_scripts[m.group(2)] = m.group(3)
 
     def fix_part(input_part_text, output_part_text):
+        """يصلح الكلمات المبتورة مع الحفاظ على whitespace (سطور فارغة، tabs، newlines)
+        من الـ output الأصلي."""
         nonlocal fixes
         input_words = input_part_text.split()
-        output_words = output_part_text.split()
+
+        # split الـ output مع الحفاظ على tokens الـ whitespace
+        output_tokens = re.split(r'(\s+)', output_part_text)
+        output_words = [t for t in output_tokens if t and not t.isspace()]
 
         if len(input_words) != len(output_words):
             return output_part_text
 
-        fixed = []
+        # ابني قائمة الكلمات المُصلحة
+        fixed_words = []
         for inp_w, out_w in zip(input_words, output_words):
             new_w, was_fixed = restore_word(inp_w, out_w)
             if was_fixed:
                 fixes += 1
-            fixed.append(new_w)
+            fixed_words.append(new_w)
 
-        return ' '.join(fixed)
+        # أعد البناء مع الحفاظ على whitespace الأصلية
+        result = []
+        word_idx = 0
+        for token in output_tokens:
+            if not token:
+                continue
+            if token.isspace():
+                result.append(token)
+            else:
+                result.append(fixed_words[word_idx])
+                word_idx += 1
+
+        return ''.join(result)
 
     def fix_script(m):
         script_id = m.group(2)
