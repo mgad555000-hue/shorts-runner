@@ -218,7 +218,8 @@ def action_generate(step, ctx):
         direct_labels["step"] = step["id"]
 
     # === لو المدخل فيه أكتر من ماركر → توليد كل واحد لوحده بالتوازي ===
-    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, effective_model, labels=direct_labels, cache_content=cache_content)
+    max_workers = step.get("max_workers", 5)  # قابل للتخصيص للـ batches الكبيرة
+    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, effective_model, labels=direct_labels, cache_content=cache_content, max_workers=max_workers)
     if per_marker_result is not None:
         text = per_marker_result
     else:
@@ -250,14 +251,15 @@ def action_generate(step, ctx):
     return text
 
 
-def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget=None, thinking_level=None, effective_model=None, labels=None, cache_content=None):
+def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget=None, thinking_level=None, effective_model=None, labels=None, cache_content=None, max_workers=5):
     """
     لو المدخل فيه أكتر من ماركر SCRIPT/INTRO → يقسّمه ويولّد كل واحد لوحده بالتوازي.
     بيرجع None لو المدخل مش multi-marker (يعني استخدم generate العادي).
+    max_workers: عدد المكالمات المتوازية (افتراضي 5، يمكن رفعه للـ batches الكبيرة).
     """
     model_to_use = effective_model or ctx.model
     MARKER_PAT = r'<<<((?:SCRIPT|INTRO)_\d+)>>>'
-    MAX_WORKERS = 5
+    MAX_WORKERS = max_workers
 
     # --- استخراج ماركرز المدخل من قسم المحتوى فقط (بعد آخر ---) ---
     # التعليمات (instructions.txt) ممكن تحتوي ماركرز مثال — نتجاهلها

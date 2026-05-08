@@ -20,9 +20,16 @@
       "label": "قراءة بنك الذاكرة"
     },
     {
+      "id": "topics_markers",
+      "action": "topics_to_markers",
+      "input": "{topics}",
+      "marker_prefix": "SCRIPT",
+      "label": "تحويل العناوين لماركرز (يفعّل per-marker generation)"
+    },
+    {
       "id": "prompt",
       "action": "template",
-      "text": "{instructions}\n\n---\n\nبنك ذاكرة الفيديوهات السابقة (ممنوع تكرار محتواه):\n\n{memory_bank}\n\n---\n\nقائمة العناوين المطلوب إنشاء سكريبتات لها:\n\n{topics}",
+      "text": "{instructions}\n\n---\n\nبنك ذاكرة الفيديوهات السابقة (ممنوع تكرار محتواه):\n\n{memory_bank}\n\n---\n\nقائمة العناوين المطلوب إنشاء سكريبتات لها (كل عنوان داخل ماركر منفصل):\n\n{topics_markers}",
       "label": "تجميع البرومبت"
     },
     {
@@ -34,7 +41,8 @@
       "max_tokens": 16000,
       "temperature": 0.3,
       "thinking_level": "high",
-      "label": "توليد السكريبتات (+ cache)"
+      "max_workers": 30,
+      "label": "توليد السكريبتات (per-marker × 30 parallel + cache)"
     },
     {
       "id": "update_memory",
@@ -66,7 +74,8 @@
       "max_tokens": 32000,
       "temperature": 0.3,
       "thinking_level": "low",
-      "label": "تشكيل السكريبتات (Gemini 2.5 Pro + thinking=low + cache)"
+      "max_workers": 30,
+      "label": "تشكيل السكريبتات (per-marker × 30 + 2.5 Pro + low + cache)"
     },
     {
       "id": "formatted",
