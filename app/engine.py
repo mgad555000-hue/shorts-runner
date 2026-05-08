@@ -477,8 +477,9 @@ def _get_or_create_gemini_cache(client, model: str, content: str, ttl_seconds: i
     from google.genai import types
 
     # فحص استباقي للحد الأدنى — يوفر API call فاشل
+    # حدود Google الفعلية: Pro=2048، Flash=1024
     is_flash = 'flash' in model.lower()
-    min_tokens_required = 1024 if is_flash else 4096
+    min_tokens_required = 1024 if is_flash else 2048
     # تقدير التوكنز عبر count_tokens API call (دقيق + مجاني)
     try:
         token_count = client.models.count_tokens(model=model, contents=content).total_tokens
