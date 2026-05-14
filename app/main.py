@@ -24,7 +24,7 @@ import io
 import time
 import json
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import threading
 
 from app.database import get_db, init_db, Recipe, Run, Setting, User, UserPermission, ApiUsage, SessionLocal
@@ -690,6 +690,8 @@ async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, cur
         recipe = db.query(Recipe).filter(Recipe.id == run_data.recipe_id).first()
         if recipe:
             recipe_name = recipe.name
+            # Saved recipes must always run server-side code, not stale code sent by an old browser tab.
+            code_to_run = ""
             # "#" أو فاضي = مفيش كود حقيقي، نقرأ من ملف الوصفة
             if not code_to_run.strip() or code_to_run.strip().startswith("#"):
                 # أولاً: قراءة الكود من ملف الوصفة (الأحدث دائماً)
@@ -754,6 +756,7 @@ async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, cur
         input_folder=run_data.input_folder,
         recipe_name=recipe_name,
         model_name=run_data.model_name or "gemini-2.5-flash",
+        thinking_level=_normalize_thinking_level(run_data.thinking_level),
         tts_provider=run_data.tts_provider or "vertex",
         execution_mode=run_data.execution_mode or "instant",
         topic_ids=topic_ids_str,
@@ -789,30 +792,31 @@ MODEL_PRICING = {
     # thinking = نفس سعر output (Google بيحسبهم سوا في الفاتورة)
 
     # Gemini 2.5 Flash (سعر واحد — مفيش context tiers)
-    "gemini-2.5-flash": {"input": 0.30, "output": 2.50, "thinking": 2.50, "batch_discount": 0.5},
+    "gemini-2.5-flash": {"input": 0.30, "cached_input": 0.03, "output": 2.50, "thinking": 2.50, "batch_discount": 0.5},
 
     # Gemini 2.5 Pro (فيه context tiers: ≤200K و >200K)
-    "gemini-2.5-pro": {"input": 1.25, "output": 10.00, "thinking": 10.00, "batch_discount": 0.5,
-                        "input_200k": 2.50, "output_200k": 15.00, "thinking_200k": 15.00},
+    "gemini-2.5-pro": {"input": 1.25, "cached_input": 0.125, "output": 10.00, "thinking": 10.00, "batch_discount": 0.5,
+                        "input_200k": 2.50, "cached_input_200k": 0.25, "output_200k": 15.00, "thinking_200k": 15.00},
 
     # Gemini 2.0 Flash (legacy — deprecated)
-    "gemini-2.0-flash": {"input": 0.15, "output": 0.60, "thinking": 0.60, "batch_discount": 0.5},
+    "gemini-2.0-flash": {"input": 0.15, "cached_input": 0.025, "output": 0.60, "thinking": 0.60, "batch_discount": 0.5},
 
     # Gemini 3.0 Flash (= Gemini 3 Flash Preview)
-    "gemini-3.0-flash": {"input": 0.50, "output": 3.00, "thinking": 3.00, "batch_discount": 0.5},
+    "gemini-3.0-flash": {"input": 0.50, "cached_input": 0.05, "output": 3.00, "thinking": 3.00, "batch_discount": 0.5},
+    "gemini-3-flash-preview": {"input": 0.50, "cached_input": 0.05, "output": 3.00, "thinking": 3.00, "batch_discount": 0.5},
 
     # Gemini 3.1 Pro Preview (فيه context tiers)
-    "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00, "thinking": 12.00, "batch_discount": 0.5,
-                                "input_200k": 4.00, "output_200k": 18.00, "thinking_200k": 18.00},
+    "gemini-3.1-pro-preview": {"input": 2.00, "cached_input": 0.20, "output": 12.00, "thinking": 12.00, "batch_discount": 0.5,
+                                "input_200k": 4.00, "cached_input_200k": 0.40, "output_200k": 18.00, "thinking_200k": 18.00},
 
     # Gemini 3.1 Flash Preview (سعر واحد)
-    "gemini-3.1-flash-preview": {"input": 0.50, "output": 3.00, "thinking": 3.00, "batch_discount": 0.5},
+    "gemini-3.1-flash-preview": {"input": 0.50, "cached_input": 0.05, "output": 3.00, "thinking": 3.00, "batch_discount": 0.5},
 
     # Gemini 3.1 Flash-Lite Preview
-    "gemini-3.1-flash-lite-preview": {"input": 0.25, "output": 1.50, "thinking": 1.50, "batch_discount": 0.5},
+    "gemini-3.1-flash-lite-preview": {"input": 0.25, "cached_input": 0.025, "output": 1.50, "thinking": 1.50, "batch_discount": 0.5},
 
     # Gemini 2.5 Flash-Lite
-    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40, "thinking": 0.40, "batch_discount": 0.5},
+    "gemini-2.5-flash-lite": {"input": 0.10, "cached_input": 0.01, "output": 0.40, "thinking": 0.40, "batch_discount": 0.5},
 
     # ========== OpenAI ==========
     "gpt-4o": {"input": 2.50, "output": 10.00, "thinking": 0, "batch_discount": 0.5},
@@ -825,7 +829,7 @@ MODEL_PRICING = {
 
 
 def _estimate_cost(model: str, input_tokens: int, output_tokens: int, thinking_tokens: int,
-                   call_type: str = "direct") -> float:
+                   cached_tokens: int = 0, call_type: str = "direct") -> float:
     """حساب التكلفة بالدولار — مطابق لفواتير Google Cloud.
 
     القواعد:
@@ -835,9 +839,10 @@ def _estimate_cost(model: str, input_tokens: int, output_tokens: int, thinking_t
 
     Args:
         model: اسم الموديل
-        input_tokens: عدد توكنز المدخلات (promptTokenCount)
+        input_tokens: عدد توكنز المدخلات الخام (promptTokenCount) وقد يشمل cached tokens
         output_tokens: عدد توكنز المخرجات (candidatesTokenCount)
         thinking_tokens: عدد توكنز التفكير (thoughtsTokenCount) — بيتحسب بسعر output
+        cached_tokens: cachedContentTokenCount — يُخصم من input العادي ويُحسب بسعر cache read
         call_type: "direct" أو "batch" — الباتش بيحصل على خصم 50%
 
     Returns:
@@ -852,7 +857,7 @@ def _estimate_cost(model: str, input_tokens: int, output_tokens: int, thinking_t
                 break
     if not pricing:
         print(f"[PRICING WARNING] موديل غير معروف: {model} — استخدام تقدير افتراضي!")
-        pricing = {"input": 1.00, "output": 5.00, "thinking": 5.00, "batch_discount": 0.5}
+        pricing = {"input": 1.00, "cached_input": 1.00, "output": 5.00, "thinking": 5.00, "batch_discount": 0.5}
 
     # كشف context tier (>200K tokens) — لو الموديل بيدعم tiers
     # ⚠️ للباتش: مفيش 200K tier لأن input_tokens هنا مجموع كل البرومبتات
@@ -863,18 +868,24 @@ def _estimate_cost(model: str, input_tokens: int, output_tokens: int, thinking_t
 
     if use_200k_tier:
         input_price = pricing["input_200k"]
+        cached_input_price = pricing.get("cached_input_200k", pricing.get("cached_input", input_price))
         output_price = pricing["output_200k"]
         thinking_price = pricing["thinking_200k"]
     else:
         input_price = pricing["input"]
+        cached_input_price = pricing.get("cached_input", input_price)
         output_price = pricing["output"]
         thinking_price = pricing["thinking"]
 
+    cached_tokens = max(0, min(cached_tokens or 0, input_tokens or 0))
+    uncached_input_tokens = max(0, (input_tokens or 0) - cached_tokens)
+
     # حساب التكلفة الأساسية
     cost = (
-        (input_tokens / 1_000_000) * input_price +
-        (output_tokens / 1_000_000) * output_price +
-        (thinking_tokens / 1_000_000) * thinking_price
+        (uncached_input_tokens / 1_000_000) * input_price +
+        (cached_tokens / 1_000_000) * cached_input_price +
+        ((output_tokens or 0) / 1_000_000) * output_price +
+        ((thinking_tokens or 0) / 1_000_000) * thinking_price
     )
 
     # تطبيق خصم الباتش لو call_type = "batch"
@@ -889,11 +900,19 @@ def _save_usage_from_summary(db, run_id: str, output_dir: Path):
     """قراءة usage_summary.json وحفظ البيانات في جدول api_usage — مع حساب تكلفة دقيق"""
     usage_file = output_dir / "usage_summary.json"
     if not usage_file.exists():
-        return
+        return False
     try:
         with open(usage_file, "r", encoding="utf-8") as f:
             summary = json.load(f)
+        summary_run_id = summary.get("run_id")
+        if summary_run_id and summary_run_id != run_id:
+            print(f"[USAGE] رفض usage_summary غير مطابق: {summary_run_id[:8]} != {run_id[:8]} | {usage_file}")
+            return False
         records = summary.get("records", [])
+        if not records:
+            print(f"[USAGE] usage_summary بلا records: {usage_file}")
+            return False
+        db.query(ApiUsage).filter(ApiUsage.run_id == run_id).delete(synchronize_session=False)
         for rec in records:
             rec_call_type = rec.get("call_type", "direct")
             cost = _estimate_cost(
@@ -901,6 +920,7 @@ def _save_usage_from_summary(db, run_id: str, output_dir: Path):
                 rec.get("input_tokens", 0),
                 rec.get("output_tokens", 0),
                 rec.get("thinking_tokens", 0),
+                rec.get("cached_tokens", 0),
                 call_type=rec_call_type,
             )
             usage = ApiUsage(
@@ -912,6 +932,7 @@ def _save_usage_from_summary(db, run_id: str, output_dir: Path):
                 input_tokens=rec.get("input_tokens", 0),
                 output_tokens=rec.get("output_tokens", 0),
                 thinking_tokens=rec.get("thinking_tokens", 0),
+                cached_tokens=rec.get("cached_tokens", 0),
                 total_tokens=rec.get("total_tokens", 0),
                 estimated_cost_usd=cost,
                 send_run_id=rec.get("send_run_id"),
@@ -922,16 +943,25 @@ def _save_usage_from_summary(db, run_id: str, output_dir: Path):
             _estimate_cost(
                 r.get("model", ""), r.get("input_tokens", 0),
                 r.get("output_tokens", 0), r.get("thinking_tokens", 0),
+                r.get("cached_tokens", 0),
                 call_type=r.get("call_type", "direct")
             )
             for r in records
         )
-        print(f"[USAGE] حفظ {len(records)} سجل استهلاك | التكلفة: ${total_cost:.4f} (batch discount مُطبّق)")
+        print(f"[USAGE] حفظ {len(records)} سجل استهلاك | التكلفة: ${total_cost:.4f} (cache-aware)")
+        return True
     except Exception as e:
+        db.rollback()
         print(f"[USAGE] خطأ في حفظ بيانات الاستهلاك: {e}")
+        return False
 
 
-def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = None, model_name: str = "gemini-2.5-flash", tts_provider: str = "vertex", execution_mode: str = "instant", topic_ids: str = "", content_type: str = "shorts"):
+def _normalize_thinking_level(value: str | None) -> str:
+    value = (value or "none").strip().lower()
+    return value if value in {"none", "low", "medium", "high"} else "none"
+
+
+def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = None, model_name: str = "gemini-2.5-flash", thinking_level: str = "none", tts_provider: str = "vertex", execution_mode: str = "instant", topic_ids: str = "", content_type: str = "shorts"):
     db = SessionLocal()
     try:
         db_run = db.query(Run).filter(Run.run_id == run_id).first()
@@ -958,12 +988,22 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
             actual_output_recipe = None
         channel_root = str(get_channel_path(channel))
 
+        if db_recipe and db_recipe.id == 19:
+            stale_markers = (
+                "gemini-3.1-pro-preview" in code
+                or '"thinking_level": "high"' in code
+                or "'thinking_level': 'high'" in code
+            )
+            if stale_markers:
+                raise RuntimeError("SAFETY_BLOCK_STALE_RECIPE_CODE: recipe 19 received old Pro/high code")
+
         # تمرير متغيرات بيئة (القناة + الموديل + مزود الصوت)
         # Lock to prevent race condition with concurrent runs
         with _env_lock:
             os.environ["CHANNEL_NAME"] = channel
             os.environ["CHANNEL_ROOT"] = channel_root
             os.environ["MODEL_NAME"] = model_name
+            os.environ["THINKING_LEVEL"] = _normalize_thinking_level(thinking_level)
             os.environ["TTS_PROVIDER"] = tts_provider
             os.environ["EXECUTION_MODE"] = execution_mode
             os.environ["TOPIC_IDS"] = topic_ids
@@ -996,8 +1036,7 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
         # عشان مجلد الوصفة ممكن يكون فيه usage_summary من تشغيلة سابقة
         _usage_saved = False
         if output_path and (Path(output_path) / "usage_summary.json").exists():
-            _save_usage_from_summary(db, run_id, Path(output_path))
-            _usage_saved = True
+            _usage_saved = _save_usage_from_summary(db, run_id, Path(output_path))
         if not _usage_saved and actual_output_recipe:
             # fallback: نقرأ من مجلد الوصفة بس نتحقق إن الـ run_id متطابق
             usage_file = Path(actual_output_recipe) / "usage_summary.json"
@@ -1007,18 +1046,18 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
                     with open(usage_file, "r", encoding="utf-8") as _f:
                         _summary = _json.load(_f)
                     if _summary.get("run_id") == run_id:
-                        _save_usage_from_summary(db, run_id, Path(actual_output_recipe))
+                        _usage_saved = _save_usage_from_summary(db, run_id, Path(actual_output_recipe))
                     else:
                         print(f"[USAGE] تخطي usage_summary — run_id مختلف: {_summary.get('run_id', '?')[:8]} != {run_id[:8]}")
                 except Exception as _e:
                     print(f"[USAGE] خطأ في قراءة usage_summary: {_e}")
 
         # نسخ ملفات الإخراج من مجلد الوصفة للـ sandbox — عشان كل تشغيلة يكون عندها نسختها
-        if actual_output_recipe and output_path:
+        if success and actual_output_recipe and output_path:
             recipe_out = Path(actual_output_recipe).resolve()
             sandbox_out = Path(output_path).resolve()
             if recipe_out.exists() and sandbox_out.exists():
-                skip_files = {"script.py", "recipe_config.json", "result_manifest.json", "run_log.txt"}
+                skip_files = {"script.py", "recipe_config.json", "result_manifest.json", "run_log.txt", "usage_summary.json"}
                 copied = 0
                 for f in recipe_out.iterdir():
                     if f.is_file() and f.name not in skip_files:
@@ -1042,6 +1081,8 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
                             fpath.unlink()
                         except Exception:
                             pass
+        elif not success and output_path:
+            print(f"[OUTPUT] الرن فشل، لن يتم نسخ ملفات قديمة من مجلد الوصفة إلى: {output_path}")
 
     except Exception as e:
         # Prevent stuck "running" runs on unexpected errors
@@ -1187,6 +1228,8 @@ async def get_usage(
     total_input = sum(r.input_tokens for r in records)
     total_output = sum(r.output_tokens for r in records)
     total_thinking = sum(r.thinking_tokens for r in records)
+    total_cached = sum((getattr(r, "cached_tokens", 0) or 0) for r in records)
+    total_billable_input = max(0, total_input - total_cached)
     total_tokens = sum(r.total_tokens for r in records)
     total_cost = sum(r.estimated_cost_usd for r in records)
 
@@ -1194,8 +1237,11 @@ async def get_usage(
     by_model = {}
     for r in records:
         if r.model not in by_model:
-            by_model[r.model] = {"input": 0, "output": 0, "thinking": 0, "total": 0, "cost": 0, "calls": 0, "batch_calls": 0, "direct_calls": 0}
+            by_model[r.model] = {"input": 0, "cached": 0, "billable_input": 0, "output": 0, "thinking": 0, "total": 0, "cost": 0, "calls": 0, "batch_calls": 0, "direct_calls": 0}
+        cached_tokens = getattr(r, "cached_tokens", 0) or 0
         by_model[r.model]["input"] += r.input_tokens
+        by_model[r.model]["cached"] += cached_tokens
+        by_model[r.model]["billable_input"] += max(0, r.input_tokens - cached_tokens)
         by_model[r.model]["output"] += r.output_tokens
         by_model[r.model]["thinking"] += r.thinking_tokens
         by_model[r.model]["total"] += r.total_tokens
@@ -1212,7 +1258,11 @@ async def get_usage(
         # المفتاح = send_run_id (الإرسال) لو موجود، وإلا run_id العادي
         display_id = r.send_run_id if r.send_run_id else r.run_id
         if display_id not in by_run:
-            by_run[display_id] = {"total_tokens": 0, "cost": 0, "calls": 0, "created_at": r.created_at.isoformat() if r.created_at else "", "receive_run_id": r.run_id}
+            by_run[display_id] = {"input_tokens": 0, "cached_tokens": 0, "billable_input_tokens": 0, "total_tokens": 0, "cost": 0, "calls": 0, "created_at": r.created_at.isoformat() if r.created_at else "", "receive_run_id": r.run_id}
+        cached_tokens = getattr(r, "cached_tokens", 0) or 0
+        by_run[display_id]["input_tokens"] += r.input_tokens
+        by_run[display_id]["cached_tokens"] += cached_tokens
+        by_run[display_id]["billable_input_tokens"] += max(0, r.input_tokens - cached_tokens)
         by_run[display_id]["total_tokens"] += r.total_tokens
         by_run[display_id]["cost"] += r.estimated_cost_usd
         by_run[display_id]["calls"] += 1
@@ -1221,6 +1271,8 @@ async def get_usage(
         "period_days": days,
         "totals": {
             "input_tokens": total_input,
+            "cached_tokens": total_cached,
+            "billable_input_tokens": total_billable_input,
             "output_tokens": total_output,
             "thinking_tokens": total_thinking,
             "total_tokens": total_tokens,
@@ -1238,6 +1290,8 @@ async def get_usage(
                 "provider": r.provider,
                 "model": r.model,
                 "input_tokens": r.input_tokens,
+                "cached_tokens": getattr(r, "cached_tokens", 0) or 0,
+                "billable_input_tokens": max(0, r.input_tokens - (getattr(r, "cached_tokens", 0) or 0)),
                 "output_tokens": r.output_tokens,
                 "thinking_tokens": r.thinking_tokens,
                 "total_tokens": r.total_tokens,
@@ -1259,6 +1313,8 @@ async def get_run_usage(run_id: str, current_user: User = Depends(get_current_us
     if not records:
         return {"run_id": run_id, "records": [], "totals": {"total_tokens": 0, "estimated_cost_usd": 0}}
     total_cost = sum(r.estimated_cost_usd for r in records)
+    total_input = sum(r.input_tokens for r in records)
+    total_cached = sum((getattr(r, "cached_tokens", 0) or 0) for r in records)
     # استخراج send_run_id (الإرسال اللي بيظهر في جوجل)
     send_ids = set(r.send_run_id for r in records if r.send_run_id)
     send_run_id = send_ids.pop() if len(send_ids) == 1 else (list(send_ids) if send_ids else None)
@@ -1266,7 +1322,9 @@ async def get_run_usage(run_id: str, current_user: User = Depends(get_current_us
         "run_id": run_id,
         "send_run_id": send_run_id,
         "totals": {
-            "input_tokens": sum(r.input_tokens for r in records),
+            "input_tokens": total_input,
+            "cached_tokens": total_cached,
+            "billable_input_tokens": max(0, total_input - total_cached),
             "output_tokens": sum(r.output_tokens for r in records),
             "thinking_tokens": sum(r.thinking_tokens for r in records),
             "total_tokens": sum(r.total_tokens for r in records),
@@ -1280,6 +1338,8 @@ async def get_run_usage(run_id: str, current_user: User = Depends(get_current_us
                 "provider": r.provider,
                 "model": r.model,
                 "input_tokens": r.input_tokens,
+                "cached_tokens": getattr(r, "cached_tokens", 0) or 0,
+                "billable_input_tokens": max(0, r.input_tokens - (getattr(r, "cached_tokens", 0) or 0)),
                 "output_tokens": r.output_tokens,
                 "thinking_tokens": r.thinking_tokens,
                 "total_tokens": r.total_tokens,
@@ -1301,7 +1361,10 @@ async def recalculate_costs(current_user: User = Depends(get_current_user), db: 
     total_new = 0
     for r in records:
         old_cost = r.estimated_cost_usd
-        new_cost = _estimate_cost(r.model, r.input_tokens, r.output_tokens, r.thinking_tokens, call_type=r.call_type)
+        new_cost = _estimate_cost(
+            r.model, r.input_tokens, r.output_tokens, r.thinking_tokens,
+            getattr(r, "cached_tokens", 0), call_type=r.call_type
+        )
         if abs(old_cost - new_cost) > 0.0001:
             total_old += old_cost
             total_new += new_cost
@@ -1318,41 +1381,126 @@ async def get_usage_timeline(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """تشغيلات مجمّعة (send+receive في run واحد) مرتبة زمنياً — الأحدث أولاً.
-    يجمع كل ApiUsage records تحت نفس send_run_id (أو run_id) ويربطهم بـ recipe_name من shorts_runs."""
+    """Timeline محاسبي: يعرض كل runs حتى لو مفيش api_usage، ثم يركب عليها usage إن وجد."""
+    from sqlalchemy import or_
+
     cutoff = datetime.utcnow() - timedelta(days=days)
+    runs_recent = db.query(Run).filter(
+        or_(Run.created_at >= cutoff, Run.completed_at >= cutoff)
+    ).order_by(Run.created_at.desc()).all()
     records = db.query(ApiUsage).filter(ApiUsage.created_at >= cutoff).order_by(ApiUsage.created_at.desc()).all()
 
     runs_by_id = {r.run_id: r for r in db.query(Run).all()}
 
+    uuid_re = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.I)
+
+    def infer_billing_lookup_run_id(run: Run | None) -> str | None:
+        if not run:
+            return None
+        try:
+            output_dir = get_run_output_dir(run.run_id, run.output_relpath)
+            metadata_path = output_dir / "batch_metadata.json"
+            if metadata_path.exists():
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    if metadata.get("run_id") and metadata.get("run_id") != run.run_id:
+                        return run.run_id
+                except Exception:
+                    return run.run_id
+            else:
+                return run.run_id
+            info_path = output_dir / "batch_job_info.json"
+            if not info_path.exists():
+                return run.run_id
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+
+            def from_text(value):
+                if not value:
+                    return None
+                match = uuid_re.search(str(value).lower())
+                return match.group(0) if match else None
+
+            def from_extra(extra):
+                if not isinstance(extra, dict):
+                    return None
+                for key in ("labels", "job_labels"):
+                    labels = extra.get(key)
+                    if isinstance(labels, dict) and labels.get("run_id"):
+                        return labels.get("run_id")
+                for key in ("gcs_output", "input_uri", "display_name", "job_name"):
+                    found = from_text(extra.get(key))
+                    if found:
+                        return found
+                return None
+
+            found = from_extra(info.get("extra") or {})
+            if found:
+                return found
+            for chunk in (info.get("extra") or {}).get("chunks") or []:
+                found = from_extra((chunk or {}).get("extra") or {})
+                if found:
+                    return found
+                found = from_text((chunk or {}).get("job_name") or (chunk or {}).get("job_id"))
+                if found:
+                    return found
+        except Exception:
+            pass
+        return run.run_id
+
+    def make_group(run_id: str, run_meta: Run | None, usage_source: str = "run_only"):
+        seen = None
+        if run_meta:
+            seen = run_meta.completed_at or run_meta.started_at or run_meta.created_at
+        return {
+            "run_id": run_id,
+            "billing_lookup_run_id": infer_billing_lookup_run_id(run_meta) or run_id,
+            "linked_send_run_id": None,
+            "recipe_name": run_meta.recipe_name if run_meta else "",
+            "status": run_meta.status if run_meta else "",
+            "started_at": run_meta.started_at.isoformat() if run_meta and run_meta.started_at else None,
+            "model": "",
+            "providers": set(),
+            "models": set(),
+            "input_tokens": 0,
+            "cached_tokens": 0,
+            "billable_input_tokens": 0,
+            "output_tokens": 0,
+            "thinking_tokens": 0,
+            "total_tokens": 0,
+            "estimated_cost_usd": 0.0,
+            "calls": 0,
+            "batch_calls": 0,
+            "direct_calls": 0,
+            "first_seen": seen,
+            "last_seen": seen,
+            "usage_source": usage_source,
+        }
+
     grouped = {}
+    for run in runs_recent:
+        grouped[run.run_id] = make_group(run.run_id, run, "run_only")
+
     for r in records:
-        key = r.send_run_id if r.send_run_id else r.run_id
+        key = r.run_id
         if key not in grouped:
-            run_meta = runs_by_id.get(key) or runs_by_id.get(r.run_id)
-            grouped[key] = {
-                "run_id": key,
-                "recipe_name": run_meta.recipe_name if run_meta else "",
-                "status": run_meta.status if run_meta else "",
-                "started_at": run_meta.started_at.isoformat() if run_meta and run_meta.started_at else None,
-                "model": r.model,
-                "providers": set(),
-                "models": set(),
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "thinking_tokens": 0,
-                "total_tokens": 0,
-                "estimated_cost_usd": 0.0,
-                "calls": 0,
-                "batch_calls": 0,
-                "direct_calls": 0,
-                "first_seen": r.created_at,
-                "last_seen": r.created_at,
-            }
+            run_meta = runs_by_id.get(key) or runs_by_id.get(r.send_run_id)
+            grouped[key] = make_group(key, run_meta, "api_usage")
         g = grouped[key]
+        g["usage_source"] = "api_usage"
+        if r.send_run_id:
+            g["billing_lookup_run_id"] = r.send_run_id
+            g["linked_send_run_id"] = r.send_run_id
+        else:
+            g["billing_lookup_run_id"] = r.run_id
+            g["linked_send_run_id"] = None
         g["providers"].add(r.provider or "")
         g["models"].add(r.model or "")
+        if r.model and not g["model"]:
+            g["model"] = r.model
+        cached_tokens = getattr(r, "cached_tokens", 0) or 0
         g["input_tokens"] += r.input_tokens
+        g["cached_tokens"] += cached_tokens
+        g["billable_input_tokens"] += max(0, r.input_tokens - cached_tokens)
         g["output_tokens"] += r.output_tokens
         g["thinking_tokens"] += r.thinking_tokens
         g["total_tokens"] += r.total_tokens
@@ -1368,14 +1516,25 @@ async def get_usage_timeline(
             g["last_seen"] = r.created_at
 
     rows = []
+    linked_send_ids = {
+        g["linked_send_run_id"]
+        for g in grouped.values()
+        if g.get("linked_send_run_id") and g.get("calls", 0) > 0
+    }
     for g in grouped.values():
+        if g["run_id"] in linked_send_ids and g.get("calls", 0) == 0:
+            continue
         rows.append({
             "run_id": g["run_id"],
+            "billing_lookup_run_id": g["billing_lookup_run_id"],
+            "linked_send_run_id": g["linked_send_run_id"],
             "recipe_name": g["recipe_name"],
             "status": g["status"],
-            "model": ",".join(sorted(g["models"])),
+            "model": ",".join(sorted(g["models"])) or g["model"] or "—",
             "providers": ",".join(sorted(g["providers"])),
             "input_tokens": g["input_tokens"],
+            "cached_tokens": g["cached_tokens"],
+            "billable_input_tokens": g["billable_input_tokens"],
             "output_tokens": g["output_tokens"],
             "thinking_tokens": g["thinking_tokens"],
             "total_tokens": g["total_tokens"],
@@ -1383,6 +1542,8 @@ async def get_usage_timeline(
             "calls": g["calls"],
             "batch_calls": g["batch_calls"],
             "direct_calls": g["direct_calls"],
+            "has_usage": g["calls"] > 0,
+            "usage_source": g["usage_source"],
             "first_seen": g["first_seen"].isoformat() if g["first_seen"] else None,
             "last_seen": g["last_seen"].isoformat() if g["last_seen"] else None,
         })
@@ -1394,10 +1555,814 @@ async def get_usage_timeline(
         "estimated_cost_usd": round(sum(r["estimated_cost_usd"] for r in rows), 4),
         "total_tokens": sum(r["total_tokens"] for r in rows),
         "input_tokens": sum(r["input_tokens"] for r in rows),
+        "cached_tokens": sum(r["cached_tokens"] for r in rows),
+        "billable_input_tokens": sum(r["billable_input_tokens"] for r in rows),
         "output_tokens": sum(r["output_tokens"] for r in rows),
         "thinking_tokens": sum(r["thinking_tokens"] for r in rows),
     }
     return {"period_days": days, "totals": totals, "runs": rows}
+
+
+def _billing_export_candidates(client, dataset: str, override_pattern: str | None = None, prefer_detailed: bool = False):
+    if override_pattern:
+        kind = "detailed" if "resource" in override_pattern else "override"
+        return [{"pattern": override_pattern, "kind": kind}]
+
+    tables = list(client.list_tables(dataset))
+    candidates = []
+    if any(t.table_id.startswith("gcp_billing_export_resource_v1_") for t in tables):
+        candidates.append({"pattern": "gcp_billing_export_resource_v1_*", "kind": "detailed"})
+    if any(t.table_id.startswith("gcp_billing_export_v1_") for t in tables):
+        candidates.append({"pattern": "gcp_billing_export_v1_*", "kind": "standard"})
+    if not prefer_detailed:
+        candidates.sort(key=lambda c: 0 if c["kind"] == "standard" else 1)
+    return candidates
+
+
+def _as_utc(dt):
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _parse_iso_datetime(value: str | None):
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="since لازم يكون ISO datetime صالح")
+    return _as_utc(parsed)
+
+
+def _run_cost_ready_time(db: Session, run_id: str):
+    """آخر وقت لازم BigQuery Billing Export يكون وصل له قبل عرض رقم فعلي للرن."""
+    times = []
+
+    def add_run_time(run):
+        if not run:
+            return
+        dt = run.completed_at or run.started_at or run.created_at
+        if dt:
+            times.append(_as_utc(dt))
+
+    add_run_time(db.query(Run).filter(Run.run_id == run_id).first())
+
+    linked_usage = db.query(ApiUsage).filter(ApiUsage.send_run_id == run_id).all()
+    linked_run_ids = {u.run_id for u in linked_usage if u.run_id}
+    if linked_run_ids:
+        for run in db.query(Run).filter(Run.run_id.in_(linked_run_ids)).all():
+            add_run_time(run)
+        for usage in linked_usage:
+            if usage.created_at:
+                times.append(_as_utc(usage.created_at))
+
+    direct_usage = db.query(ApiUsage).filter(ApiUsage.run_id == run_id).all()
+    for usage in direct_usage:
+        if usage.created_at:
+            times.append(_as_utc(usage.created_at))
+
+    times = [t for t in times if t]
+    return max(times) if times else None
+
+
+def _pending_billing_response(run_id: str, cleaned_run_id: str, reason: str, latest_usage_dt=None, ready_time=None, actual=None, sources=None):
+    return {
+        "run_id": run_id,
+        "cleaned_run_id": cleaned_run_id,
+        "source": {"checked": [c["pattern"] for c in sources or []], "kind": "bigquery_label_lookup"},
+        "actual_from_google": {
+            "cost_usd": 0.0,
+            "credits_usd": 0.0,
+            "net_cost_usd": 0.0,
+            "tax_rate": _billing_tax_rate(),
+            "tax_usd": 0.0,
+            "total_with_tax_usd": 0.0,
+            "line_items": 0,
+            "services": [],
+            "skus": [],
+        },
+        "pending": True,
+        "unmatched": False,
+        "reason": reason,
+        "diagnostics": {
+            "billing_ready_time": ready_time.isoformat() if ready_time else None,
+            "latest_usage": latest_usage_dt.isoformat() if latest_usage_dt else None,
+            "partial_from_google": actual,
+            "sources": sources or [],
+        },
+    }
+
+
+def _billing_tax_rate() -> float:
+    try:
+        return max(0.0, float(os.getenv("BILLING_TAX_RATE", "0.14")))
+    except ValueError:
+        return 0.14
+
+
+def _tax_fields(net_cost_usd: float, tax_rate: float | None = None, actual_tax_usd: float | None = None) -> dict:
+    rate = _billing_tax_rate() if tax_rate is None else tax_rate
+    tax = float(actual_tax_usd) if actual_tax_usd is not None else float(net_cost_usd or 0.0) * rate
+    total = float(net_cost_usd or 0.0) + tax
+    return {
+        "tax_rate": rate,
+        "tax_usd": round(tax, 6),
+        "total_with_tax_usd": round(total, 6),
+    }
+
+
+def _billing_model_hint(sku: str | None, labels_text: str | None = None) -> str:
+    text = f"{sku or ''} {labels_text or ''}".lower().replace("_", "-")
+    checks = [
+        ("gemini-3-flash", ("gemini3flash", "gemini-3-flash", "gemini 3 flash", "3.0 flash", "3 flash")),
+        ("gemini-3-pro", ("gemini3pro", "gemini-3-pro", "gemini 3 pro", "gemini 3.0 pro", "3.0 pro")),
+        ("gemini-2.5-pro", ("gemini25pro", "gemini-2.5-pro", "gemini 2.5 pro", "2.5 pro")),
+        ("gemini-2.5-flash", ("gemini25flash", "gemini-2.5-flash", "gemini 2.5 flash", "2.5 flash")),
+        ("gemini-2.0-flash", ("gemini20flash", "gemini-2.0-flash", "gemini 2.0 flash", "2.0 flash")),
+    ]
+    for hint, needles in checks:
+        if any(n in text for n in needles):
+            return hint
+    if "gemini" in text:
+        return "gemini"
+    return ""
+
+
+def _classify_unassigned_cost(service: str | None, sku: str | None, labels_text: str | None, cost_type: str | None = None):
+    service_l = (service or "").lower()
+    sku_l = (sku or "").lower()
+    cost_type_l = (cost_type or "").lower()
+    text = f"{service_l} {sku_l} {(labels_text or '').lower()}"
+
+    if cost_type_l == "tax":
+        return {
+            "kind": "vat_tax",
+            "label": "ضريبة VAT على الفاتورة",
+            "explanation": "ده بند ضريبة من Google Billing، مش رن مستقل.",
+            "action": "بيتضاف على تكلفة التشغيلات بنسبة الضريبة بدل ما يتساب كتكلفة غامضة.",
+        }
+
+    if "gemini api" in service_l:
+        if "storage" in sku_l and "cache" in sku_l:
+            return {
+                "kind": "gemini_cache_storage",
+                "label": "تخزين كاش Gemini بدون run_id",
+                "explanation": "ده token-hours لتخزين كاش اتعمل من Gemini API قبل ما يبقى مربوط برن.",
+                "action": "مستقبلا اتقفل جوه الرن لأن أي direct Google بقى ممنوع في وضع التتبع الصارم.",
+            }
+        if "cached" in sku_l or "cache" in sku_l:
+            return {
+                "kind": "gemini_cached_direct",
+                "label": "استخدام كاش Gemini API بدون run_id",
+                "explanation": "ده استهلاك كاش من Gemini API مباشر، ومش شايل run_id في فاتورة Google.",
+                "action": "مستقبلا مش هيعدي من الرنات لأن direct Google بقى بيتمنع.",
+            }
+        return {
+            "kind": "gemini_direct_unlabeled",
+            "label": "Gemini API مباشر بدون run_id",
+            "explanation": "ده طلب فوري على Gemini API، وGoogle ماحطتش عليه run_id.",
+            "action": "مستقبلا أي طلب Google مباشر جوه run هيفشل بدل ما يعمل تكلفة غير مربوطة.",
+        }
+
+    if "vertex ai" in service_l:
+        if "batch" in sku_l:
+            return {
+                "kind": "vertex_batch_unlabeled",
+                "label": "Vertex Batch قديم بدون run_id",
+                "explanation": "ده Batch Prediction من Vertex AI لكن من غير label يربطه برن محدد.",
+                "action": "مستقبلا كل batch لازم يتبعت بالـ run_id label، فالرقم هيظهر على الرن نفسه.",
+            }
+        if "cache" in text:
+            return {
+                "kind": "vertex_cache_unlabeled",
+                "label": "كاش Vertex بدون run_id",
+                "explanation": "ده بند كاش من Vertex AI مش مربوط برن.",
+                "action": "هنسيبه ظاهر هنا كتكلفة غير منسوبة لو Google ماقبلتش label عليه.",
+            }
+        return {
+            "kind": "vertex_unlabeled",
+            "label": "Vertex AI بدون run_id",
+            "explanation": "ده بند Vertex AI غير حامل للـ run_id في Billing Export.",
+            "action": "هنا بنحتاج نبص على الوقت والموديل ونرشح أقرب رن.",
+        }
+
+    if "bigquery" in service_l:
+        return {
+            "kind": "billing_tracking_bigquery",
+            "label": "BigQuery تتبع الفاتورة",
+            "explanation": "ده غالبا تكلفة قراءة Billing Export نفسها أو استعلامات التتبع.",
+            "action": "مش تكلفة توليد رن، لكنها تكلفة تشغيل واجهة التكاليف.",
+        }
+
+    if "cloud logging" in service_l:
+        return {
+            "kind": "logging_overhead",
+            "label": "Cloud Logging",
+            "explanation": "ده بند لوجات من Google Cloud، مش رن توليد مباشر.",
+            "action": "لو الرقم كبير نفلتره حسب اللوجات، لكنه مش تكلفة موديل.",
+        }
+
+    return {
+        "kind": "other_google_cloud",
+        "label": "مصدر Google Cloud آخر بدون run_id",
+        "explanation": "ده بند فاتورة من Google Cloud مافيهوش run_id.",
+        "action": "اتحدد بالخدمة والـ SKU والوقت في الجدول.",
+    }
+
+
+def _build_usage_candidate_index(db: Session, days: int):
+    cutoff = datetime.utcnow() - timedelta(days=days + 3)
+    records = db.query(ApiUsage).filter(ApiUsage.created_at >= cutoff).order_by(ApiUsage.created_at.desc()).all()
+    runs_by_id = {r.run_id: r for r in db.query(Run).filter(Run.created_at >= cutoff).all()}
+
+    grouped = {}
+    for record in records:
+        key = record.send_run_id if record.send_run_id else record.run_id
+        run_meta = runs_by_id.get(key) or runs_by_id.get(record.run_id)
+        group = grouped.setdefault(key, {
+            "run_id": key,
+            "recipe_name": run_meta.recipe_name if run_meta else "",
+            "status": run_meta.status if run_meta else "",
+            "models": set(),
+            "providers": set(),
+            "call_types": set(),
+            "estimated_cost_usd": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "thinking_tokens": 0,
+            "cached_tokens": 0,
+            "calls": 0,
+            "first_seen": record.created_at,
+            "last_seen": record.created_at,
+        })
+        group["models"].add(record.model or "")
+        group["providers"].add(record.provider or "")
+        group["call_types"].add(record.call_type or "")
+        group["estimated_cost_usd"] += float(record.estimated_cost_usd or 0.0)
+        group["input_tokens"] += int(record.input_tokens or 0)
+        group["output_tokens"] += int(record.output_tokens or 0)
+        group["thinking_tokens"] += int(record.thinking_tokens or 0)
+        group["cached_tokens"] += int(getattr(record, "cached_tokens", 0) or 0)
+        group["calls"] += 1
+        if record.created_at and (not group["first_seen"] or record.created_at < group["first_seen"]):
+            group["first_seen"] = record.created_at
+        if record.created_at and (not group["last_seen"] or record.created_at > group["last_seen"]):
+            group["last_seen"] = record.created_at
+
+    result = []
+    for group in grouped.values():
+        models = sorted(m for m in group["models"] if m)
+        providers = sorted(p for p in group["providers"] if p)
+        call_types = sorted(c for c in group["call_types"] if c)
+        result.append({
+            "run_id": group["run_id"],
+            "recipe_name": group["recipe_name"],
+            "status": group["status"],
+            "models": models,
+            "providers": providers,
+            "call_types": call_types,
+            "model_text": " ".join(models).lower().replace("_", "-"),
+            "estimated_cost_usd": round(group["estimated_cost_usd"], 6),
+            "input_tokens": group["input_tokens"],
+            "output_tokens": group["output_tokens"],
+            "thinking_tokens": group["thinking_tokens"],
+            "cached_tokens": group["cached_tokens"],
+            "calls": group["calls"],
+            "first_seen": _as_utc(group["first_seen"]),
+            "last_seen": _as_utc(group["last_seen"]),
+        })
+    return result
+
+
+def _candidate_runs_for_unassigned(item: dict, usage_index: list):
+    first_usage = item.get("_first_usage_dt")
+    last_usage = item.get("_last_usage_dt") or first_usage
+    if not first_usage:
+        return []
+    window_start = first_usage - timedelta(hours=12)
+    window_end = (last_usage or first_usage) + timedelta(hours=36)
+    model_hint = item.get("model_hint") or ""
+    kind = (item.get("classification") or {}).get("kind", "")
+    wants_batch = "batch" in kind
+    wants_direct = "direct" in kind or "gemini_" in kind
+
+    matches = []
+    for run in usage_index:
+        first_seen = run.get("first_seen")
+        last_seen = run.get("last_seen") or first_seen
+        if not first_seen:
+            continue
+        overlaps = first_seen <= window_end and last_seen >= window_start
+        same_day = first_seen.date() <= (last_usage or first_usage).date() and last_seen.date() >= first_usage.date()
+        if not overlaps and not same_day:
+            continue
+
+        score = 0
+        reasons = []
+        if overlaps:
+            score += 4
+            reasons.append("نفس نافذة الوقت")
+        elif same_day:
+            score += 2
+            reasons.append("نفس اليوم")
+
+        model_text = run.get("model_text") or ""
+        if model_hint:
+            if model_hint in model_text:
+                score += 5
+                reasons.append("نفس الموديل")
+            elif model_hint.split("-")[0] in model_text:
+                score += 1
+                reasons.append("نفس عائلة الموديل")
+
+        call_types = set(run.get("call_types") or [])
+        providers = set(run.get("providers") or [])
+        if wants_batch and "batch" in call_types:
+            score += 3
+            reasons.append("باتش")
+        if wants_direct and "direct" in call_types:
+            score += 2
+            reasons.append("استدعاء مباشر")
+        if "vertex" in providers and "vertex" in kind:
+            score += 2
+            reasons.append("Vertex")
+        if "gemini" in providers and "gemini" in kind:
+            score += 2
+            reasons.append("Gemini")
+
+        if score < 4:
+            continue
+        matches.append({
+            "run_id": run["run_id"],
+            "recipe_name": run.get("recipe_name") or "",
+            "status": run.get("status") or "",
+            "models": run.get("models") or [],
+            "call_types": run.get("call_types") or [],
+            "providers": run.get("providers") or [],
+            "estimated_cost_usd": run.get("estimated_cost_usd") or 0.0,
+            "first_seen": run["first_seen"].isoformat() if run.get("first_seen") else None,
+            "last_seen": run["last_seen"].isoformat() if run.get("last_seen") else None,
+            "score": score,
+            "reasons": reasons[:4],
+        })
+
+    matches.sort(key=lambda m: (m["score"], m["estimated_cost_usd"]), reverse=True)
+    top = matches[:5]
+    if len(top) == 1 and top[0]["score"] >= 10:
+        top[0]["confidence"] = "high"
+    else:
+        for m in top:
+            m["confidence"] = "medium" if m["score"] >= 9 else "low"
+    return top
+
+
+@app.get("/api/usage/unassigned-audit")
+async def get_unassigned_cost_audit(
+    days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=50, ge=1, le=500),
+    min_cost: float = Query(default=0.000001, ge=0.0),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """يكشف أي تكلفة في Google Billing Export مافيهاش run_id label.
+
+    ده مش بيخمن الفاتورة: كل رقم هنا جاي من BigQuery Billing Export. الترشيحات المحلية
+    هدفها تفسير البنود القديمة غير الموسومة فقط، وليست بديل عن run_id label.
+    """
+    try:
+        from google.cloud import bigquery
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Missing dependency: google-cloud-bigquery ({e})")
+
+    project_id = os.getenv("VERTEX_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT") or "gen-lang-client-0008961174"
+    dataset = os.getenv("BQ_BILLING_DATASET", "billing_export")
+    override_pattern = os.getenv("BQ_BILLING_TABLE")
+
+    try:
+        client = bigquery.Client(project=project_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery client init failed: {e}")
+
+    try:
+        candidates = _billing_export_candidates(client, dataset, override_pattern, prefer_detailed=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery list_tables failed (dataset={dataset}): {e}")
+
+    if not candidates:
+        return {
+            "project_id": project_id,
+            "dataset": dataset,
+            "days": days,
+            "source": None,
+            "error": "لا يوجد جدول Billing Export في BigQuery.",
+            "totals": {"net_cost_usd": 0.0, "groups": 0},
+            "items": [],
+        }
+
+    usage_index = _build_usage_candidate_index(db, days)
+    last_error = None
+
+    for chosen in candidates:
+        table_pattern = chosen["pattern"]
+        table_ref = f"`{project_id}.{dataset}.{table_pattern}`"
+        is_detailed = chosen.get("kind") == "detailed" or "resource" in table_pattern
+        resource_select = (
+            "IFNULL(resource.name, '') AS resource_name, IFNULL(resource.global_name, '') AS resource_global_name,"
+            if is_detailed else
+            "'' AS resource_name, '' AS resource_global_name,"
+        )
+
+        freshness = {}
+        try:
+            freshness_q = f"""
+            SELECT MAX(export_time) AS latest_export, MAX(usage_end_time) AS latest_usage
+            FROM {table_ref}
+            """
+            row = list(client.query(freshness_q).result())[0]
+            freshness = {
+                "latest_export_time": row["latest_export"].isoformat() if row["latest_export"] else None,
+                "latest_usage_time": row["latest_usage"].isoformat() if row["latest_usage"] else None,
+            }
+        except Exception as e:
+            freshness = {"freshness_error": str(e)}
+
+        query = f"""
+        WITH grouped AS (
+          SELECT
+            DATE(usage_start_time) AS day,
+            service.description AS service,
+            sku.description AS sku,
+            project.id AS project_id,
+            location.location AS location,
+            {resource_select}
+            ARRAY_TO_STRING(ARRAY(
+              SELECT CONCAT(lbl.key, '=', lbl.value)
+              FROM UNNEST(labels) lbl
+              ORDER BY lbl.key
+            ), ', ') AS labels_text,
+            SUM(cost) AS cost_usd,
+            SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS credits_usd,
+            SUM(cost + IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS net_cost_usd,
+            SUM(usage.amount) AS usage_amount,
+            ANY_VALUE(usage.unit) AS usage_unit,
+            ANY_VALUE(currency) AS currency,
+            MIN(usage_start_time) AS first_usage,
+            MAX(usage_end_time) AS last_usage,
+            COUNT(*) AS line_items
+          FROM {table_ref}
+          WHERE usage_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+            AND NOT EXISTS (
+              SELECT 1
+              FROM UNNEST(labels) lbl
+              WHERE lbl.key = 'run_id'
+                AND IFNULL(lbl.value, '') != ''
+            )
+          GROUP BY day, service, sku, project_id, location, resource_name, resource_global_name, labels_text
+        )
+        SELECT
+          *,
+          SUM(net_cost_usd) OVER() AS total_unassigned_net_cost_usd,
+          COUNT(*) OVER() AS total_groups
+        FROM grouped
+        WHERE ABS(net_cost_usd) >= @min_cost
+        ORDER BY net_cost_usd DESC
+        LIMIT @limit
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("days", "INT64", days),
+                bigquery.ScalarQueryParameter("min_cost", "FLOAT64", float(min_cost)),
+                bigquery.ScalarQueryParameter("limit", "INT64", int(limit)),
+            ]
+        )
+
+        try:
+            rows = list(client.query(query, job_config=job_config).result())
+        except Exception as e:
+            last_error = f"{table_pattern}: {e}"
+            continue
+
+        items = []
+        category_totals = {}
+        total_unassigned = 0.0
+        total_groups = 0
+        for r in rows:
+            classification = _classify_unassigned_cost(r["service"], r["sku"], r["labels_text"])
+            model_hint = _billing_model_hint(r["sku"], r["labels_text"])
+            net = float(r["net_cost_usd"] or 0.0)
+            total_unassigned = float(r["total_unassigned_net_cost_usd"] or total_unassigned or 0.0)
+            total_groups = int(r["total_groups"] or total_groups or 0)
+            cat = category_totals.setdefault(classification["kind"], {
+                "kind": classification["kind"],
+                "label": classification["label"],
+                "net_cost_usd": 0.0,
+                "items": 0,
+            })
+            cat["net_cost_usd"] += net
+            cat["items"] += 1
+            item = {
+                "day": r["day"].isoformat() if r["day"] else None,
+                "service": r["service"],
+                "sku": r["sku"],
+                "project_id": r["project_id"],
+                "location": r["location"],
+                "resource_name": r["resource_name"],
+                "resource_global_name": r["resource_global_name"],
+                "labels_text": r["labels_text"],
+                "cost_usd": round(float(r["cost_usd"] or 0.0), 6),
+                "credits_usd": round(float(r["credits_usd"] or 0.0), 6),
+                "net_cost_usd": round(net, 6),
+                "usage_amount": float(r["usage_amount"] or 0.0),
+                "usage_unit": r["usage_unit"],
+                "currency": r["currency"],
+                "first_usage": r["first_usage"].isoformat() if r["first_usage"] else None,
+                "last_usage": r["last_usage"].isoformat() if r["last_usage"] else None,
+                "line_items": int(r["line_items"] or 0),
+                "classification": classification,
+                "model_hint": model_hint,
+                "_first_usage_dt": _as_utc(r["first_usage"]),
+                "_last_usage_dt": _as_utc(r["last_usage"]),
+            }
+            item["candidate_runs"] = _candidate_runs_for_unassigned(item, usage_index)
+            item.pop("_first_usage_dt", None)
+            item.pop("_last_usage_dt", None)
+            items.append(item)
+
+        categories = []
+        for cat in category_totals.values():
+            cat["net_cost_usd"] = round(cat["net_cost_usd"], 6)
+            categories.append(cat)
+        categories.sort(key=lambda c: c["net_cost_usd"], reverse=True)
+        tax_rate = _billing_tax_rate()
+        tax_usd = total_unassigned * tax_rate
+
+        return {
+            "project_id": project_id,
+            "dataset": dataset,
+            "days": days,
+            "limit": limit,
+            "min_cost": min_cost,
+            "source": {"kind": chosen.get("kind"), "pattern": table_pattern, **freshness},
+            "totals": {
+                "net_cost_usd": round(total_unassigned, 6),
+                "tax_rate": tax_rate,
+                "tax_usd": round(tax_usd, 6),
+                "total_with_tax_usd": round(total_unassigned + tax_usd, 6),
+                "groups": total_groups,
+                "returned": len(items),
+            },
+            "categories": categories,
+            "items": items,
+            "note": "أي بند هنا رقم مؤكد من Google لكنه لا يحمل run_id label. الترشيحات للرنات القديمة تفسيرية فقط.",
+        }
+
+    raise HTTPException(status_code=500, detail=f"BigQuery unassigned audit failed: {last_error}")
+
+
+@app.get("/api/usage/billing-delta")
+async def get_billing_delta_since_baseline(
+    since: str = Query(..., min_length=1),
+    baseline_balance_usd: float = Query(default=0.0, ge=0.0),
+    limit: int = Query(default=200, ge=1, le=500),
+    min_cost: float = Query(default=0.000001, ge=0.0),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """يراقب أي تكلفة ظهرت في Billing Export بعد لحظة baseline محددة."""
+    try:
+        from google.cloud import bigquery
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Missing dependency: google-cloud-bigquery ({e})")
+
+    since_dt = _parse_iso_datetime(since)
+    if not since_dt:
+        raise HTTPException(status_code=400, detail="since مطلوب")
+
+    project_id = os.getenv("VERTEX_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT") or "gen-lang-client-0008961174"
+    dataset = os.getenv("BQ_BILLING_DATASET", "billing_export")
+    override_pattern = os.getenv("BQ_BILLING_TABLE")
+
+    try:
+        client = bigquery.Client(project=project_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery client init failed: {e}")
+
+    try:
+        candidates = _billing_export_candidates(client, dataset, override_pattern, prefer_detailed=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery list_tables failed (dataset={dataset}): {e}")
+
+    if not candidates:
+        return {
+            "project_id": project_id,
+            "dataset": dataset,
+            "baseline": {"since": since_dt.isoformat(), "balance_usd": baseline_balance_usd},
+            "source": None,
+            "error": "لا يوجد جدول Billing Export في BigQuery.",
+            "totals": {
+                "new_cost_usd": 0.0,
+                "new_regular_cost_usd": 0.0,
+                "actual_tax_cost_usd": 0.0,
+                "estimated_tax_usd": 0.0,
+                "tax_rate": _billing_tax_rate(),
+                "tax_source": "estimated_egypt_vat",
+                "new_cost_with_tax_usd": 0.0,
+                "projected_balance_usd": round(baseline_balance_usd, 6),
+                "attributed_cost_usd": 0.0,
+                "attributed_cost_with_tax_usd": 0.0,
+                "unassigned_cost_usd": 0.0,
+                "unassigned_cost_with_tax_usd": 0.0,
+            },
+            "items": [],
+        }
+
+    usage_index = _build_usage_candidate_index(db, 365)
+    run_meta_by_id = {r.run_id: r for r in db.query(Run).all()}
+    last_error = None
+
+    for chosen in candidates:
+        table_pattern = chosen["pattern"]
+        table_ref = f"`{project_id}.{dataset}.{table_pattern}`"
+        is_detailed = chosen.get("kind") == "detailed" or "resource" in table_pattern
+        resource_select = (
+            "IFNULL(resource.name, '') AS resource_name, IFNULL(resource.global_name, '') AS resource_global_name,"
+            if is_detailed else
+            "'' AS resource_name, '' AS resource_global_name,"
+        )
+
+        freshness = {}
+        try:
+            freshness_q = f"""
+            SELECT MAX(export_time) AS latest_export, MAX(usage_end_time) AS latest_usage
+            FROM {table_ref}
+            """
+            row = list(client.query(freshness_q).result())[0]
+            latest_usage = _as_utc(row["latest_usage"])
+            freshness = {
+                "latest_export_time": row["latest_export"].isoformat() if row["latest_export"] else None,
+                "latest_usage_time": row["latest_usage"].isoformat() if row["latest_usage"] else None,
+                "export_has_reached_baseline": bool(latest_usage and latest_usage >= since_dt),
+            }
+        except Exception as e:
+            freshness = {"freshness_error": str(e), "export_has_reached_baseline": False}
+
+        query = f"""
+        WITH grouped AS (
+          SELECT
+            COALESCE((
+              SELECT lbl.value
+              FROM UNNEST(labels) lbl
+              WHERE lbl.key = 'run_id'
+                AND IFNULL(lbl.value, '') != ''
+              LIMIT 1
+            ), '') AS run_id,
+            IFNULL(cost_type, 'regular') AS cost_type,
+            DATE(usage_start_time) AS day,
+            service.description AS service,
+            sku.description AS sku,
+            project.id AS project_id,
+            location.location AS location,
+            {resource_select}
+            ARRAY_TO_STRING(ARRAY(
+              SELECT CONCAT(lbl.key, '=', lbl.value)
+              FROM UNNEST(labels) lbl
+              ORDER BY lbl.key
+            ), ', ') AS labels_text,
+            SUM(cost) AS cost_usd,
+            SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS credits_usd,
+            SUM(cost + IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS net_cost_usd,
+            SUM(usage.amount) AS usage_amount,
+            ANY_VALUE(usage.unit) AS usage_unit,
+            ANY_VALUE(currency) AS currency,
+            MIN(usage_start_time) AS first_usage,
+            MAX(usage_end_time) AS last_usage,
+            COUNT(*) AS line_items
+          FROM {table_ref}
+          WHERE usage_start_time >= @since
+          GROUP BY run_id, cost_type, day, service, sku, project_id, location, resource_name, resource_global_name, labels_text
+        )
+        SELECT
+          *,
+          SUM(IF(cost_type = 'tax', 0, net_cost_usd)) OVER() AS total_regular_net_cost_usd,
+          SUM(IF(cost_type = 'tax', net_cost_usd, 0)) OVER() AS total_tax_net_cost_usd,
+          SUM(IF(run_id != '' AND cost_type != 'tax', net_cost_usd, 0)) OVER() AS attributed_regular_net_cost_usd,
+          SUM(IF(run_id = '' AND cost_type != 'tax', net_cost_usd, 0)) OVER() AS unassigned_regular_net_cost_usd,
+          COUNT(*) OVER() AS total_groups
+        FROM grouped
+        WHERE ABS(net_cost_usd) >= @min_cost
+        ORDER BY first_usage DESC, net_cost_usd DESC
+        LIMIT @limit
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("since", "TIMESTAMP", since_dt),
+                bigquery.ScalarQueryParameter("min_cost", "FLOAT64", float(min_cost)),
+                bigquery.ScalarQueryParameter("limit", "INT64", int(limit)),
+            ]
+        )
+
+        try:
+            rows = list(client.query(query, job_config=job_config).result())
+        except Exception as e:
+            last_error = f"{table_pattern}: {e}"
+            continue
+
+        items = []
+        total_regular = 0.0
+        actual_tax = 0.0
+        attributed = 0.0
+        unassigned = 0.0
+        groups = 0
+        tax_rate = _billing_tax_rate()
+        for r in rows:
+            run_id = r["run_id"] or ""
+            cost_type = r["cost_type"] or "regular"
+            net = float(r["net_cost_usd"] or 0.0)
+            total_regular = float(r["total_regular_net_cost_usd"] or total_regular or 0.0)
+            actual_tax = float(r["total_tax_net_cost_usd"] or actual_tax or 0.0)
+            attributed = float(r["attributed_regular_net_cost_usd"] or attributed or 0.0)
+            unassigned = float(r["unassigned_regular_net_cost_usd"] or unassigned or 0.0)
+            groups = int(r["total_groups"] or groups or 0)
+            meta = run_meta_by_id.get(run_id)
+            classification = (
+                {"kind": "run_labeled", "label": "رن محدد بالـ run_id", "explanation": "ده بند Google مربوط برن صريح.", "action": "راجع الرن في Timeline."}
+                if run_id and cost_type != "tax" else
+                _classify_unassigned_cost(r["service"], r["sku"], r["labels_text"], cost_type)
+            )
+            item_tax = _tax_fields(net, tax_rate, actual_tax_usd=net if cost_type == "tax" else None)
+            item = {
+                "run_id": run_id or None,
+                "run_recipe_name": meta.recipe_name if meta else "",
+                "run_status": meta.status if meta else "",
+                "cost_type": cost_type,
+                "day": r["day"].isoformat() if r["day"] else None,
+                "service": r["service"],
+                "sku": r["sku"],
+                "project_id": r["project_id"],
+                "location": r["location"],
+                "resource_name": r["resource_name"],
+                "resource_global_name": r["resource_global_name"],
+                "labels_text": r["labels_text"],
+                "cost_usd": round(float(r["cost_usd"] or 0.0), 6),
+                "credits_usd": round(float(r["credits_usd"] or 0.0), 6),
+                "net_cost_usd": round(net, 6),
+                "tax_rate": item_tax["tax_rate"],
+                "tax_usd": item_tax["tax_usd"],
+                "total_with_tax_usd": item_tax["total_with_tax_usd"],
+                "usage_amount": float(r["usage_amount"] or 0.0),
+                "usage_unit": r["usage_unit"],
+                "currency": r["currency"],
+                "first_usage": r["first_usage"].isoformat() if r["first_usage"] else None,
+                "last_usage": r["last_usage"].isoformat() if r["last_usage"] else None,
+                "line_items": int(r["line_items"] or 0),
+                "classification": classification,
+                "model_hint": _billing_model_hint(r["sku"], r["labels_text"]),
+                "_first_usage_dt": _as_utc(r["first_usage"]),
+                "_last_usage_dt": _as_utc(r["last_usage"]),
+            }
+            item["candidate_runs"] = [] if run_id or cost_type == "tax" else _candidate_runs_for_unassigned(item, usage_index)
+            item.pop("_first_usage_dt", None)
+            item.pop("_last_usage_dt", None)
+            items.append(item)
+
+        estimated_tax = actual_tax if abs(actual_tax) > 0.000001 else total_regular * tax_rate
+        tax_source = "actual_export" if abs(actual_tax) > 0.000001 else "estimated_egypt_vat"
+        total_with_tax = total_regular + estimated_tax
+
+        return {
+            "project_id": project_id,
+            "dataset": dataset,
+            "baseline": {"since": since_dt.isoformat(), "balance_usd": round(baseline_balance_usd, 6)},
+            "source": {"kind": chosen.get("kind"), "pattern": table_pattern, **freshness},
+            "totals": {
+                "new_cost_usd": round(total_regular, 6),
+                "new_regular_cost_usd": round(total_regular, 6),
+                "actual_tax_cost_usd": round(actual_tax, 6),
+                "estimated_tax_usd": round(estimated_tax, 6),
+                "tax_rate": tax_rate,
+                "tax_source": tax_source,
+                "new_cost_with_tax_usd": round(total_with_tax, 6),
+                "projected_balance_usd": round(baseline_balance_usd + total_with_tax, 6),
+                "attributed_cost_usd": round(attributed, 6),
+                "attributed_cost_with_tax_usd": round(attributed * (1 + tax_rate), 6) if tax_source != "actual_export" else round(attributed, 6),
+                "unassigned_cost_usd": round(unassigned, 6),
+                "unassigned_cost_with_tax_usd": round(unassigned * (1 + tax_rate), 6) if tax_source != "actual_export" else round(unassigned, 6),
+                "groups": groups,
+                "returned": len(items),
+            },
+            "items": items,
+            "note": "ده فقط ما ظهر في Billing Export بعد baseline. لو export لسه ماوصلش للوقت ده، هيظهر صفر مؤقتا.",
+        }
+
+    raise HTTPException(status_code=500, detail=f"BigQuery billing delta failed: {last_error}")
 
 
 @app.get("/api/usage/google-actual/{run_id}")
@@ -1496,6 +2461,7 @@ async def get_bigquery_actual_for_run(
     run_id: str,
     days: int = 90,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """يقرأ التكلفة الفعلية من BigQuery Billing Export لتشغيلة محددة عبر custom labels.
 
@@ -1516,27 +2482,30 @@ async def get_bigquery_actual_for_run(
 
     project_id = os.getenv("VERTEX_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT") or "gen-lang-client-0008961174"
     dataset = os.getenv("BQ_BILLING_DATASET", "billing_export")
+    override_pattern = os.getenv("BQ_BILLING_TABLE")
+    run_meta = db.query(Run).filter(Run.run_id == run_id).first()
 
     try:
         client = bigquery.Client(project=project_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"BigQuery client init failed: {e}")
 
-    # اكتشاف الجدول الأنسب (Detailed أولوية لأنه الوحيد اللي بيحفظ labels — Standard ما يحفظهاش)
     candidates = []
-    try:
-        tables = list(client.list_tables(dataset))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"BigQuery list_tables failed: {e}")
+    if override_pattern:
+        candidates.append({"pattern": override_pattern, "kind": "override"})
+    else:
+        try:
+            tables = list(client.list_tables(dataset))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"BigQuery list_tables failed: {e}")
 
-    has_detailed = any(t.table_id.startswith("gcp_billing_export_resource_v1_") for t in tables)
-    has_standard = any(t.table_id.startswith("gcp_billing_export_v1_") for t in tables)
+        has_detailed = any(t.table_id.startswith("gcp_billing_export_resource_v1_") for t in tables)
+        has_standard = any(t.table_id.startswith("gcp_billing_export_v1_") for t in tables)
 
-    # Detailed أولاً لأنه الوحيد اللي يحفظ labels من generateContent
-    if has_detailed:
-        candidates.append({"pattern": "gcp_billing_export_resource_v1_*", "kind": "detailed"})
-    if has_standard:
-        candidates.append({"pattern": "gcp_billing_export_v1_*", "kind": "standard"})
+        if has_detailed:
+            candidates.append({"pattern": "gcp_billing_export_resource_v1_*", "kind": "detailed"})
+        if has_standard:
+            candidates.append({"pattern": "gcp_billing_export_v1_*", "kind": "standard"})
 
     if not candidates:
         return {
@@ -1546,7 +2515,33 @@ async def get_bigquery_actual_for_run(
             "actual_from_google": None,
         }
 
-    # نجرّب على كل جدول لحد ما نلاقي بيانات (الأولوية للـ detailed)
+    # احسب حداثة الـ export عشان Pending يبقى له سبب حقيقي، مش حالة أبدية.
+    for c in candidates:
+        try:
+            freshness_q = f"""
+            SELECT MAX(export_time) AS latest_export, MAX(usage_end_time) AS latest_usage
+            FROM `{project_id}.{dataset}.{c["pattern"]}`
+            """
+            freshness = list(client.query(freshness_q).result())[0]
+            c["latest_export"] = freshness["latest_export"].isoformat() if freshness["latest_export"] else None
+            c["latest_usage"] = freshness["latest_usage"].isoformat() if freshness["latest_usage"] else None
+            c["_latest_usage_dt"] = freshness["latest_usage"]
+        except Exception as e:
+            c["freshness_error"] = str(e)
+            c["_latest_usage_dt"] = None
+
+    latest_usage_dt = None
+    for c in candidates:
+        dt = c.get("_latest_usage_dt")
+        if dt and (latest_usage_dt is None or dt > latest_usage_dt):
+            latest_usage_dt = dt
+    public_sources = [
+        {k: v for k, v in c.items() if not k.startswith("_")}
+        for c in candidates
+    ]
+    billing_ready_time = _run_cost_ready_time(db, run_id)
+
+    # نجرّب على كل جدول لحد ما نلاقي بيانات بالـ run_id label
     last_error = None
     for chosen in candidates:
         table_pattern = chosen["pattern"]
@@ -1592,39 +2587,318 @@ async def get_bigquery_actual_for_run(
         cost = float(row["cost_usd"] or 0.0)
         credits = float(row["credits_usd"] or 0.0)
         net = cost + credits
+        tax = _tax_fields(net)
+        actual = {
+            "cost_usd": round(cost, 6),
+            "credits_usd": round(credits, 6),
+            "net_cost_usd": round(net, 6),
+            "tax_rate": tax["tax_rate"],
+            "tax_usd": tax["tax_usd"],
+            "total_with_tax_usd": tax["total_with_tax_usd"],
+            "currency": row["currency"],
+            "line_items": line_items,
+            "services": list(row["services"] or []),
+            "skus": list(row["skus"] or []),
+            "first_usage": row["first_usage"].isoformat() if row["first_usage"] else None,
+            "last_usage": row["last_usage"].isoformat() if row["last_usage"] else None,
+        }
+
+        if billing_ready_time and latest_usage_dt and latest_usage_dt < billing_ready_time:
+            reason = (
+                f"Billing Export وجد جزء من بيانات الرن لكن لم يصل لنهاية الرن بعد: "
+                f"آخر usage في BigQuery = {latest_usage_dt.isoformat()}، "
+                f"ونهاية الرن/الاستقبال = {billing_ready_time.isoformat()}."
+            )
+            return _pending_billing_response(
+                run_id, cleaned_run_id, reason,
+                latest_usage_dt=latest_usage_dt,
+                ready_time=billing_ready_time,
+                actual=actual,
+                sources=public_sources,
+            )
 
         return {
             "run_id": run_id,
             "cleaned_run_id": cleaned_run_id,
             "source": {"kind": chosen["kind"], "pattern": table_pattern},
-            "actual_from_google": {
+            "actual_from_google": actual,
+        }
+
+    # ما لقيناش بيانات بالـ label في أي جدول. هنا نفرّق بين تأخير BigQuery وبين run قديم بلا labels.
+    export_is_behind_run = bool(billing_ready_time and latest_usage_dt and latest_usage_dt < billing_ready_time)
+    if export_is_behind_run:
+        reason = (
+            f"Billing Export لسه متأخر: آخر usage في BigQuery = {latest_usage_dt.isoformat()}، "
+            f"ونهاية الرن/الاستقبال = {billing_ready_time.isoformat()}."
+        )
+        pending = True
+        unmatched = False
+    else:
+        reason = last_error or (
+            "BigQuery Billing Export اتفحص لكن لم يجد label run_id لهذا الرن. "
+            "ده يحدث مع التشغيلات القديمة أو direct calls قبل تمرير labels للفوترة."
+        )
+        pending = False
+        unmatched = True
+
+    return {
+        "run_id": run_id,
+        "cleaned_run_id": cleaned_run_id,
+        "source": {"checked": [c["pattern"] for c in candidates], "kind": "bigquery_label_lookup"},
+        "actual_from_google": {
+            "cost_usd": 0.0,
+            "credits_usd": 0.0,
+            "net_cost_usd": 0.0,
+            "tax_rate": _billing_tax_rate(),
+            "tax_usd": 0.0,
+            "total_with_tax_usd": 0.0,
+            "line_items": 0,
+            "services": [],
+            "skus": [],
+        },
+        "pending": pending,
+        "unmatched": unmatched,
+        "reason": reason,
+        "diagnostics": {
+            "billing_ready_time": billing_ready_time.isoformat() if billing_ready_time else None,
+            "latest_usage": latest_usage_dt.isoformat() if latest_usage_dt else None,
+            "sources": public_sources,
+        },
+    }
+
+
+@app.get("/api/usage/bigquery-actuals")
+async def get_bigquery_actuals_for_runs(
+    run_ids: str = Query(..., min_length=1),
+    days: int = Query(default=90, ge=1, le=365),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """تكلفة Google الفعلية لمجموعة runs في Query واحدة.
+
+    يرجع رقم مؤكد فقط لو BigQuery Billing Export فيه label run_id مطابق.
+    أي run بلا label يفضل "unmatched" ولا يتحول لتقدير.
+    """
+    try:
+        from google.cloud import bigquery
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Missing dependency: google-cloud-bigquery ({e})")
+
+    import re as _re
+    raw_ids = []
+    seen = set()
+    for rid in run_ids.split(","):
+        rid = rid.strip()
+        if rid and rid not in seen:
+            raw_ids.append(rid)
+            seen.add(rid)
+    if not raw_ids:
+        raise HTTPException(status_code=400, detail="run_ids فارغة")
+    if len(raw_ids) > 200:
+        raise HTTPException(status_code=400, detail="الحد الأقصى 200 run في الطلب الواحد")
+
+    cleaned_map = {
+        rid: _re.sub(r'[^a-z0-9_-]', '_', rid.lower())[:63]
+        for rid in raw_ids
+    }
+    reverse_cleaned = {}
+    for rid, cleaned in cleaned_map.items():
+        reverse_cleaned.setdefault(cleaned, []).append(rid)
+
+    project_id = os.getenv("VERTEX_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT") or "gen-lang-client-0008961174"
+    dataset = os.getenv("BQ_BILLING_DATASET", "billing_export")
+    override_pattern = os.getenv("BQ_BILLING_TABLE")
+
+    try:
+        client = bigquery.Client(project=project_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery client init failed: {e}")
+
+    candidates = []
+    if override_pattern:
+        candidates.append({"pattern": override_pattern, "kind": "override"})
+    else:
+        try:
+            tables = list(client.list_tables(dataset))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"BigQuery list_tables failed: {e}")
+        if any(t.table_id.startswith("gcp_billing_export_resource_v1_") for t in tables):
+            candidates.append({"pattern": "gcp_billing_export_resource_v1_*", "kind": "detailed"})
+        if any(t.table_id.startswith("gcp_billing_export_v1_") for t in tables):
+            candidates.append({"pattern": "gcp_billing_export_v1_*", "kind": "standard"})
+
+    if not candidates:
+        return {
+            "error": "لا يوجد جدول Billing Export في BigQuery",
+            "results": {
+                rid: {
+                    "cleaned_run_id": cleaned_map[rid],
+                    "pending": False,
+                    "unmatched": True,
+                    "reason": "لا يوجد جدول Billing Export في BigQuery",
+            "actual_from_google": {"cost_usd": 0.0, "credits_usd": 0.0, "net_cost_usd": 0.0, "tax_rate": _billing_tax_rate(), "tax_usd": 0.0, "total_with_tax_usd": 0.0, "line_items": 0, "services": [], "skus": []},
+                }
+                for rid in raw_ids
+            },
+        }
+
+    latest_usage_dt = None
+    for c in candidates:
+        try:
+            freshness_q = f"""
+            SELECT MAX(export_time) AS latest_export, MAX(usage_end_time) AS latest_usage
+            FROM `{project_id}.{dataset}.{c["pattern"]}`
+            """
+            freshness = list(client.query(freshness_q).result())[0]
+            c["latest_export"] = freshness["latest_export"].isoformat() if freshness["latest_export"] else None
+            c["latest_usage"] = freshness["latest_usage"].isoformat() if freshness["latest_usage"] else None
+            c["_latest_usage_dt"] = freshness["latest_usage"]
+            if freshness["latest_usage"] and (latest_usage_dt is None or freshness["latest_usage"] > latest_usage_dt):
+                latest_usage_dt = freshness["latest_usage"]
+        except Exception as e:
+            c["freshness_error"] = str(e)
+            c["_latest_usage_dt"] = None
+
+    public_sources = [{k: v for k, v in c.items() if not k.startswith("_")} for c in candidates]
+    billing_ready_times = {rid: _run_cost_ready_time(db, rid) for rid in raw_ids}
+    results = {}
+    last_error = None
+    chosen_source = None
+    cleaned_values = sorted(set(cleaned_map.values()))
+
+    for chosen in candidates:
+        table_pattern = chosen["pattern"]
+        table_ref = f"`{project_id}.{dataset}.{table_pattern}`"
+        query = f"""
+        SELECT
+          lbl.value AS run_label,
+          SUM(cost) AS cost_usd,
+          SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS credits_usd,
+          ANY_VALUE(currency) AS currency,
+          COUNT(*) AS line_items,
+          ARRAY_AGG(DISTINCT service.description IGNORE NULLS LIMIT 10) AS services,
+          ARRAY_AGG(DISTINCT sku.description IGNORE NULLS LIMIT 20) AS skus,
+          MIN(usage_start_time) AS first_usage,
+          MAX(usage_end_time) AS last_usage
+        FROM {table_ref},
+        UNNEST(labels) AS lbl
+        WHERE lbl.key = 'run_id'
+          AND lbl.value IN UNNEST(@run_ids)
+          AND usage_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        GROUP BY run_label
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ArrayQueryParameter("run_ids", "STRING", cleaned_values),
+                bigquery.ScalarQueryParameter("days", "INT64", days),
+            ]
+        )
+        try:
+            rows = list(client.query(query, job_config=job_config).result())
+        except Exception as e:
+            last_error = f"{table_pattern}: {e}"
+            continue
+        if not rows:
+            continue
+
+        chosen_source = {"kind": chosen["kind"], "pattern": table_pattern}
+        for row in rows:
+            cleaned = row["run_label"]
+            line_items = int(row["line_items"] or 0)
+            if line_items == 0:
+                continue
+            cost = float(row["cost_usd"] or 0.0)
+            credits = float(row["credits_usd"] or 0.0)
+            net = cost + credits
+            tax = _tax_fields(net)
+            actual = {
                 "cost_usd": round(cost, 6),
                 "credits_usd": round(credits, 6),
                 "net_cost_usd": round(net, 6),
+                "tax_rate": tax["tax_rate"],
+                "tax_usd": tax["tax_usd"],
+                "total_with_tax_usd": tax["total_with_tax_usd"],
                 "currency": row["currency"],
                 "line_items": line_items,
                 "services": list(row["services"] or []),
                 "skus": list(row["skus"] or []),
                 "first_usage": row["first_usage"].isoformat() if row["first_usage"] else None,
                 "last_usage": row["last_usage"].isoformat() if row["last_usage"] else None,
+            }
+            for original_id in reverse_cleaned.get(cleaned, []):
+                billing_ready_time = billing_ready_times.get(original_id)
+                if billing_ready_time and latest_usage_dt and latest_usage_dt < billing_ready_time:
+                    reason = (
+                        f"Billing Export found part of the run, but it has not reached the run/receive end yet: "
+                        f"latest_usage={latest_usage_dt.isoformat()}, "
+                        f"billing_ready_time={billing_ready_time.isoformat()}."
+                    )
+                    results[original_id] = _pending_billing_response(
+                        original_id,
+                        cleaned,
+                        reason,
+                        latest_usage_dt=latest_usage_dt,
+                        ready_time=billing_ready_time,
+                        actual=actual,
+                        sources=public_sources,
+                    )
+                    continue
+                results[original_id] = {
+                    "cleaned_run_id": cleaned,
+                    "source": chosen_source,
+                    "pending": False,
+                    "unmatched": False,
+                    "actual_from_google": actual,
+                }
+        break
+
+    run_meta = {r.run_id: r for r in db.query(Run).filter(Run.run_id.in_(raw_ids)).all()}
+    public_sources = [{k: v for k, v in c.items() if not k.startswith("_")} for c in candidates]
+    for rid in raw_ids:
+        if rid in results:
+            continue
+        billing_ready_time = billing_ready_times.get(rid)
+        meta = run_meta.get(rid)
+        run_completed_at = None
+        if meta:
+            run_completed_at = meta.completed_at or meta.started_at or meta.created_at
+            if run_completed_at and run_completed_at.tzinfo is None:
+                run_completed_at = run_completed_at.replace(tzinfo=timezone.utc)
+        if not run_completed_at and billing_ready_time:
+            run_completed_at = billing_ready_time
+        pending = bool(billing_ready_time and latest_usage_dt and latest_usage_dt < billing_ready_time)
+        if pending:
+            reason = (
+                f"Billing Export لسه متأخر: آخر usage_end في BigQuery = {latest_usage_dt.isoformat()}، "
+                f"ونهاية الرن/الاستقبال = {billing_ready_time.isoformat()}."
+            )
+        else:
+            reason = last_error or (
+                "لا يوجد run_id label لهذا الرن في BigQuery Billing Export. "
+                "التكلفة المؤكدة لكل رن تتطلب Google Batch/Vertex labels فقط."
+            )
+        results[rid] = {
+            "cleaned_run_id": cleaned_map[rid],
+            "source": {"checked": [c["pattern"] for c in candidates], "kind": "bigquery_label_lookup"},
+            "pending": pending,
+            "unmatched": not pending,
+            "reason": reason,
+            "actual_from_google": {"cost_usd": 0.0, "credits_usd": 0.0, "net_cost_usd": 0.0, "tax_rate": _billing_tax_rate(), "tax_usd": 0.0, "total_with_tax_usd": 0.0, "line_items": 0, "services": [], "skus": []},
+            "diagnostics": {
+                "billing_ready_time": billing_ready_time.isoformat() if billing_ready_time else None,
+                "run_completed_at": run_completed_at.isoformat() if run_completed_at else None,
+                "latest_usage": latest_usage_dt.isoformat() if latest_usage_dt else None,
+                "sources": public_sources,
             },
         }
 
-    # ما لقيناش بيانات في أي جدول
     return {
-        "run_id": run_id,
-        "cleaned_run_id": cleaned_run_id,
-        "source": {"checked": [c["pattern"] for c in candidates]},
-        "actual_from_google": {
-            "cost_usd": 0.0,
-            "credits_usd": 0.0,
-            "net_cost_usd": 0.0,
-            "line_items": 0,
-            "services": [],
-            "skus": [],
-        },
-        "pending": True,
-        "reason": last_error or f"لا توجد بيانات في BigQuery لـ label run_id={cleaned_run_id} (التأخير الطبيعي 24-48 ساعة)",
+        "project_id": project_id,
+        "dataset": dataset,
+        "days": days,
+        "count": len(raw_ids),
+        "source": chosen_source or {"checked": [c["pattern"] for c in candidates], "kind": "bigquery_label_lookup"},
+        "results": results,
     }
 
 
@@ -1676,7 +2950,7 @@ async def get_billing_actual(
             "days": days,
             "source": None,
             "error": "لا يوجد جدول Billing Export في BigQuery. فعّل Standard أو Detailed usage cost export من Google Cloud Console.",
-            "totals": {"cost_usd": 0.0, "credits_usd": 0.0, "net_cost_usd": 0.0},
+            "totals": {"cost_usd": 0.0, "credits_usd": 0.0, "net_cost_usd": 0.0, "tax_rate": _billing_tax_rate(), "tax_usd": 0.0, "total_with_tax_usd": 0.0},
             "by_day": [],
             "items": [],
             "diagnostics": {"tables_checked": [c["pattern"] for c in candidates]},
@@ -1685,7 +2959,7 @@ async def get_billing_actual(
     # قياس "freshness" لكل جدول
     for c in candidates:
         try:
-            q = f"""SELECT MAX(export_time) AS latest_export, MAX(usage_start_time) AS latest_usage
+            q = f"""SELECT MAX(export_time) AS latest_export, MAX(usage_end_time) AS latest_usage
                     FROM `{project_id}.{dataset}.{c["pattern"]}`"""
             row = list(client.query(q).result())[0]
             c["latest_export"] = row["latest_export"].isoformat() if row["latest_export"] else None
@@ -1704,6 +2978,7 @@ async def get_billing_actual(
     query = f"""
     SELECT
       DATE(usage_start_time) AS day,
+      IFNULL(cost_type, 'regular') AS cost_type,
       service.description AS service,
       sku.description AS sku,
       SUM(cost) AS cost_usd,
@@ -1713,7 +2988,7 @@ async def get_billing_actual(
       ANY_VALUE(currency) AS currency
     FROM {table_ref}
     WHERE usage_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
-    GROUP BY day, service, sku
+    GROUP BY day, cost_type, service, sku
     ORDER BY day DESC, cost_usd DESC
     """
     job_config = bigquery.QueryJobConfig(
@@ -1729,29 +3004,50 @@ async def get_billing_actual(
     items: list = []
     total_cost = 0.0
     total_credits = 0.0
+    regular_net = 0.0
+    actual_tax_net = 0.0
+    tax_rate = _billing_tax_rate()
     for r in rows:
         day_str = r["day"].isoformat() if r["day"] else None
+        cost_type = r["cost_type"] or "regular"
         cost = float(r["cost_usd"] or 0.0)
         credits = float(r["credits_usd"] or 0.0)
         net = cost + credits
         total_cost += cost
         total_credits += credits
+        if cost_type == "tax":
+            actual_tax_net += net
+        else:
+            regular_net += net
+        item_tax = _tax_fields(net, tax_rate, actual_tax_usd=net if cost_type == "tax" else None)
         items.append({
             "day": day_str,
+            "cost_type": cost_type,
             "service": r["service"],
             "sku": r["sku"],
             "cost_usd": round(cost, 6),
             "credits_usd": round(credits, 6),
             "net_cost_usd": round(net, 6),
+            "tax_rate": item_tax["tax_rate"],
+            "tax_usd": item_tax["tax_usd"],
+            "total_with_tax_usd": item_tax["total_with_tax_usd"],
             "usage_amount": float(r["usage_amount"] or 0.0),
             "usage_unit": r["usage_unit"],
             "currency": r["currency"],
         })
         if day_str:
-            d = by_day.setdefault(day_str, {"day": day_str, "cost_usd": 0.0, "credits_usd": 0.0, "net_cost_usd": 0.0})
+            d = by_day.setdefault(day_str, {"day": day_str, "cost_usd": 0.0, "credits_usd": 0.0, "net_cost_usd": 0.0, "regular_net_cost_usd": 0.0, "tax_cost_usd": 0.0})
             d["cost_usd"] = round(d["cost_usd"] + cost, 6)
             d["credits_usd"] = round(d["credits_usd"] + credits, 6)
             d["net_cost_usd"] = round(d["net_cost_usd"] + net, 6)
+            if cost_type == "tax":
+                d["tax_cost_usd"] = round(d["tax_cost_usd"] + net, 6)
+            else:
+                d["regular_net_cost_usd"] = round(d["regular_net_cost_usd"] + net, 6)
+
+    estimated_tax = actual_tax_net if abs(actual_tax_net) > 0.000001 else regular_net * tax_rate
+    tax_source = "actual_export" if abs(actual_tax_net) > 0.000001 else "estimated_egypt_vat"
+    total_with_tax = regular_net + estimated_tax
 
     return {
         "project_id": project_id,
@@ -1767,10 +3063,264 @@ async def get_billing_actual(
             "cost_usd": round(total_cost, 6),
             "credits_usd": round(total_credits, 6),
             "net_cost_usd": round(total_cost + total_credits, 6),
+            "regular_net_cost_usd": round(regular_net, 6),
+            "actual_tax_cost_usd": round(actual_tax_net, 6),
+            "tax_rate": tax_rate,
+            "tax_source": tax_source,
+            "tax_usd": round(estimated_tax, 6),
+            "total_with_tax_usd": round(total_with_tax, 6),
         },
         "by_day": sorted(by_day.values(), key=lambda x: x["day"], reverse=True),
         "items": items,
         "diagnostics": {"candidates": candidates},
+    }
+
+
+def _model_family_from_app_name(model_name: str) -> str:
+    m = (model_name or "").lower().replace("-", " ").replace("_", " ")
+    if "3" in m and "flash" in m:
+        return "gemini 3 flash"
+    if ("3.1" in m or "3 " in m or m.endswith(" 3") or "gemini 3" in m) and "pro" in m:
+        return "gemini 3 pro"
+    if "2.5" in m and "pro" in m:
+        return "gemini 2.5 pro"
+    if "2.5" in m and "flash" in m:
+        return "gemini 2.5 flash"
+    return "other"
+
+
+def _model_family_from_sku(sku: str) -> str:
+    s = (sku or "").lower()
+    if "gemini 3 flash" in s or "gemini 3.0 flash" in s:
+        return "gemini 3 flash"
+    if "gemini 3 pro" in s or "gemini 3.0 pro" in s:
+        return "gemini 3 pro"
+    if "gemini 2.5 pro" in s:
+        return "gemini 2.5 pro"
+    if "gemini 2.5 flash" in s:
+        return "gemini 2.5 flash"
+    return "other"
+
+
+@app.get("/api/usage/run-billing-share")
+async def get_run_billing_share(
+    run_ids: str = Query(..., min_length=1),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """نصيب كل رن من فاتورة Google الفعلية في BigQuery.
+
+    المنطق:
+      1) من api_usage نطلع: لكل ساعة UTC × موديل، إجمالي توكنز كل رن.
+      2) من BigQuery نطلع: لكل ساعة UTC × موديل، إجمالي تكلفة الموديل بعد credits.
+      3) نصيب الرن = (توكنز الرن في الساعة × الموديل) / (إجمالي توكنز كل الرنز في الساعة × الموديل) × تكلفة BigQuery.
+      4) مجموع نصائب الرن في كل الساعات = التكلفة الفعلية من جوجل.
+
+    ده 100% مستند لفاتورة جوجل، مفيش تخمين في الأسعار.
+    """
+    try:
+        from google.cloud import bigquery
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Missing dependency: google-cloud-bigquery ({e})")
+
+    from datetime import datetime, timedelta
+    from sqlalchemy import text as _sa_text
+
+    run_id_list = [r.strip() for r in run_ids.split(",") if r.strip()]
+    if not run_id_list:
+        raise HTTPException(status_code=400, detail="run_ids مطلوبة")
+    if len(run_id_list) > 500:
+        raise HTTPException(status_code=400, detail="حد أقصى 500 run_id في الطلب")
+
+    # 1) Pull token usage data globally (we need all runs in the affected hours to compute share)
+    rows = db.execute(_sa_text(
+        "SELECT run_id, model, created_at, "
+        "       IFNULL(input_tokens,0) AS i, IFNULL(output_tokens,0) AS o, "
+        "       IFNULL(thinking_tokens,0) AS t "
+        "FROM api_usage "
+        "WHERE provider IN ('gemini','vertex') "
+        "  AND created_at >= datetime('now','-120 days')"
+    )).fetchall()
+
+    def _parse_dt(s):
+        if isinstance(s, datetime):
+            return s
+        try:
+            return datetime.fromisoformat(str(s).replace(" ", "T"))
+        except Exception:
+            return None
+
+    # (hour_utc, family) → {run_id: tokens, _total: tokens}
+    bucket = {}
+    requested = set(run_id_list)
+    run_keys = {rid: set() for rid in run_id_list}
+
+    for rid, model, created_at, inp, out, thk in rows:
+        dt = _parse_dt(created_at)
+        if not dt:
+            continue
+        family = _model_family_from_app_name(model)
+        if family == "other":
+            continue
+        billable = (inp or 0) + (out or 0) + (thk or 0)
+        if billable <= 0:
+            continue
+        hour = dt.replace(minute=0, second=0, microsecond=0)
+        key = (hour, family)
+        b = bucket.get(key)
+        if b is None:
+            b = {"_total": 0}
+            bucket[key] = b
+        b[rid] = b.get(rid, 0) + billable
+        b["_total"] += billable
+        if rid in requested:
+            run_keys[rid].add(key)
+
+    if not bucket:
+        return {
+            "results": {rid: {"actual_net_cost_usd": 0.0, "actual_total_with_tax_usd": 0.0,
+                              "hours_count": 0, "status": "no_token_data", "breakdown": []}
+                        for rid in run_id_list},
+        }
+
+    # 2) Build BigQuery query for the affected hour window
+    project_id = os.getenv("VERTEX_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT") or "gen-lang-client-0008961174"
+    dataset = os.getenv("BQ_BILLING_DATASET", "billing_export")
+
+    all_hours = sorted({k[0] for k in bucket.keys()})
+    min_hour = all_hours[0]
+    max_hour = all_hours[-1] + timedelta(hours=1)
+
+    try:
+        bq = bigquery.Client(project=project_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery client init failed: {e}")
+
+    try:
+        tables = list(bq.list_tables(dataset))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery list_tables failed: {e}")
+
+    table_pattern = None
+    for t in tables:
+        if t.table_id.startswith("gcp_billing_export_resource_v1_"):
+            table_pattern = "gcp_billing_export_resource_v1_*"
+            break
+    if not table_pattern:
+        for t in tables:
+            if t.table_id.startswith("gcp_billing_export_v1_"):
+                table_pattern = "gcp_billing_export_v1_*"
+                break
+    if not table_pattern:
+        raise HTTPException(status_code=500, detail="لا يوجد جدول Billing Export في BigQuery")
+
+    table_ref = f"`{project_id}.{dataset}.{table_pattern}`"
+    q = f"""
+    SELECT
+      TIMESTAMP_TRUNC(usage_start_time, HOUR) AS hour,
+      LOWER(sku.description) AS sku,
+      SUM(cost) AS cost_usd,
+      SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS credits_usd
+    FROM {table_ref}
+    WHERE usage_start_time >= TIMESTAMP(@start)
+      AND usage_start_time < TIMESTAMP(@end)
+      AND (service.description = 'Vertex AI' OR service.description = 'Gemini API')
+    GROUP BY hour, sku
+    """
+    jc = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("start", "TIMESTAMP", min_hour),
+        bigquery.ScalarQueryParameter("end", "TIMESTAMP", max_hour),
+    ])
+
+    try:
+        bq_rows = list(bq.query(q, job_config=jc).result())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery query failed: {e}")
+
+    try:
+        latest_usage_row = list(bq.query(f"SELECT MAX(usage_end_time) AS m FROM {table_ref}").result())[0]
+        latest_usage = latest_usage_row["m"]
+    except Exception:
+        latest_usage = None
+
+    # (hour, family) → net_cost
+    bq_cost_by_key = {}
+    for r in bq_rows:
+        family = _model_family_from_sku(r["sku"])
+        if family == "other":
+            continue
+        net = float(r["cost_usd"] or 0) + float(r["credits_usd"] or 0)
+        key = (r["hour"].replace(tzinfo=None), family)
+        bq_cost_by_key[key] = bq_cost_by_key.get(key, 0.0) + net
+
+    # 3) Per-run share
+    tax_rate = _billing_tax_rate()
+    results = {}
+    for rid in run_id_list:
+        total_net = 0.0
+        breakdown = []
+        hours_pending = 0
+        hours_unmatched = 0
+        for key in run_keys.get(rid, set()):
+            hour, family = key
+            b = bucket[key]
+            run_tokens = b.get(rid, 0)
+            total_tokens = b["_total"]
+            if total_tokens <= 0:
+                continue
+            share = run_tokens / total_tokens
+            bq_cost = bq_cost_by_key.get(key)
+            if bq_cost is None:
+                # Either pending export or matched 0 in BigQuery for this hour+family
+                if latest_usage and hour.replace(tzinfo=None) >= latest_usage.replace(tzinfo=None):
+                    hours_pending += 1
+                else:
+                    hours_unmatched += 1
+                continue
+            run_share = share * bq_cost
+            total_net += run_share
+            breakdown.append({
+                "hour": hour.isoformat(),
+                "model_family": family,
+                "run_tokens": run_tokens,
+                "hour_total_tokens": total_tokens,
+                "share_pct": round(share * 100, 2),
+                "hour_total_cost_usd": round(bq_cost, 6),
+                "run_share_cost_usd": round(run_share, 6),
+            })
+        net_cost = round(total_net, 6)
+        tax = round(net_cost * tax_rate, 6)
+        total_with_tax = round(net_cost + tax, 6)
+
+        status = "ok"
+        hours_count = len(run_keys.get(rid, set()))
+        if hours_count == 0:
+            status = "no_token_data"
+        elif hours_pending > 0 and len(breakdown) == 0:
+            status = "pending_bigquery_export"
+        elif hours_unmatched > 0 and len(breakdown) == 0:
+            status = "no_billing_match"
+        elif hours_pending > 0:
+            status = "partial_pending"
+
+        results[rid] = {
+            "actual_net_cost_usd": net_cost,
+            "tax_rate": tax_rate,
+            "tax_usd": tax,
+            "actual_total_with_tax_usd": total_with_tax,
+            "hours_count": hours_count,
+            "hours_pending_export": hours_pending,
+            "hours_unmatched": hours_unmatched,
+            "status": status,
+            "breakdown": sorted(breakdown, key=lambda x: x["hour"]),
+        }
+
+    return {
+        "source": {
+            "table_pattern": table_pattern,
+            "latest_usage": latest_usage.isoformat() if latest_usage else None,
+        },
+        "results": results,
     }
 
 

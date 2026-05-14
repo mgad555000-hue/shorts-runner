@@ -47,6 +47,22 @@
         .delta-pos { color: #f4212e; }
         .delta-neg { color: #00ba7c; }
         .delta-zero { color: #6e7a85; }
+        .delta-warn { color: #ffd400; font-weight: 700; }
+        .section-head { color: #1d9bf0; margin: 20px 0 12px; font-size: 18px; }
+        .note { font-size: 12px; color: #8899a6; margin: -6px 0 12px; }
+        .billing-breakdown td:nth-child(4), .billing-breakdown td:nth-child(5) { direction: ltr; text-align: left; }
+        .unassigned-audit td { vertical-align: top; }
+        .unassigned-audit .cost-cell { direction: ltr; text-align: left; white-space: nowrap; }
+        .mono { font-family: 'Courier New', monospace; font-size: 11px; color: #8899a6; direction: ltr; unicode-bidi: plaintext; }
+        .reason-cell { min-width: 210px; }
+        .candidate { margin-bottom: 5px; line-height: 1.35; }
+        .candidate .confidence { color: #ffd400; font-size: 11px; }
+        .muted { color: #8899a6; font-size: 12px; }
+        .baseline-panel { background: #1e2732; border: 1px solid #38444d; border-radius: 8px; padding: 12px; margin: 8px 0 18px; }
+        .baseline-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 10px; }
+        .baseline-metric { background: #151b22; border-radius: 8px; padding: 10px; }
+        .baseline-metric .metric-value { font-size: 20px; font-weight: 700; color: #1d9bf0; direction: ltr; text-align: right; }
+        .billing-delta td { vertical-align: top; }
     </style>
 </head>
 <body>
@@ -56,7 +72,7 @@
     <div class="legend">
         <strong>التقديري</strong> = محسوب من توكينز Google × السعر الرسمي (يظهر فور التشغيل)
         &nbsp;|&nbsp;
-        <strong>فعلي من Google</strong> = الرقم الحقيقي 100% من فاتورة Google عبر BigQuery، باستخدام custom labels (run_id) المرسلة مع كل طلب. اضغط "تحقق" بعد 24-48 ساعة من التشغيل (وقت تأخر BigQuery).
+        <strong>حصة من فاتورة Google</strong> = نصيب الرن من فاتورة BigQuery الفعلية، موزّع بنسبة استهلاكه من توكنز الموديل في كل ساعة. مجموع كل الرنات في الساعة = إجمالي فاتورة الساعة بالظبط. يظهر بعد 24-48 ساعة من انتهاء الرن (وقت نزول البيانات من Google).
     </div>
 
     <div class="controls">
@@ -82,7 +98,57 @@
 
     <div id="billingStatus" style="margin: 8px 0 16px; font-size: 13px; color: #8899a6;"></div>
 
-    <h2 style="color: #1d9bf0; margin: 20px 0 12px; font-size: 18px;">📜 Timeline تشغيلاتك</h2>
+    <div class="baseline-panel">
+        <div><strong>مراقبة ما بعد آخر لقطة Google</strong></div>
+        <div class="muted">Baseline: الرصيد كان $280.12 في 13 مايو 2026 الساعة 12:37:36 ظهراً بتوقيت القاهرة. أي تكلفة Google تظهر بعد اللحظة دي لازم تظهر هنا كرَن محدد أو كبند غير منسوب واضح.</div>
+        <div id="billingDeltaSummary" class="baseline-grid"></div>
+    </div>
+    <table id="billingDeltaTable" class="billing-delta">
+        <thead>
+            <tr>
+                <th>الوقت</th>
+                <th>الزيادة $</th>
+                <th>Run ID</th>
+                <th>المصدر</th>
+                <th>الخدمة / SKU</th>
+                <th>Labels / ترشيح</th>
+            </tr>
+        </thead>
+        <tbody><tr><td colspan="6" class="loading">جاري التحميل...</td></tr></tbody>
+    </table>
+
+    <h2 class="section-head">🔥 أعلى بنود الفاتورة من Google</h2>
+    <div class="note">دي أرقام BigQuery الحقيقية لنفس الفترة، مجمعة حسب الخدمة والـ SKU. استخدمها لما رن معيّن يطلع “غير مربوط”.</div>
+    <table id="billingBreakdownTable" class="billing-breakdown">
+        <thead>
+            <tr>
+                <th>الخدمة</th>
+                <th>SKU</th>
+                <th>Usage</th>
+                <th>التكلفة الصافية $</th>
+                <th>النسبة</th>
+            </tr>
+        </thead>
+        <tbody><tr><td colspan="5" class="loading">جارٍ التحميل...</td></tr></tbody>
+    </table>
+
+    <h2 class="section-head">تكاليف غير منسوبة لرن</h2>
+    <div class="note">أي رقم هنا جاي من Google Billing Export لكنه لا يحمل label اسمه run_id. ده المكان اللي أي زيادة مالهاش رن لازم تظهر فيه بسبب واضح.</div>
+    <table id="unassignedAuditTable" class="unassigned-audit">
+        <thead>
+            <tr>
+                <th>اليوم</th>
+                <th>التكلفة $</th>
+                <th>السبب</th>
+                <th>الخدمة / SKU</th>
+                <th>Labels من Google</th>
+                <th>ترشيح الرن</th>
+            </tr>
+        </thead>
+        <tbody><tr><td colspan="6" class="loading">جاري التحميل...</td></tr></tbody>
+    </table>
+
+    <h2 class="section-head">📜 Timeline تشغيلاتك</h2>
     <table id="timelineTable">
         <thead>
             <tr>
@@ -92,25 +158,54 @@
                 <th>الحالة</th>
                 <th>الموديل</th>
                 <th>الاستدعاءات</th>
-                <th>إدخال</th>
+                <th>إدخال خام</th>
+                <th>كاش</th>
+                <th>إدخال مدفوع عادي</th>
                 <th>إخراج</th>
                 <th>تفكير</th>
                 <th>إجمالي</th>
                 <th>تقديري $</th>
-                <th>فعلي من Google $</th>
+                <th>حصة من فاتورة Google $</th>
                 <th>إجراء</th>
             </tr>
         </thead>
-        <tbody><tr><td colspan="13" class="loading">جارٍ التحميل...</td></tr></tbody>
+        <tbody><tr><td colspan="15" class="loading">جارٍ التحميل...</td></tr></tbody>
     </table>
 
     <script>
+        function reorderUsageSections() {
+            const timelineTable = document.getElementById('timelineTable');
+            const timelineHead = timelineTable ? timelineTable.previousElementSibling : null;
+            const topAnchor = document.querySelector('.baseline-panel');
+            if (timelineTable && timelineHead && topAnchor) {
+                topAnchor.parentNode.insertBefore(timelineHead, topAnchor);
+                topAnchor.parentNode.insertBefore(timelineTable, topAnchor);
+            }
+
+            const unassignedTable = document.getElementById('unassignedAuditTable');
+            const unassignedNote = unassignedTable ? unassignedTable.previousElementSibling : null;
+            const unassignedHead = unassignedNote ? unassignedNote.previousElementSibling : null;
+            if (unassignedTable && unassignedNote && unassignedHead) {
+                document.body.appendChild(unassignedHead);
+                document.body.appendChild(unassignedNote);
+                document.body.appendChild(unassignedTable);
+            }
+        }
+
+        reorderUsageSections();
+
         const TOKEN = localStorage.getItem('auth_token') || '';
         if (!TOKEN) window.location.href = '/';
 
         const fmt = n => n ? Number(n).toLocaleString('en') : '0';
         const fmtCost = n => (n != null && !isNaN(n)) ? '$' + Number(n).toFixed(4) : '—';
         const shortId = id => id ? id.substring(0, 8) : '';
+        const BASELINE_BALANCE_USD = 280.12;
+        const BASELINE_SINCE = '2026-05-13T12:37:36+03:00';
+        const DEFAULT_TAX_RATE = 0.14;
+        const esc = v => String(v ?? '').replace(/[&<>"']/g, ch => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[ch]));
         const fmtDate = iso => {
             if (!iso) return '—';
             const d = new Date(iso);
@@ -120,6 +215,8 @@
         let currentRows = [];
         const actualCache = {};
         let billingData = null;  // إجمالي الفترة من BigQuery — للعرض في الـ summary فقط
+        let unassignedAudit = null;
+        let billingDelta = null;
 
         async function loadData() {
             const days = document.getElementById('days').value;
@@ -130,14 +227,46 @@
                 if (!res.ok) throw new Error(res.status);
                 const data = await res.json();
                 currentRows = data.runs || [];
-                await loadBillingActual(days);
+                Object.keys(actualCache).forEach(k => delete actualCache[k]);
+                billingData = null;
+                unassignedAudit = null;
+                billingDelta = null;
+                document.getElementById('billingStatus').innerHTML = `<span style="color:#8899a6">جارٍ تحميل فاتورة Google من BigQuery...</span>`;
+                renderSummary(data.totals);
+                renderTimeline();
+                renderBillingBreakdown();
+                renderUnassignedAudit();
+                renderBillingDelta();
+                await Promise.all([loadBillingActual(days), loadActualsForRows(), loadUnassignedAudit(days), loadBillingDelta()]);
                 renderBillingStatus();
                 renderSummary(data.totals);
+                renderBillingBreakdown();
+                renderUnassignedAudit();
+                renderBillingDelta();
                 renderTimeline();
             } catch (e) {
                 document.querySelector('#timelineTable tbody').innerHTML =
-                    `<tr><td colspan="13" class="loading">خطأ: ${e.message}</td></tr>`;
+                    `<tr><td colspan="15" class="loading">خطأ: ${e.message}</td></tr>`;
+                document.querySelector('#billingBreakdownTable tbody').innerHTML =
+                    `<tr><td colspan="5" class="loading">خطأ: ${e.message}</td></tr>`;
+                document.querySelector('#unassignedAuditTable tbody').innerHTML =
+                    `<tr><td colspan="6" class="loading">خطأ: ${e.message}</td></tr>`;
+                document.querySelector('#billingDeltaTable tbody').innerHTML =
+                    `<tr><td colspan="6" class="loading">خطأ: ${e.message}</td></tr>`;
             }
+        }
+
+        function timelineTotals() {
+            return {
+                runs: currentRows.length,
+                estimated_cost_usd: currentRows.reduce((a, b) => a + b.estimated_cost_usd, 0),
+                total_tokens: currentRows.reduce((a, b) => a + b.total_tokens, 0),
+                input_tokens: currentRows.reduce((a, b) => a + b.input_tokens, 0),
+                cached_tokens: currentRows.reduce((a, b) => a + (b.cached_tokens || 0), 0),
+                billable_input_tokens: currentRows.reduce((a, b) => a + (b.billable_input_tokens || Math.max(0, (b.input_tokens || 0) - (b.cached_tokens || 0))), 0),
+                output_tokens: currentRows.reduce((a, b) => a + b.output_tokens, 0),
+                thinking_tokens: currentRows.reduce((a, b) => a + b.thinking_tokens, 0),
+            };
         }
 
         async function loadBillingActual(days) {
@@ -154,6 +283,138 @@
             }
         }
 
+        async function loadUnassignedAudit(days) {
+            try {
+                const res = await fetch(`/api/usage/unassigned-audit?days=${days}&limit=500&min_cost=0.000001`,
+                    { headers: { 'Authorization': `Bearer ${TOKEN}` } });
+                if (!res.ok) {
+                    unassignedAudit = { error: `HTTP ${res.status}`, items: [], totals: {} };
+                    return;
+                }
+                unassignedAudit = await res.json();
+            } catch (e) {
+                unassignedAudit = { error: e.message, items: [], totals: {} };
+            }
+        }
+
+        async function loadBillingDelta() {
+            try {
+                const url = `/api/usage/billing-delta?since=${encodeURIComponent(BASELINE_SINCE)}&baseline_balance_usd=${BASELINE_BALANCE_USD}&limit=200&min_cost=0.000001`;
+                const res = await fetch(url, { headers: { 'Authorization': `Bearer ${TOKEN}` } });
+                if (!res.ok) {
+                    billingDelta = { error: `HTTP ${res.status}`, items: [], totals: {} };
+                    return;
+                }
+                billingDelta = await res.json();
+            } catch (e) {
+                billingDelta = { error: e.message, items: [], totals: {} };
+            }
+        }
+
+        async function loadActualsForRows() {
+            if (!currentRows.length) return;
+            try {
+                const ids = encodeURIComponent(currentRows.map(r => r.run_id).join(','));
+                const res = await fetch(`/api/usage/run-billing-share?run_ids=${ids}`,
+                    { headers: { 'Authorization': `Bearer ${TOKEN}` } });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                for (const r of currentRows) {
+                    const info = (data.results || {})[r.run_id];
+                    if (!info) {
+                        actualCache[r.run_id] = { status: 'no_data', net_cost_usd: 0, total_with_tax_usd: 0 };
+                        continue;
+                    }
+                    actualCache[r.run_id] = {
+                        net_cost_usd: info.actual_net_cost_usd,
+                        tax_rate: info.tax_rate,
+                        tax_usd: info.tax_usd,
+                        total_with_tax_usd: info.actual_total_with_tax_usd,
+                        hours_count: info.hours_count,
+                        hours_pending: info.hours_pending_export,
+                        hours_unmatched: info.hours_unmatched,
+                        status: info.status,
+                        breakdown: info.breakdown || [],
+                        line_items: (info.breakdown || []).length,
+                    };
+                }
+            } catch (e) {
+                for (const r of currentRows) {
+                    actualCache[r.run_id] = { error: e.message };
+                }
+            }
+        }
+
+        function taxRate() {
+            return Number(billingData?.totals?.tax_rate ?? billingDelta?.totals?.tax_rate ?? DEFAULT_TAX_RATE);
+        }
+
+        function renderBillingDelta() {
+            const summary = document.getElementById('billingDeltaSummary');
+            const tbody = document.querySelector('#billingDeltaTable tbody');
+            if (!billingDelta) {
+                summary.innerHTML = `
+                    <div class="baseline-metric"><div class="metric-value">${fmtCost(BASELINE_BALANCE_USD)}</div><div class="muted">آخر رصيد معروف</div></div>
+                    <div class="baseline-metric"><div class="metric-value">...</div><div class="muted">جاري فحص أي زيادة بعده</div></div>
+                `;
+                tbody.innerHTML = `<tr><td colspan="6" class="loading">جاري فحص الزيادات بعد آخر لقطة...</td></tr>`;
+                return;
+            }
+            if (billingDelta.error) {
+                summary.innerHTML = `<div class="baseline-metric"><div class="metric-value">خطأ</div><div class="muted">${esc(billingDelta.error)}</div></div>`;
+                tbody.innerHTML = `<tr><td colspan="6" class="loading">تعذر فحص الزيادات: ${esc(billingDelta.error)}</td></tr>`;
+                return;
+            }
+            const totals = billingDelta.totals || {};
+            const rate = Number(totals.tax_rate ?? DEFAULT_TAX_RATE);
+            const taxLabel = `${(rate * 100).toFixed(0)}% VAT`;
+            summary.innerHTML = `
+                <div class="baseline-metric"><div class="metric-value">${fmtCost(BASELINE_BALANCE_USD)}</div><div class="muted">آخر رصيد معروف</div></div>
+                <div class="baseline-metric"><div class="metric-value">${fmtCost(totals.new_regular_cost_usd || 0)}</div><div class="muted">زيادة قبل الضريبة</div></div>
+                <div class="baseline-metric"><div class="metric-value">${fmtCost(totals.estimated_tax_usd || 0)}</div><div class="muted">${taxLabel}</div></div>
+                <div class="baseline-metric"><div class="metric-value">${fmtCost(totals.new_cost_with_tax_usd || 0)}</div><div class="muted">زيادة شاملة الضريبة</div></div>
+                <div class="baseline-metric"><div class="metric-value">${fmtCost(totals.projected_balance_usd || BASELINE_BALANCE_USD)}</div><div class="muted">الرصيد المتوقع الآن</div></div>
+                <div class="baseline-metric"><div class="metric-value">${fmtCost(totals.unassigned_cost_with_tax_usd || 0)}</div><div class="muted">غير منسوب شامل الضريبة</div></div>
+            `;
+            const exportReached = billingDelta.source?.export_has_reached_baseline;
+            const items = Array.isArray(billingDelta.items) ? billingDelta.items : [];
+            if (!items.length) {
+                const msg = exportReached
+                    ? 'لا توجد أي تكلفة جديدة بعد آخر لقطة.'
+                    : `Billing Export لسه ماوصلش لوقت آخر لقطة. آخر usage متاح: ${esc(billingDelta.source?.latest_usage_time || '—')}`;
+                tbody.innerHTML = `<tr><td colspan="6" class="loading">${msg}</td></tr>`;
+                return;
+            }
+            tbody.innerHTML = items.map(r => {
+                const cls = r.classification || {};
+                const labelText = r.run_id
+                    ? `run_id=${r.run_id}`
+                    : (r.labels_text || r.resource_name || r.resource_global_name || '—');
+                const candidate = r.run_id
+                    ? esc(r.run_recipe_name || 'رن محدد')
+                    : ((r.candidate_runs || []).slice(0, 3).map(c => `${shortId(c.run_id)} ${c.recipe_name || ''}`).join(' | ') || 'لا يوجد ترشيح موثوق');
+                return `
+                    <tr>
+                        <td>${esc((r.first_usage || r.day || '—').replace('T', ' ').substring(0, 19))}</td>
+                        <td class="cost-billing cost-cell">${fmtCost(r.total_with_tax_usd ?? r.net_cost_usd)}</td>
+                        <td class="run-id" title="${esc(r.run_id || '')}">${r.run_id ? esc(shortId(r.run_id)) : 'غير منسوب'}</td>
+                        <td>
+                            <div>${esc(cls.label || '—')}</div>
+                            <div class="muted">${r.cost_type === 'tax' ? 'ضريبة فعلية من Google' : `قبل الضريبة ${fmtCost(r.net_cost_usd)} + VAT ${fmtCost(r.tax_usd || 0)}`}</div>
+                        </td>
+                        <td>
+                            <div>${esc(r.service || '—')}</div>
+                            <div class="muted">${esc(r.sku || '—')}</div>
+                        </td>
+                        <td>
+                            <div class="mono">${esc(labelText)}</div>
+                            <div class="muted">${esc(candidate)}</div>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
         function renderBillingStatus() {
             const status = document.getElementById('billingStatus');
             if (!billingData || billingData.error) {
@@ -162,35 +423,150 @@
             }
             const src = billingData.source || {};
             const lastUsage = src.latest_usage_time ? src.latest_usage_time.substring(0, 10) : '—';
-            const totalActual = billingData.totals?.net_cost_usd || 0;
+            const totalActual = billingData.totals?.total_with_tax_usd || billingData.totals?.net_cost_usd || 0;
+            const beforeTax = billingData.totals?.regular_net_cost_usd || billingData.totals?.net_cost_usd || 0;
+            const vat = billingData.totals?.tax_usd || 0;
             const days = billingData.by_day?.length || 0;
             status.innerHTML = `
-                <b>إجمالي فاتورة Google لهذه الفترة (${days} يوم) من BigQuery:</b>
+                <b>إجمالي Google شامل VAT لهذه الفترة (${days} يوم) من BigQuery:</b>
                 <span class="cost-billing" style="font-size:15px">${fmtCost(totalActual)}</span>
+                &nbsp;|&nbsp; قبل الضريبة: ${fmtCost(beforeTax)}
+                &nbsp;|&nbsp; VAT: ${fmtCost(vat)}
                 &nbsp;|&nbsp; آخر يوم متاح في BigQuery: ${lastUsage}
-                &nbsp;|&nbsp; <span style="font-size:11px">(الإجمالي حقيقي 100% من Google. التوزيع لكل تشغيلة على حدة → اضغط "تحقق")</span>
+                &nbsp;|&nbsp; <span style="font-size:11px">(أي زيادة لا تظهر في رن محدد ستظهر في كارت "غير منسوب لرن")</span>
             `;
         }
 
         function renderSummary(t) {
-            const verifiedRuns = Object.values(actualCache).filter(a => !a.error && !a.pending && (a.line_items || 0) > 0);
-            const actualSum = verifiedRuns.reduce((a, b) => a + (b.net_cost_usd || 0), 0);
+            const verifiedRuns = Object.values(actualCache).filter(a => !a.error && (a.status === 'ok' || a.status === 'partial_pending') && (a.line_items || 0) > 0);
+            const rate = taxRate();
+            const actualSum = verifiedRuns.reduce((a, b) => a + (b.total_with_tax_usd ?? ((b.net_cost_usd || 0) * (1 + rate))), 0);
             const verified = verifiedRuns.length;
             let billingTotal = '—';
             let billingLabel = 'فاتورة Google (إجمالي)';
+            let unassignedCost = null;
+            const auditTotal = (unassignedAudit && !unassignedAudit.error && unassignedAudit.totals)
+                ? Number(unassignedAudit.totals.total_with_tax_usd || (Number(unassignedAudit.totals.net_cost_usd || 0) * (1 + rate)))
+                : null;
             if (billingData && !billingData.error && billingData.totals) {
-                billingTotal = fmtCost(billingData.totals.net_cost_usd);
-                billingLabel = `فاتورة Google (${billingData.days || '?'} يوم)`;
+                const googleTotal = Number(billingData.totals.total_with_tax_usd || billingData.totals.net_cost_usd || 0);
+                billingTotal = fmtCost(googleTotal);
+                billingLabel = `فاتورة Google شامل VAT (${billingData.days || '?'} يوم)`;
+                unassignedCost = auditTotal != null ? auditTotal : googleTotal - actualSum;
             } else if (billingData && billingData.error) {
                 billingTotal = 'غير متاح';
+                unassignedCost = auditTotal;
             }
+            const hasBillingTotal = billingData && !billingData.error && billingData.totals && !isNaN(Number(billingData.totals.total_with_tax_usd || billingData.totals.net_cost_usd));
+            const estimatedWithTax = Number(t.estimated_cost_usd || 0) * (1 + rate);
+            const delta = hasBillingTotal ? Number(billingData.totals.total_with_tax_usd || billingData.totals.net_cost_usd) - estimatedWithTax : null;
+            const deltaClass = delta == null ? '' : (delta > 0.01 ? 'delta-pos' : (delta < -0.01 ? 'delta-neg' : 'delta-zero'));
+            const unassignedClass = unassignedCost == null ? '' : (unassignedCost > 0.01 ? 'delta-pos' : (unassignedCost < -0.01 ? 'delta-neg' : 'delta-zero'));
             document.getElementById('summary').innerHTML = `
                 <div class="card"><div class="value">${fmt(t.runs)}</div><div class="label">تشغيلات</div></div>
-                <div class="card cost"><div class="value">${fmtCost(t.estimated_cost_usd)}</div><div class="label">إجمالي تقديري</div></div>
-                <div class="card actual"><div class="value">${verified > 0 ? fmtCost(actualSum) : '—'}</div><div class="label">إجمالي الفعلي (${verified} تم التحقق)</div></div>
+                <div class="card cost"><div class="value">${fmtCost(estimatedWithTax)}</div><div class="label">إجمالي تقديري شامل VAT</div></div>
+                <div class="card actual"><div class="value">${verified > 0 ? fmtCost(actualSum) : '—'}</div><div class="label">إجمالي الفعلي شامل VAT (${verified} تم التحقق)</div></div>
                 <div class="card billing"><div class="value">${billingTotal}</div><div class="label">${billingLabel}</div></div>
+                <div class="card"><div class="value ${unassignedClass}">${unassignedCost == null ? '—' : fmtCost(unassignedCost)}</div><div class="label">غير منسوب لرن</div></div>
+                <div class="card"><div class="value ${deltaClass}">${delta == null ? '—' : fmtCost(delta)}</div><div class="label">فرق Google - التقديري</div></div>
                 <div class="card"><div class="value">${fmt(t.total_tokens)}</div><div class="label">إجمالي التوكنز</div></div>
+                <div class="card"><div class="value">${fmt(t.cached_tokens || 0)}</div><div class="label">توكنز كاش</div></div>
+                <div class="card"><div class="value">${fmt(t.billable_input_tokens || 0)}</div><div class="label">إدخال مدفوع عادي</div></div>
             `;
+        }
+
+        function renderBillingBreakdown() {
+            const tbody = document.querySelector('#billingBreakdownTable tbody');
+            if (!billingData || billingData.error || !Array.isArray(billingData.items) || billingData.items.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="5" class="loading">لا توجد بنود Google متاحة</td></tr>`;
+                return;
+            }
+            const grouped = new Map();
+            for (const item of billingData.items) {
+                const key = `${item.service || '—'}|||${item.sku || '—'}|||${item.usage_unit || ''}`;
+                const row = grouped.get(key) || {
+                    service: item.service || '—',
+                    sku: item.sku || '—',
+                    usage_amount: 0,
+                    usage_unit: item.usage_unit || '',
+                    net_cost_usd: 0,
+                };
+                row.usage_amount += Number(item.usage_amount || 0);
+                row.net_cost_usd += Number(item.total_with_tax_usd ?? item.net_cost_usd ?? 0);
+                grouped.set(key, row);
+            }
+            const total = Number(billingData.totals?.total_with_tax_usd || billingData.totals?.net_cost_usd || 0);
+            const rows = [...grouped.values()].sort((a, b) => b.net_cost_usd - a.net_cost_usd).slice(0, 15);
+            tbody.innerHTML = rows.map(r => {
+                const pct = total ? (r.net_cost_usd / total) * 100 : 0;
+                return `
+                    <tr>
+                        <td>${r.service}</td>
+                        <td>${r.sku}</td>
+                        <td>${fmt(Math.round(r.usage_amount))} ${r.usage_unit || ''}</td>
+                        <td class="cost-billing">${fmtCost(r.net_cost_usd)}</td>
+                        <td>${pct.toFixed(1)}%</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function confidenceLabel(value) {
+            if (value === 'high') return 'قوي';
+            if (value === 'medium') return 'متوسط';
+            return 'ضعيف';
+        }
+
+        function renderUnassignedAudit() {
+            const tbody = document.querySelector('#unassignedAuditTable tbody');
+            if (!unassignedAudit) {
+                tbody.innerHTML = `<tr><td colspan="6" class="loading">جاري تحميل البنود غير المنسوبة من Google...</td></tr>`;
+                return;
+            }
+            if (unassignedAudit.error) {
+                tbody.innerHTML = `<tr><td colspan="6" class="loading">تعذر تحميل غير المنسوب: ${esc(unassignedAudit.error)}</td></tr>`;
+                return;
+            }
+            const items = Array.isArray(unassignedAudit.items) ? unassignedAudit.items : [];
+            if (!items.length) {
+                tbody.innerHTML = `<tr><td colspan="6" class="loading">لا توجد تكاليف غير منسوبة في الفترة المختارة</td></tr>`;
+                return;
+            }
+            tbody.innerHTML = items.map(r => {
+                const cls = r.classification || {};
+                const totalWithTax = r.total_with_tax_usd ?? ((r.net_cost_usd || 0) * (1 + taxRate()));
+                const serviceSku = `
+                    <div>${esc(r.service || '—')}</div>
+                    <div class="muted" title="${esc(r.sku || '')}">${esc(r.sku || '—')}</div>
+                    <div class="muted">${r.model_hint ? 'موديل: ' + esc(r.model_hint) : ''}</div>
+                `;
+                const labelText = r.labels_text || r.resource_name || r.resource_global_name || '—';
+                const candidates = (r.candidate_runs || []).length
+                    ? r.candidate_runs.map(c => `
+                        <div class="candidate">
+                            <span class="run-id" title="${esc(c.run_id)}">${esc(shortId(c.run_id))}</span>
+                            <span>${esc(c.recipe_name || '')}</span>
+                            <div class="muted">${esc((c.models || []).join(', '))}</div>
+                            <span class="confidence">${confidenceLabel(c.confidence)}</span>
+                            <span class="muted"> · ${esc((c.reasons || []).join('، '))} · تقديري ${fmtCost(c.estimated_cost_usd)}</span>
+                        </div>
+                    `).join('')
+                    : `<span class="muted">لا يوجد ترشيح موثوق من بيانات التطبيق. المصدر والـ SKU فوق هما الرقم المؤكد.</span>`;
+                return `
+                    <tr>
+                        <td>${esc(r.day || '—')}</td>
+                        <td class="cost-billing cost-cell" title="قبل الضريبة: ${fmtCost(r.net_cost_usd)}">${fmtCost(totalWithTax)}</td>
+                        <td class="reason-cell">
+                            <div>${esc(cls.label || 'غير مصنف')}</div>
+                            <div class="muted">${esc(cls.explanation || '')}</div>
+                            <div class="muted">${esc(cls.action || '')}</div>
+                        </td>
+                        <td>${serviceSku}</td>
+                        <td class="mono" title="${esc(labelText)}">${esc(labelText)}</td>
+                        <td>${candidates}</td>
+                    </tr>
+                `;
+            }).join('');
         }
 
         function statusBadge(s) {
@@ -205,19 +581,31 @@
             const runId = r.run_id;
             const a = actualCache[runId];
             if (!a) {
-                return `<span class="cost-pending" title="اضغط 'تحقق' لاستعلام BigQuery (التشغيلات حديثة العهد قد تستغرق 24-48 ساعة لظهور بيانات Google)">—</span>`;
+                return `<span class="cost-pending" title="جاري حساب نصيب الرن من فاتورة Google">...</span>`;
             }
             if (a.error) return `<span class="cost-pending" title="${a.error}">خطأ</span>`;
-            if (a.pending) return `<span class="cost-pending" title="${a.reason || 'لسه ما اتكتبتش في BigQuery'}">Pending</span>`;
-            if (a.line_items === 0) return `<span class="cost-pending" title="لا توجد records في BigQuery لـ label run_id=${a.cleaned_run_id} — انتظر 24-48 ساعة">لا توجد</span>`;
-            const tooltip = `رقم 100% من فاتورة Google عبر BigQuery (${a.line_items} line item${a.line_items > 1 ? 's' : ''})\nالخدمات: ${(a.services || []).join(', ')}\nمصدر: ${a.source_kind || 'detailed'}`;
-            return `<span class="cost-actual" title="${tooltip}">${fmtCost(a.net_cost_usd)}</span>`;
+            if (a.status === 'pending_bigquery_export') {
+                return `<span class="cost-pending" title="الرن حديث (آخر 24-48 ساعة) — فاتورة Google لسه ما نزلتش في BigQuery. ستظهر تلقائياً">⏳ تنزل خلال 24-48 ساعة</span>`;
+            }
+            if (a.status === 'no_token_data') {
+                return `<span class="cost-pending" title="الرن فشل أو ما عملش API calls">—</span>`;
+            }
+            if (a.status === 'no_billing_match') {
+                return `<span class="delta-warn" title="فاتورة Google لا تتطابق مع توكنز الرن في الساعات المعنية">غير متطابق</span>`;
+            }
+            const totalWithTax = a.total_with_tax_usd ?? ((a.net_cost_usd || 0) * (1 + taxRate()));
+            const partial = a.status === 'partial_pending' ? ` (${a.hours_pending} ساعة لسه نازلة)` : '';
+            const breakdownLines = (a.breakdown || []).map(b =>
+                `  ${b.hour.substring(0,16)} | ${b.model_family} | ${b.share_pct}% × $${b.hour_total_cost_usd.toFixed(4)} = $${b.run_share_cost_usd.toFixed(4)}`
+            ).join('\n');
+            const tooltip = `نصيب الرن من فاتورة Google الفعلية${partial}\nقبل الضريبة: ${fmtCost(a.net_cost_usd)}\nVAT (${((a.tax_rate || 0.14) * 100).toFixed(0)}%): ${fmtCost(a.tax_usd)}\nالساعات المتطابقة: ${a.hours_count}\n\nتفاصيل:\n${breakdownLines}`;
+            return `<span class="cost-actual" title="${tooltip}">${fmtCost(totalWithTax)}</span>`;
         }
 
         function renderTimeline() {
             const tbody = document.querySelector('#timelineTable tbody');
             if (!currentRows.length) {
-                tbody.innerHTML = `<tr><td colspan="13" class="loading">لا توجد بيانات</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="15" class="loading">لا توجد بيانات</td></tr>`;
                 return;
             }
             tbody.innerHTML = currentRows.map(r => `
@@ -229,6 +617,8 @@
                     <td>${r.model}</td>
                     <td>${fmt(r.calls)} (B:${r.batch_calls}/D:${r.direct_calls})</td>
                     <td class="token-col">${fmt(r.input_tokens)}</td>
+                    <td class="token-col">${fmt(r.cached_tokens || 0)}</td>
+                    <td class="token-col">${fmt(r.billable_input_tokens ?? Math.max(0, (r.input_tokens || 0) - (r.cached_tokens || 0)))}</td>
                     <td class="token-col">${fmt(r.output_tokens)}</td>
                     <td class="token-col">${fmt(r.thinking_tokens)}</td>
                     <td class="token-col">${fmt(r.total_tokens)}</td>
@@ -242,27 +632,25 @@
         async function verifyOne(runId, btn) {
             if (btn) { btn.disabled = true; btn.textContent = '...'; }
             try {
-                const res = await fetch(`/api/usage/bigquery-actual/${runId}?days=90`,
+                const res = await fetch(`/api/usage/run-billing-share?run_ids=${encodeURIComponent(runId)}`,
                     { headers: { 'Authorization': `Bearer ${TOKEN}` } });
                 if (!res.ok) throw new Error(res.status);
                 const data = await res.json();
-                const actual = data.actual_from_google || {};
+                const info = (data.results || {})[runId] || {};
                 actualCache[runId] = {
-                    cleaned_run_id: data.cleaned_run_id,
-                    source_kind: data.source?.kind,
-                    pending: !!data.pending,
-                    reason: data.reason,
-                    ...actual,
+                    net_cost_usd: info.actual_net_cost_usd,
+                    tax_rate: info.tax_rate,
+                    tax_usd: info.tax_usd,
+                    total_with_tax_usd: info.actual_total_with_tax_usd,
+                    hours_count: info.hours_count,
+                    hours_pending: info.hours_pending_export,
+                    hours_unmatched: info.hours_unmatched,
+                    status: info.status,
+                    breakdown: info.breakdown || [],
+                    line_items: (info.breakdown || []).length,
                 };
                 renderTimeline();
-                renderSummary({
-                    runs: currentRows.length,
-                    estimated_cost_usd: currentRows.reduce((a, b) => a + b.estimated_cost_usd, 0),
-                    total_tokens: currentRows.reduce((a, b) => a + b.total_tokens, 0),
-                    input_tokens: currentRows.reduce((a, b) => a + b.input_tokens, 0),
-                    output_tokens: currentRows.reduce((a, b) => a + b.output_tokens, 0),
-                    thinking_tokens: currentRows.reduce((a, b) => a + b.thinking_tokens, 0),
-                });
+                renderSummary(timelineTotals());
             } catch (e) {
                 actualCache[runId] = { error: e.message };
                 renderTimeline();
