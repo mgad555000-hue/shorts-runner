@@ -2528,6 +2528,17 @@ def _tts_vertex_impl(text: str, voice: str, project_id: str, location: str, usag
     wav_data = wav_buffer.getvalue()
     log(f"  WAV: {len(wav_data)} bytes | rate: {sample_rate}Hz | {data_type}")
 
+    # fallback: لو الـ API ما رجّعش توكنز الصوت → نقدّرها من مدة الصوت (25 توكن/ثانية — رسمي من Google)
+    if usage_holder is not None and pcm_data:
+        tu = usage_holder.get("token_usage") or {"input": 0, "output": 0, "thinking": 0, "cached": 0, "total": 0}
+        if not tu.get("output"):
+            audio_seconds = len(pcm_data) / 2.0 / max(sample_rate, 1)  # 16-bit mono
+            est_out = int(round(audio_seconds * 25))
+            tu["output"] = est_out
+            tu["total"] = (tu.get("input", 0) or 0) + est_out
+            usage_holder["token_usage"] = tu
+            log(f"  [tts tokens] تقدير توكنز الصوت من المدة: {audio_seconds:.1f}s × 25 = {est_out} توكن")
+
     return wav_data
 
 

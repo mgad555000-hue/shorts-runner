@@ -824,8 +824,8 @@ MODEL_PRICING = {
     # الأسعار المنشورة من Google للـ Preview TTS (لكل مليون توكن):
     "gemini-2.5-flash-tts": {"input": 0.50, "output": 10.00, "thinking": 10.00, "batch_discount": 0.5},
     "gemini-2.5-pro-tts": {"input": 1.00, "output": 20.00, "thinking": 20.00, "batch_discount": 0.5},
-    # gemini-3.1-flash-tts-preview: سعر مبدئي = نفس 2.5 Flash TTS — يُحدّث بالسعر الرسمي عند توفّره
-    "gemini-3.1-flash-tts-preview": {"input": 0.50, "output": 10.00, "thinking": 10.00, "batch_discount": 0.5},
+    # gemini-3.1-flash-tts-preview: السعر الرسمي من Google (input نص $1 | output صوت $20) | 25 توكن/ثانية
+    "gemini-3.1-flash-tts-preview": {"input": 1.00, "output": 20.00, "thinking": 20.00, "batch_discount": 0.5},
 
     # ========== OpenAI ==========
     "gpt-4o": {"input": 2.50, "output": 10.00, "thinking": 0, "batch_discount": 0.5},
