@@ -2388,9 +2388,10 @@ def tts_vertex(text: str, voice: str = "Achird", project_id: str = None, locatio
 
     log(f"→ TTS Vertex AI | طول النص: {len(text)} | الصوت: {voice} | المشروع: {project_id}")
 
+    _usage_holder = {}
     try:
         audio_data = _retry_call(
-            lambda: _check_audio_data(_tts_vertex_impl(text, voice, project_id, location), "Vertex AI"),
+            lambda: _check_audio_data(_tts_vertex_impl(text, voice, project_id, location, _usage_holder), "Vertex AI"),
             max_retries=3, base_delay=3.0, description="Vertex AI TTS"
         )
 
@@ -2401,7 +2402,9 @@ def tts_vertex(text: str, voice: str = "Achird", project_id: str = None, locatio
             success=True,
             data=audio_data,
             provider="vertex",
-            duration_ms=duration
+            model=_usage_holder.get("model", ""),
+            duration_ms=duration,
+            token_usage=_usage_holder.get("token_usage", {})
         )
 
     except EngineError:
@@ -2414,7 +2417,7 @@ def tts_vertex(text: str, voice: str = "Achird", project_id: str = None, locatio
         )
 
 
-def _tts_vertex_impl(text: str, voice: str, project_id: str, location: str) -> bytes:
+def _tts_vertex_impl(text: str, voice: str, project_id: str, location: str, usage_holder: dict = None) -> bytes:
     """تنفيذ TTS عبر Vertex AI"""
     import json
     import tempfile
@@ -2457,6 +2460,19 @@ def _tts_vertex_impl(text: str, voice: str, project_id: str, location: str) -> b
             )
         )
     )
+
+    # التقاط استهلاك التوكنز (input نصي + output صوتي) لحساب التكلفة في usage.html
+    if usage_holder is not None:
+        usage_holder["model"] = tts_model
+        um = getattr(response, "usage_metadata", None)
+        if um:
+            _in = getattr(um, "prompt_token_count", 0) or 0
+            _out = getattr(um, "candidates_token_count", 0) or 0
+            _tot = getattr(um, "total_token_count", 0) or (_in + _out)
+            usage_holder["token_usage"] = {
+                "input": _in, "output": _out, "thinking": 0, "cached": 0, "total": _tot
+            }
+            log(f"  [tts tokens] input={_in} output(audio)={_out} total={_tot}")
 
     # استخراج الصوت
     if not response.candidates or not response.candidates[0].content.parts:

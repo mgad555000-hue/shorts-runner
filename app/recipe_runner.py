@@ -538,6 +538,9 @@ def action_tts(step, ctx):
     if not result.success:
         raise EngineError(f"فشل TTS: {result.error}", code="TTS_FAILED")
 
+    # تسجيل استهلاك توكنز الصوت لحساب التكلفة في usage.html
+    ctx.record_usage(step["id"], "tts", result.provider, result.model, result.token_usage)
+
     audio_data = result.data
 
     # حفظ WAV
@@ -584,6 +587,9 @@ def _tts_and_save(text, filename_base, ctx, max_chars=None, subfolder=None, max_
                 continue
             log(f"  [!] {filename_base}: فشل TTS بعد {max_retries} محاولات — {result.error}")
             return False, None
+
+        # تسجيل استهلاك توكنز الصوت لحساب التكلفة في usage.html
+        ctx.record_usage(filename_base, "tts", result.provider, result.model, result.token_usage)
 
         audio_data = result.data
         with open(wav_path, "wb") as f:
