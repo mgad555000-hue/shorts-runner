@@ -523,8 +523,27 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
     return "\n".join(combined)
 
 
+def _apply_tts_style(step, ctx):
+    """يحدد تعليمات الإلقاء (style/scene) ويضبط متغير البيئة TTS_STYLE قبل أي TTS.
+    الأولوية: step["style"] في الوصفة > ملف tts_style.txt في مجلد input > بدون."""
+    style = (step.get("style") or "").strip()
+    if not style:
+        try:
+            style_path = os.path.join(ctx.input_dir, "tts_style.txt")
+            if os.path.exists(style_path):
+                with open(style_path, "r", encoding="utf-8") as f:
+                    style = f.read().strip()
+        except Exception:
+            style = ""
+    os.environ["TTS_STYLE"] = style
+    if style:
+        log(f"  [tts style] تعليمات الإلقاء مفعّلة ({len(style)} حرف)")
+    return style
+
+
 def action_tts(step, ctx):
     """استدعاء engine.tts() + حفظ WAV + تحويل MP3"""
+    _apply_tts_style(step, ctx)
     text = str(ctx.resolve(step["input"]))
 
     # قطع النص لو محدد max_chars
@@ -618,6 +637,7 @@ def action_tts_multi(step, ctx):
     5. لو فضل ناقص بعد max_passes → الوصفة تنهي بـ FAILED
     """
     import time as _time
+    _apply_tts_style(step, ctx)
     text = str(ctx.resolve(step["input"]))
     prefix = step.get("marker_prefix", "SCRIPT")
     max_chars = step.get("max_chars")
@@ -2566,6 +2586,7 @@ def action_tts_segments(step, ctx):
     المدخل: نص قائمة الفيديوهات (بماركرز SCRIPT)
     المخرج: ملفات WAV لكل بند + full.wav + verification.json لكل سكريبت
     """
+    _apply_tts_style(step, ctx)
     text = str(ctx.resolve(step["input"]))
     prefix = step.get("marker_prefix", "SCRIPT")
     max_chars = step.get("max_chars")

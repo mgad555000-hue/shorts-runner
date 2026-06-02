@@ -2445,12 +2445,24 @@ def _tts_vertex_impl(text: str, voice: str, project_id: str, location: str, usag
 
     # موديل الـ TTS يتحدد من الواجهة (متغير البيئة) — الافتراضي gemini-2.5-pro-tts
     tts_model = os.getenv("TTS_MODEL", "gemini-2.5-pro-tts").strip() or "gemini-2.5-pro-tts"
-    log(f"  Vertex TTS model: {tts_model}")
+
+    # 🔒 الصوت مثبّت على Achird دائماً — ممنوع تغييره مهما كان الموديل (قرار المستخدم)
+    voice = "Achird"
+
+    # تعليمات الإلقاء (style/scene) — تتحط قبل النص زي Scene/Sample Context في AI Studio
+    # الموديل يستخدمها للتحكم في الأسلوب والسرعة والنبرة بدون ما ينطقها
+    tts_style = os.getenv("TTS_STYLE", "").strip()
+    if tts_style:
+        tts_contents = f"{tts_style}\n\n{text}"
+        log(f"  Vertex TTS model: {tts_model} | voice: {voice} | style: مفعّل ({len(tts_style)} حرف)")
+    else:
+        tts_contents = text
+        log(f"  Vertex TTS model: {tts_model} | voice: {voice} | style: بدون")
 
     # تحويل النص لصوت
     response = client.models.generate_content(
         model=tts_model,
-        contents=text,
+        contents=tts_contents,
         config=types.GenerateContentConfig(
             response_modalities=["AUDIO"],
             speech_config=types.SpeechConfig(
