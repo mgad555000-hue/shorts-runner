@@ -20,6 +20,7 @@ import sys
 import time
 import json
 import traceback
+import threading
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Any
@@ -75,10 +76,13 @@ BATCH_INFO_FILENAME = "batch_job_info.json"
 def log(msg: str):
     """تسجيل رسالة مع الوقت"""
     timestamp = datetime.now().strftime("%H:%M:%S")
+    text = f"[{timestamp}] [ENGINE] {msg}"
     try:
-        print(f"[{timestamp}] [ENGINE] {msg}", flush=True)
+        print(text, flush=True)
     except UnicodeEncodeError:
-        print(f"[{timestamp}] [ENGINE] {msg.encode('utf-8', errors='replace').decode('utf-8')}", flush=True)
+        encoding = sys.stdout.encoding or "utf-8"
+        safe_text = text.encode(encoding, errors="backslashreplace").decode(encoding, errors="replace")
+        print(safe_text, flush=True)
 
 
 # ========== فحوصات ما قبل الإرسال ==========
@@ -326,6 +330,157 @@ def detect_provider(model: str) -> str:
         )
 
 
+def _normalize_thinking_level(value: str = None) -> Optional[str]:
+    value = (value or "").strip().lower()
+    return value if value in {"none", "low", "medium", "high"} else None
+
+
+def _is_gemini_3_model(model: str = "") -> bool:
+    return "gemini-3" in (model or "").lower()
+
+
+def _gemini_3_supports_minimal_thinking(model: str = "") -> bool:
+    model_lower = (model or "").lower()
+    return "flash" in model_lower or "lite" in model_lower
+
+
+def _gemini_3_thinking_level(model: str, thinking_level: str = None) -> Optional[str]:
+    level = _normalize_thinking_level(thinking_level)
+    if not level:
+        return None
+    if level == "none":
+        return "minimal" if _gemini_3_supports_minimal_thinking(model) else None
+    return level
+
+
+def _apply_ui_thinking_override(thinking_budget: int = None, thinking_level: str = None):
+    """UI/env thinking level is the global source of truth for all recipes."""
+    env_level = _normalize_thinking_level(os.getenv("THINKING_LEVEL", ""))
+    if env_level:
+        return None, env_level
+    return thinking_budget, _normalize_thinking_level(thinking_level)
+
+
+def _batch_split_enabled() -> bool:
+    return os.getenv("BATCH_AUTO_SPLIT", "true").lower() not in ("0", "false", "no", "off")
+
+
+def _batch_split_limits():
+    max_requests = int(os.getenv("BATCH_CHUNK_MAX_REQUESTS", "250") or "250")
+    max_mb = float(os.getenv("BATCH_CHUNK_MAX_MB", "20") or "20")
+    return max(1, max_requests), max(1, int(max_mb * 1024 * 1024))
+
+
+def _split_prompts_for_batch(prompts: list):
+    """Split very large batches so one provider-side failure does not kill the whole run."""
+    if not _batch_split_enabled():
+        return [(list(range(len(prompts))), prompts)]
+
+    max_requests, max_bytes = _batch_split_limits()
+    chunks = []
+    current_indexes = []
+    current_prompts = []
+    current_bytes = 0
+
+    for idx, prompt in enumerate(prompts):
+        prompt_size = len(str(prompt).encode("utf-8")) + 4096
+        should_flush = (
+            current_prompts
+            and (
+                len(current_prompts) >= max_requests
+                or current_bytes + prompt_size > max_bytes
+            )
+        )
+        if should_flush:
+            chunks.append((current_indexes, current_prompts))
+            current_indexes = []
+            current_prompts = []
+            current_bytes = 0
+
+        current_indexes.append(idx)
+        current_prompts.append(prompt)
+        current_bytes += prompt_size
+
+    if current_prompts:
+        chunks.append((current_indexes, current_prompts))
+    return chunks
+
+
+def _safe_gcp_label_value(value: str) -> str:
+    import hashlib
+    import re
+
+    original = str(value or "").lower()
+    clean = re.sub(r"[^a-z0-9_-]", "_", original).strip("_-")[:63].strip("_-")
+    if clean:
+        return clean
+    return f"v-{hashlib.sha1(str(value).encode('utf-8')).hexdigest()[:12]}"
+
+
+def _safe_gcp_label_key(value: str) -> str:
+    import re
+
+    clean = re.sub(r"[^a-z0-9_-]", "_", str(value or "").lower()).strip("_-")[:63].strip("_-")
+    if not clean or not re.match(r"^[a-z]", clean):
+        clean = f"k_{clean}" if clean else "k_label"
+    return clean[:63].strip("_-") or "k_label"
+
+
+def _sanitize_gcp_labels(labels: dict = None) -> dict:
+    if not labels:
+        return {}
+    job_labels = {}
+    for key, value in labels.items():
+        clean_key = _safe_gcp_label_key(key)
+        clean_val = _safe_gcp_label_value(value)
+        if clean_key and clean_val:
+            job_labels[clean_key] = clean_val
+    return job_labels
+
+
+def _safe_vertex_display_name(run_id: str = "", chunk_suffix: str = "", timestamp: str = "") -> str:
+    base_id = (run_id or "batch")[:8]
+    suffix = chunk_suffix.replace("_", "-") if chunk_suffix else ""
+    name = f"mgr-{base_id}{suffix}-{timestamp}"
+    return name[:120]
+
+
+def _vertex_batch_location_for_model(model: str, configured_location: str = "") -> str:
+    model_lower = (model or "").lower()
+    location = configured_location or "us-central1"
+    if "gemini-3" in model_lower:
+        return "global"
+    return location
+
+
+def _strict_google_cost_tracking_enabled() -> bool:
+    """Strict mode: a Google run must be attributable by run_id in Billing Export."""
+    return os.getenv("STRICT_GOOGLE_COST_TRACKING", "true").lower() not in ("0", "false", "no", "off")
+
+
+def _block_google_direct_for_cost_tracking() -> bool:
+    """Optional safety switch for users who want to forbid Google direct calls entirely."""
+    return os.getenv("BLOCK_GOOGLE_DIRECT_FOR_COST_TRACKING", "false").lower() in ("1", "true", "yes", "on")
+
+
+def _gemini_cache_enabled() -> bool:
+    """Explicit Gemini cache is opt-in because it can increase real cost for small/verbose runs."""
+    return os.getenv("ENABLE_GEMINI_CACHE", "false").lower() in ("1", "true", "yes", "on")
+
+
+def _has_run_label(labels: dict = None) -> bool:
+    return bool((labels and labels.get("run_id")) or os.getenv("RUN_ID"))
+
+
+def _enforce_no_google_direct(provider: str, labels: dict = None):
+    if _block_google_direct_for_cost_tracking() and _has_run_label(labels) and provider in ("gemini", "vertex"):
+        raise EngineError(
+            "COST_TRACKING_REQUIRES_BATCH: Google labels لا تظهر في فواتير التشغيل الفوري. "
+            "هذا الرن مضبوط على منع Google direct صراحة. استخدم batch/vertex فقط أو أوقف BLOCK_GOOGLE_DIRECT_FOR_COST_TRACKING.",
+            code="COST_TRACKING_REQUIRES_BATCH",
+        )
+
+
 # ========== تحديد مفتاح API من المزود ==========
 
 def _get_api_key_for_provider(provider: str) -> str:
@@ -393,6 +548,11 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
     prompt = _check_prompt(prompt)
     model = _check_model(model)
     provider = detect_provider(model)
+    thinking_budget, thinking_level = _apply_ui_thinking_override(thinking_budget, thinking_level)
+    _enforce_no_google_direct(provider, labels)
+    if cache_content and not _gemini_cache_enabled():
+        log("  [cache] OFF: ENABLE_GEMINI_CACHE is not enabled")
+        cache_content = None
 
     # Vertex AI مش بيحتاج API key - بيستخدم Google Cloud credentials
     api_key = None if provider == "vertex" else _get_api_key_for_provider(provider)
@@ -411,7 +571,7 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
             # استخرج اسم الموديل الفعلي (بعد "vertex:")
             actual_model = model.split(":", 1)[1] if ":" in model else model
             result_tuple = _retry_call(
-                lambda: _generate_vertex(prompt, actual_model, system_prompt, temperature, max_tokens),
+                lambda: _generate_vertex(prompt, actual_model, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, labels=labels, cache_content=cache_content),
                 max_retries=3, base_delay=3.0, description=f"Vertex AI {actual_model}"
             )
         elif provider == "openai":
@@ -464,6 +624,7 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
 # ========== Gemini Explicit Cache Management ==========
 import hashlib as _hashlib
 _GEMINI_CACHE_MAP = {}  # {(model, content_hash): cache_name} — process-level reuse
+_GEMINI_CACHE_LOCK = threading.Lock()
 
 
 def _get_or_create_gemini_cache(client, model: str, content: str, ttl_seconds: int = 3600):
@@ -494,31 +655,90 @@ def _get_or_create_gemini_cache(client, model: str, content: str, ttl_seconds: i
     h = _hashlib.md5(f"{model}:{content}".encode('utf-8')).hexdigest()
     map_key = (model, h)
 
-    # حاول استخدم cache موجود
-    if map_key in _GEMINI_CACHE_MAP:
-        cache_name = _GEMINI_CACHE_MAP[map_key]
-        try:
-            client.caches.get(name=cache_name)
-            log(f"  [cache] reusing {cache_name[-12:]} (hit)")
-            return cache_name
-        except Exception:
-            del _GEMINI_CACHE_MAP[map_key]
+    with _GEMINI_CACHE_LOCK:
+        # حاول استخدم cache موجود
+        if map_key in _GEMINI_CACHE_MAP:
+            cache_name = _GEMINI_CACHE_MAP[map_key]
+            try:
+                client.caches.get(name=cache_name)
+                log(f"  [cache] reusing {cache_name[-12:]} (hit)")
+                return cache_name
+            except Exception:
+                del _GEMINI_CACHE_MAP[map_key]
 
-    # أنشئ cache جديد
-    try:
-        cache = client.caches.create(
-            model=model,
-            config=types.CreateCachedContentConfig(
-                contents=[content],
-                ttl=f'{ttl_seconds}s',
+        # أنشئ cache جديد
+        try:
+            cache = client.caches.create(
+                model=model,
+                config=types.CreateCachedContentConfig(
+                    contents=[content],
+                    ttl=f'{ttl_seconds}s',
+                )
             )
-        )
-        _GEMINI_CACHE_MAP[map_key] = cache.name
-        log(f"  [cache] created {cache.name[-12:]} ({token_count} توكن، ttl={ttl_seconds}s)")
-        return cache.name
-    except Exception as e:
-        log(f"  [cache] FAILED to create: {str(e)[:200]}")
+            _GEMINI_CACHE_MAP[map_key] = cache.name
+            log(f"  [cache] created {cache.name[-12:]} ({token_count} توكن، ttl={ttl_seconds}s)")
+            return cache.name
+        except Exception as e:
+            log(f"  [cache] FAILED to create: {str(e)[:200]}")
+            return None
+
+
+def _make_vertex_client():
+    """Create a Google Gen AI client that talks to Vertex AI."""
+    import json
+    import tempfile
+    from google import genai
+
+    project_id = (
+        os.getenv("GOOGLE_QUOTA_PROJECT")
+        or os.getenv("VERTEX_PROJECT_ID")
+        or os.getenv("GOOGLE_CLOUD_PROJECT")
+        or ""
+    )
+    if not project_id:
+        raise ValueError("GOOGLE_QUOTA_PROJECT/VERTEX_PROJECT_ID غير محدد في .env")
+
+    location = os.getenv("VERTEX_GENERATION_LOCATION") or os.getenv("GOOGLE_CLOUD_LOCATION") or "global"
+
+    creds = {
+        "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
+        "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
+        "refresh_token": os.getenv("GOOGLE_REFRESH_TOKEN", ""),
+        "quota_project_id": project_id,
+        "type": "authorized_user",
+        "universe_domain": "googleapis.com",
+    }
+    if creds["client_id"] and creds["client_secret"] and creds["refresh_token"]:
+        creds_file = os.path.join(tempfile.gettempdir(), "gcp_creds_generate.json")
+        with open(creds_file, "w") as f:
+            json.dump(creds, f)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_file
+    elif not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        raise ValueError("بيانات اعتماد Vertex AI ناقصة. تأكد من GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN")
+
+    return genai.Client(vertexai=True, project=project_id, location=location), project_id, location
+
+
+def ensure_gemini_cache(model: str, cache_content: str, ttl_seconds: int = 3600):
+    """Pre-create Gemini explicit cache before parallel direct calls."""
+    if not _gemini_cache_enabled():
+        log("  [cache] OFF: ENABLE_GEMINI_CACHE is not enabled")
         return None
+    if not cache_content or len(cache_content) <= 4000:
+        return None
+    provider = detect_provider(model)
+    _enforce_no_google_direct(provider, {"run_id": os.getenv("RUN_ID")} if os.getenv("RUN_ID") else None)
+    if provider == "gemini":
+        from google import genai
+
+        api_key = _get_api_key_for_provider("gemini")
+        client = genai.Client(api_key=api_key)
+        return _get_or_create_gemini_cache(client, model, cache_content, ttl_seconds)
+    if provider == "vertex":
+        client, _, _ = _make_vertex_client()
+        actual_model = model.split(":", 1)[1] if ":" in model else model
+        return _get_or_create_gemini_cache(client, actual_model, cache_content, ttl_seconds)
+    return None
 
 
 def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None, labels: dict = None, cache_content: str = None) -> str:
@@ -543,25 +763,35 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
                 prompt = prompt[len(cache_content):].lstrip()
                 log(f"  [cache] stripped cached prefix; remaining prompt: {len(prompt)} chars")
 
-    # Custom Metadata Labels — مدعوم في Vertex/Batch فقط، مش في Direct Gemini API
-    # ملاحظة: محاولة إضافتها هنا بترجع 400 — لذلك نتخطاها
+    # Gemini Developer API rejects billing labels at request time.
+    # Use the Vertex AI path ("vertex:gemini-*") when BigQuery label attribution is required.
+    clean_labels = {}
+
     # تحكم في التفكير — thinking_budget=0 له الأولوية القصوى (إلغاء التفكير)
-    is_gemini_3 = any(x in model for x in ["gemini-3", "gemini-3.0", "gemini-3.1"])
+    is_gemini_3 = _is_gemini_3_model(model)
     if thinking_budget == 0:
         # إلغاء التفكير تماماً — Gemini 3.x يستخدم "none"، الباقي thinking_budget=0
         if is_gemini_3:
-            config_params["thinking_config"] = types.ThinkingConfig(thinking_level="none")
-            log(f"  [thinking] OFF (thinking_level=none for Gemini 3.x)")
+            gemini_level = _gemini_3_thinking_level(model, "none")
+            if gemini_level:
+                config_params["thinking_config"] = types.ThinkingConfig(thinking_level=gemini_level)
+                log(f"  [thinking] Gemini 3 uses closest no-thinking level: {gemini_level}")
+            else:
+                log("  [thinking] Gemini 3 model does not support no-thinking; not forcing LOW")
         else:
             config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
             log(f"  [thinking] OFF (thinking_budget=0)")
     elif thinking_level and is_gemini_3:
-        config_params["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
+        gemini_level = _gemini_3_thinking_level(model, thinking_level)
+        if gemini_level:
+            config_params["thinking_config"] = types.ThinkingConfig(thinking_level=gemini_level)
+        else:
+            log("  [thinking] Gemini 3 model does not support no-thinking; not forcing LOW")
     elif thinking_budget is not None:
         config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
     elif thinking_level and not is_gemini_3:
         # fallback: حوّل thinking_level لـ thinking_budget للموديلات القديمة
-        level_to_budget = {"low": 1024, "medium": 8192, "high": 24576}
+        level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576}
         budget = level_to_budget.get(thinking_level.lower(), 1024)
         config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
     config = types.GenerateContentConfig(**config_params)
@@ -570,11 +800,27 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
     if system_prompt and not cached_name:
         config.system_instruction = system_prompt
 
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=config,
-    )
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=config,
+        )
+    except Exception as e:
+        # احتياطي: لو موديل/endpoint قديم رفض labels، لا نفشل التشغيل بالكامل.
+        if clean_labels and "label" in str(e).lower():
+            log(f"  [labels] Direct labels rejected; retrying without labels: {str(e)[:160]}")
+            config_params.pop("labels", None)
+            config = types.GenerateContentConfig(**config_params)
+            if system_prompt and not cached_name:
+                config.system_instruction = system_prompt
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=config,
+            )
+        else:
+            raise
 
     if not response or not response.text:
         raise ValueError("Gemini returned empty response")
@@ -634,7 +880,7 @@ def _generate_openai(prompt: str, model: str, api_key: str, system_prompt: str, 
         raise ValueError("OpenAI returned empty response")
 
     # استخراج التوكنز
-    _token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
+    _token_usage = {"input": 0, "output": 0, "thinking": 0, "cached": 0, "total": 0}
     if hasattr(response, 'usage') and response.usage:
         _token_usage["input"] = getattr(response.usage, 'prompt_tokens', 0) or 0
         _token_usage["output"] = getattr(response.usage, 'completion_tokens', 0) or 0
@@ -664,7 +910,7 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
     # Extended thinking — Sonnet 4.6
     # نستخدم enabled mode بـ budget محدد (لا adaptive) لأن adaptive بيستهلك كل max_tokens المتاح
     # القاعدة الذهبية: max_tokens = budget + مساحة output كافية (لا تتجاوز 16K بدون داعي)
-    if thinking_level:
+    if thinking_level and thinking_level.lower() != "none":
         level_map = {"low": 2048, "medium": 5000, "high": 10000}
         budget = level_map.get(thinking_level.lower(), 5000)
         # نضمن مساحة output كافية بعد thinking (4K توكن على الأقل)
@@ -702,7 +948,7 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
         log(f"  [debug] empty text — stop_reason={stop_reason} blocks={block_types}")
         raise ValueError(f"Claude returned empty response (stop_reason={stop_reason}, blocks={block_types})")
 
-    _token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
+    _token_usage = {"input": 0, "output": 0, "thinking": 0, "cached": 0, "total": 0}
     if hasattr(message, 'usage') and message.usage:
         _token_usage["input"] = getattr(message.usage, 'input_tokens', 0) or 0
         _token_usage["output"] = getattr(message.usage, 'output_tokens', 0) or 0
@@ -743,7 +989,7 @@ def _generate_glm(prompt: str, model: str, api_key: str, system_prompt: str, tem
         raise ValueError("GLM returned empty response")
 
     # استخراج التوكنز
-    _token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
+    _token_usage = {"input": 0, "output": 0, "thinking": 0, "cached": 0, "total": 0}
     usage = data.get("usage", {})
     if usage:
         _token_usage["input"] = usage.get("prompt_tokens", 0)
@@ -754,7 +1000,7 @@ def _generate_glm(prompt: str, model: str, api_key: str, system_prompt: str, tem
     return data["choices"][0]["message"]["content"], _token_usage
 
 
-def _generate_vertex(prompt: str, model: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+def _generate_vertex(prompt: str, model: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None, labels: dict = None, cache_content: str = None) -> str:
     """ربط Vertex AI لتوليد النصوص (من الوثيقة - طريقة 6)"""
     import json
     import tempfile
@@ -766,7 +1012,7 @@ def _generate_vertex(prompt: str, model: str, system_prompt: str, temperature: f
     if not project_id:
         raise ValueError("GOOGLE_QUOTA_PROJECT غير محدد في .env")
 
-    location = os.getenv("GOOGLE_LOCATION", "europe-west1")
+    location = os.getenv("VERTEX_GENERATION_LOCATION") or os.getenv("GOOGLE_CLOUD_LOCATION") or "global"
 
     # إعداد بيانات الاعتماد
     creds = {
@@ -796,8 +1042,46 @@ def _generate_vertex(prompt: str, model: str, system_prompt: str, temperature: f
     config_params = {"temperature": temperature}
     if max_tokens:
         config_params["max_output_tokens"] = max_tokens
+
+    cached_name = None
+    if cache_content and len(cache_content) > 4000:
+        cached_name = _get_or_create_gemini_cache(client, model, cache_content)
+        if cached_name:
+            config_params["cached_content"] = cached_name
+            if prompt.startswith(cache_content):
+                prompt = prompt[len(cache_content):].lstrip()
+                log(f"  [cache] stripped cached prefix; remaining prompt: {len(prompt)} chars")
+
+    clean_labels = _build_clean_labels(labels)
+    if clean_labels:
+        config_params["labels"] = clean_labels
+        log(f"  [labels] Vertex Direct Labels: {clean_labels}")
+
+    is_gemini_3 = _is_gemini_3_model(model)
+    if thinking_budget == 0 and is_gemini_3:
+        gemini_level = _gemini_3_thinking_level(model, "none")
+        if gemini_level:
+            config_params["thinking_config"] = types.ThinkingConfig(thinking_level=gemini_level)
+            log(f"  [thinking] Gemini 3 uses closest no-thinking level: {gemini_level}")
+        else:
+            log("  [thinking] Gemini 3 model does not support no-thinking; not forcing LOW")
+    elif thinking_budget == 0:
+        config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        log("  [thinking] OFF (thinking_budget=0)")
+    elif thinking_level and is_gemini_3:
+        gemini_level = _gemini_3_thinking_level(model, thinking_level)
+        if gemini_level:
+            config_params["thinking_config"] = types.ThinkingConfig(thinking_level=gemini_level)
+        else:
+            log("  [thinking] Gemini 3 model does not support no-thinking; not forcing LOW")
+    elif thinking_budget is not None:
+        config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
+    elif thinking_level and not is_gemini_3:
+        level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576}
+        config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=level_to_budget.get(thinking_level.lower(), 1024))
+
     config = types.GenerateContentConfig(**config_params)
-    if system_prompt:
+    if system_prompt and not cached_name:
         config.system_instruction = system_prompt
 
     # توليد النص
@@ -811,14 +1095,16 @@ def _generate_vertex(prompt: str, model: str, system_prompt: str, temperature: f
         raise ValueError("Vertex AI returned empty response")
 
     # استخراج التوكنز
-    _token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
+    _token_usage = {"input": 0, "output": 0, "thinking": 0, "cached": 0, "total": 0}
     if hasattr(response, 'usage_metadata') and response.usage_metadata:
         um = response.usage_metadata
         _token_usage["input"] = getattr(um, 'prompt_token_count', 0) or 0
         _token_usage["output"] = getattr(um, 'candidates_token_count', 0) or 0
         _token_usage["thinking"] = getattr(um, 'thoughts_token_count', 0) or 0
+        _token_usage["cached"] = getattr(um, 'cached_content_token_count', 0) or 0
         _token_usage["total"] = getattr(um, 'total_token_count', 0) or 0
-        log(f"  [tokens] input={_token_usage['input']} output={_token_usage['output']} thinking={_token_usage['thinking']} total={_token_usage['total']}")
+        cached_str = f" cached={_token_usage['cached']}" if _token_usage['cached'] else ""
+        log(f"  [tokens] input={_token_usage['input']} output={_token_usage['output']} thinking={_token_usage['thinking']}{cached_str} total={_token_usage['total']}")
 
     return response.text, _token_usage
 
@@ -875,15 +1161,37 @@ def _setup_gcs_credentials(project_id: str = None) -> tuple:
 
 
 def _upload_to_gcs(bucket_name: str, blob_name: str, content: str) -> str:
-    """رفع محتوى نصي إلى GCS وإرجاع gs:// URI"""
+    """رفع محتوى نصي إلى GCS وإرجاع gs:// URI — يدعم ملفات كبيرة حتى 500MB+"""
+    import io
     from google.cloud import storage
 
     project_id = os.getenv("GOOGLE_QUOTA_PROJECT", "")
     storage_client = storage.Client(project=project_id)
     bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(blob_name)
-    blob.upload_from_string(content, content_type='application/json')
 
+    content_bytes = content.encode('utf-8')
+    content_size_mb = len(content_bytes) / (1024 * 1024)
+
+    # timeout ديناميكي: 300 ثانية كحد أدنى + 60 ثانية لكل 10MB
+    upload_timeout = max(300, int(content_size_mb / 10 * 60) + 300)
+
+    if content_size_mb > 5:
+        # Resumable Upload بـ chunks 5MB — أفضل للملفات الكبيرة (> 5MB)
+        # يتعامل مع انقطاعات الاتصال تلقائياً
+        blob = bucket.blob(blob_name, chunk_size=5 * 1024 * 1024)
+        log(f"  [GCS] رفع ملف كبير: {content_size_mb:.1f} MB (resumable, timeout={upload_timeout}s)")
+        blob.upload_from_file(
+            io.BytesIO(content_bytes),
+            content_type='application/json',
+            size=len(content_bytes),
+            timeout=upload_timeout,
+        )
+    else:
+        # رفع بسيط للملفات الصغيرة (< 5MB)
+        blob = bucket.blob(blob_name)
+        blob.upload_from_string(content, content_type='application/json', timeout=upload_timeout)
+
+    log(f"  [GCS] ✅ تم الرفع: {content_size_mb:.1f} MB → gs://{bucket_name}/{blob_name}")
     return f"gs://{bucket_name}/{blob_name}"
 
 
@@ -926,7 +1234,7 @@ def _download_from_gcs(gcs_uri: str) -> str:
 
 
 def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None, labels: dict = None) -> BatchInfo:
-    """إرسال دفعة عبر Gemini Batch API (يحتاج GCS)"""
+    """إرسال دفعة عبر Gemini Batch API (يحتاج GCS) — يدعم حتى 1000+ موضوع"""
     import json
     from google import genai
 
@@ -945,13 +1253,15 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
             }
         }
         # تحكم في التفكير — thinking_level لـ 3.x، thinking_budget لـ 2.x
-        is_gemini_3 = any(x in model for x in ["gemini-3", "gemini-3.0", "gemini-3.1"])
+        is_gemini_3 = _is_gemini_3_model(model)
         if thinking_level and is_gemini_3:
-            request["generationConfig"]["thinkingConfig"] = {"thinkingLevel": thinking_level.upper()}
+            gemini_level = _gemini_3_thinking_level(model, thinking_level)
+            if gemini_level:
+                request["generationConfig"]["thinkingConfig"] = {"thinkingLevel": gemini_level.upper()}
         elif thinking_budget is not None:
             request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": thinking_budget}
         elif thinking_level and not is_gemini_3:
-            level_to_budget = {"low": 1024, "medium": 8192, "high": 24576}
+            level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576}
             request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": level_to_budget.get(thinking_level.lower(), 1024)}
         if system_prompt:
             request["systemInstruction"] = {"parts": [{"text": system_prompt}]}
@@ -960,14 +1270,19 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
         jsonl_lines.append(json.dumps({"request": request}, ensure_ascii=False))
 
     jsonl_content = "\n".join(jsonl_lines)
+    payload_mb = len(jsonl_content.encode('utf-8')) / (1024 * 1024)
+    log(f"  [payload] {len(prompts)} طلب | حجم JSONL: {payload_mb:.1f} MB")
 
     # رفع JSONL إلى GCS — مع run_id في المسار للتتبع
+    # الرفع يتم مرة واحدة فقط قبل حلقة الـ retry لإنشاء الـ Job
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     _rid = (labels or {}).get("run_id", "")
+    _chunk = (labels or {}).get("chunk", "")
+    _chunk_suffix = f"_part{_chunk}" if _chunk else ""
     if _rid:
-        input_blob_name = f"batch_input/{_rid}/gemini_{timestamp}.jsonl"
+        input_blob_name = f"batch_input/{_rid}/gemini_{timestamp}{_chunk_suffix}.jsonl"
     else:
-        input_blob_name = f"batch_input/gemini_{timestamp}.jsonl"
+        input_blob_name = f"batch_input/gemini_{timestamp}{_chunk_suffix}.jsonl"
     input_uri = _upload_to_gcs(bucket_name, input_blob_name, jsonl_content)
 
     log(f"  رفع الطلبات إلى: {input_uri}")
@@ -978,9 +1293,9 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
     recipe = (labels or {}).get("recipe", "")
     channel = (labels or {}).get("channel", "")
     if run_id:
-        job_name = f"mgr-{run_id}-{recipe[:20]}-{timestamp}" if recipe else f"mgr-{run_id}-{timestamp}"
+        job_name = f"mgr-{run_id}{_chunk_suffix}-{recipe[:20]}-{timestamp}" if recipe else f"mgr-{run_id}{_chunk_suffix}-{timestamp}"
     else:
-        job_name = f"mgr-batch-{timestamp}"
+        job_name = f"mgr-batch{_chunk_suffix}-{timestamp}"
     if run_id:
         log(f"  [RUN_ID] ✅ Run ID الكامل: {run_id}")
         log(f"  [RUN_ID] ✅ display_name في Google Cloud: {job_name}")
@@ -988,16 +1303,9 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
     last_err = None
 
     # تنظيف Labels حسب شروط Google Cloud (أحرف صغيرة، أرقام، شرطات فقط، max 63 chars)
-    job_labels = {}
-    if labels:
-        import re as _re
-        for k, v in labels.items():
-            clean_key = _re.sub(r'[^a-z0-9_-]', '_', str(k).lower())[:63]
-            clean_val = _re.sub(r'[^a-z0-9_-]', '_', str(v).lower())[:63]
-            if clean_key and clean_val:
-                job_labels[clean_key] = clean_val
-        if job_labels:
-            log(f"  [labels] Gemini Batch Labels: {job_labels}")
+    job_labels = _sanitize_gcp_labels(labels)
+    if job_labels:
+        log(f"  [labels] Gemini Batch Labels: {job_labels}")
 
     for loc in locations_to_try:
         try:
@@ -1085,13 +1393,15 @@ def _batch_send_gemini_rest(prompts: list, model: str, api_key: str, system_prom
                 "maxOutputTokens": max_tokens,
             }
         }
-        is_gemini_3 = any(x in model for x in ["gemini-3", "gemini-3.0", "gemini-3.1"])
+        is_gemini_3 = _is_gemini_3_model(model)
         if thinking_level and is_gemini_3:
-            request["generationConfig"]["thinkingConfig"] = {"thinkingLevel": thinking_level.upper()}
+            gemini_level = _gemini_3_thinking_level(model, thinking_level)
+            if gemini_level:
+                request["generationConfig"]["thinkingConfig"] = {"thinkingLevel": gemini_level.upper()}
         elif thinking_budget is not None:
             request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": thinking_budget}
         elif thinking_level and not is_gemini_3:
-            level_to_budget = {"low": 1024, "medium": 8192, "high": 24576}
+            level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576}
             request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": level_to_budget.get(thinking_level.lower(), 1024)}
         if system_prompt:
             request["systemInstruction"] = {"parts": [{"text": system_prompt}]}
@@ -1116,7 +1426,9 @@ def _batch_send_gemini_rest(prompts: list, model: str, api_key: str, system_prom
         }
     }
 
-    response = httpx.post(url, headers=headers, json=payload, timeout=120.0)
+    # timeout ديناميكي حسب حجم الـ payload (300s كحد أدنى + 60s لكل 100 طلب)
+    rest_timeout = max(300, len(requests) * 0.6 + 300)
+    response = httpx.post(url, headers=headers, json=payload, timeout=rest_timeout)
     response.raise_for_status()
     job_name = response.json().get('name', '')
 
@@ -1135,16 +1447,60 @@ def _batch_send_gemini_rest(prompts: list, model: str, api_key: str, system_prom
     return batch_info
 
 
+def _create_vertex_batch_job_rest(project_id: str, location: str, model: str, input_uri: str, output_uri: str, display_name: str, labels: dict = None) -> dict:
+    """Create Vertex batch job through REST so Google returns the real API error."""
+    import requests
+    import google.auth
+    from google.auth.transport.requests import Request
+
+    credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    credentials.refresh(Request())
+
+    endpoint_prefix = "" if location == "global" else f"{location}-"
+    url = f"https://{endpoint_prefix}aiplatform.googleapis.com/v1/projects/{project_id}/locations/{location}/batchPredictionJobs"
+    payload = {
+        "displayName": display_name,
+        "model": f"publishers/google/models/{model}",
+        "inputConfig": {
+            "instancesFormat": "jsonl",
+            "gcsSource": {"uris": [input_uri]},
+        },
+        "outputConfig": {
+            "predictionsFormat": "jsonl",
+            "gcsDestination": {"outputUriPrefix": output_uri},
+        },
+    }
+    if labels:
+        payload["labels"] = labels
+
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {credentials.token}",
+            "Content-Type": "application/json; charset=utf-8",
+            "x-goog-user-project": project_id,
+        },
+        json=payload,
+        timeout=180,
+    )
+    if response.status_code >= 400:
+        raise EngineError(
+            f"Vertex Batch create failed HTTP {response.status_code}: {response.text[:1200]}",
+            code="BATCH_CREATE_FAILED",
+        )
+    return response.json()
+
+
 def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None, labels: dict = None) -> BatchInfo:
     """إرسال دفعة عبر Vertex AI Batch Prediction (من الوثيقة - طريقة 7)"""
     import json
-    from google.cloud import aiplatform
 
     # إعداد GCS
     project_id, location, bucket_name = _setup_gcs_credentials()
-
-    # تهيئة Vertex AI
-    aiplatform.init(project=project_id, location=location)
+    configured_location = location
+    location = _vertex_batch_location_for_model(model, configured_location)
+    if location != configured_location:
+        log(f"  [vertex-location] {model}: using {location} instead of {configured_location}")
 
     # بناء JSONL
     jsonl_lines = []
@@ -1156,13 +1512,15 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
                 "maxOutputTokens": max_tokens,
             }
         }
-        is_gemini_3 = any(x in model for x in ["gemini-3", "gemini-3.0", "gemini-3.1"])
+        is_gemini_3 = _is_gemini_3_model(model)
         if thinking_level and is_gemini_3:
-            request["generationConfig"]["thinkingConfig"] = {"thinkingLevel": thinking_level.upper()}
+            gemini_level = _gemini_3_thinking_level(model, thinking_level)
+            if gemini_level:
+                request["generationConfig"]["thinkingConfig"] = {"thinkingLevel": gemini_level.upper()}
         elif thinking_budget is not None:
             request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": thinking_budget}
         elif thinking_level and not is_gemini_3:
-            level_to_budget = {"low": 1024, "medium": 8192, "high": 24576}
+            level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576}
             request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": level_to_budget.get(thinking_level.lower(), 1024)}
         if system_prompt:
             request["systemInstruction"] = {"parts": [{"text": system_prompt}]}
@@ -1174,12 +1532,14 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
     # رفع إلى GCS — مع run_id في المسار للتتبع
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     _pre_rid = (labels or {}).get("run_id", "")
+    _chunk = (labels or {}).get("chunk", "")
+    _chunk_suffix = f"_part{_chunk}" if _chunk else ""
     if _pre_rid:
-        input_blob_name = f"batch_input/{_pre_rid}/vertex_{timestamp}.jsonl"
-        output_uri = f"gs://{bucket_name}/batch_output/{_pre_rid}/vertex_{timestamp}/"
+        input_blob_name = f"batch_input/{_pre_rid}/vertex_{timestamp}{_chunk_suffix}.jsonl"
+        output_uri = f"gs://{bucket_name}/batch_output/{_pre_rid}/vertex_{timestamp}{_chunk_suffix}/"
     else:
-        input_blob_name = f"batch_input/vertex_{timestamp}.jsonl"
-        output_uri = f"gs://{bucket_name}/batch_output/vertex_{timestamp}/"
+        input_blob_name = f"batch_input/vertex_{timestamp}{_chunk_suffix}.jsonl"
+        output_uri = f"gs://{bucket_name}/batch_output/vertex_{timestamp}{_chunk_suffix}/"
     input_uri = _upload_to_gcs(bucket_name, input_blob_name, jsonl_content)
 
     log(f"  رفع الطلبات إلى: {input_uri}")
@@ -1187,58 +1547,54 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
     # إنشاء مهمة Batch مع labels للتتبع في Google Cloud Billing
     _run_id = (labels or {}).get("run_id", "")
     _recipe = (labels or {}).get("recipe", "")
-    if _run_id:
-        job_display_name = f"mgr-{_run_id}-{_recipe[:20]}-{timestamp}" if _recipe else f"mgr-{_run_id}-{timestamp}"
-    else:
-        job_display_name = f"mgr-vertex-{timestamp}"
-    job_labels = {}
-    if labels:
-        # تنظيف Labels حسب شروط Google Cloud (أحرف صغيرة، أرقام، شرطات سفلية فقط، max 63 chars)
-        import re as _re
-        for k, v in labels.items():
-            clean_key = _re.sub(r'[^a-z0-9_-]', '_', str(k).lower())[:63]
-            clean_val = _re.sub(r'[^a-z0-9_-]', '_', str(v).lower())[:63]
-            if clean_key and clean_val:
-                job_labels[clean_key] = clean_val
-        if job_labels:
-            log(f"  [labels] Vertex Batch Labels: {job_labels}")
+    job_display_name = _safe_vertex_display_name(_run_id, _chunk_suffix, timestamp)
+    job_labels = _sanitize_gcp_labels(labels)
+    if job_labels:
+        log(f"  [labels] Vertex Batch Labels: {job_labels}")
     if _run_id:
         log(f"  [RUN_ID] ✅ Run ID الكامل: {_run_id}")
         log(f"  [RUN_ID] ✅ display_name في Google Cloud: {job_display_name}")
         log(f"  [RUN_ID] ✅ Labels: {job_labels}")
 
-    batch_job = aiplatform.BatchPredictionJob.create(
-        job_display_name=job_display_name,
-        model_name=f"publishers/google/models/{model}",
-        instances_format="jsonl",
-        predictions_format="jsonl",
-        gcs_source=input_uri,
-        gcs_destination_prefix=output_uri,
-        sync=False,
+    batch_job = _create_vertex_batch_job_rest(
+        project_id=project_id,
+        location=location,
+        model=model,
+        input_uri=input_uri,
+        output_uri=output_uri,
+        display_name=job_display_name,
         labels=job_labels if job_labels else None,
     )
 
     batch_info = BatchInfo(
         provider="vertex",
         model=model,
-        job_id=batch_job.resource_name,
-        job_name=batch_job.display_name,
+        job_id=batch_job.get("name", ""),
+        job_name=batch_job.get("displayName", job_display_name),
         item_order=list(range(len(prompts))),
         items_count=len(prompts),
         created_at=datetime.now().isoformat(),
         status="submitted",
-        extra={"gcs_output": output_uri, "input_uri": input_uri}
+        extra={
+            "gcs_output": output_uri,
+            "input_uri": input_uri,
+            "location": location,
+            "method": "vertex_rest",
+            "display_name": job_display_name,
+            "labels": labels or {},
+            "job_labels": job_labels,
+        }
     )
 
     return batch_info
 
 
-def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = 8192, save_path: str = None, method: str = "sdk", thinking_budget: int = None, thinking_level: str = None, labels: dict = None) -> EngineResult:
+def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = 8192, save_path: str = None, method: str = "vertex", thinking_budget: int = None, thinking_level: str = None, labels: dict = None) -> EngineResult:
     """
     الدالة 2: إرسال دفعة برومبتات
     تدعم: Gemini Batch (SDK/REST), Claude Batch, Vertex AI Batch
 
-    method: "sdk" (افتراضي), "rest" (Gemini REST API), "vertex" (Vertex AI Batch Prediction)
+    method: "vertex" (افتراضي لأنه يدعم Billing labels), "sdk", "rest"
     """
     start_time = time.time()
 
@@ -1246,40 +1602,89 @@ def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: 
     prompts = _check_batch_prompts(prompts)
     model = _check_model(model)
     provider = detect_provider(model)
+    thinking_budget, thinking_level = _apply_ui_thinking_override(thinking_budget, thinking_level)
+
+    if _strict_google_cost_tracking_enabled() and _has_run_label(labels) and provider in ("gemini", "vertex") and method != "vertex":
+        log(f"  [cost-tracking] forcing batch method=vertex instead of {method} for run_id={(labels or {}).get('run_id') or os.getenv('RUN_ID')}")
+        method = "vertex"
+    if _strict_google_cost_tracking_enabled() and provider in ("gemini", "vertex") and not _has_run_label(labels):
+        raise EngineError(
+            "COST_TRACKING_MISSING_RUN_ID: Google batch لازم يتبعت ومعاه run_id label عشان نطلع تكلفة مؤكدة لكل رن.",
+            code="COST_TRACKING_MISSING_RUN_ID",
+        )
+    if _strict_google_cost_tracking_enabled() and provider in ("gemini", "vertex") and os.getenv("RUN_ID") and not (labels and labels.get("run_id")):
+        labels = {**(labels or {}), "run_id": os.getenv("RUN_ID")}
 
     # Vertex لا يحتاج API key (سواء بالـ method أو بالـ provider)
     api_key = None if method == "vertex" or provider == "vertex" else _get_api_key_for_provider(provider)
 
     log(f"→ إرسال دفعة | الموديل: {model} | المزود: {provider} | الطريقة: {method} | العدد: {len(prompts)}")
 
-    try:
+    def _send_single_batch(single_prompts, single_labels):
         if provider == "gemini" and method == "sdk":
-            batch_info = _retry_call(
-                lambda: _batch_send_gemini(prompts, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, labels=labels),
+            return _retry_call(
+                lambda: _batch_send_gemini(single_prompts, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, labels=single_labels),
                 max_retries=3, base_delay=3.0, description=f"Gemini Batch SDK {model}"
             )
-        elif provider == "gemini" and method == "rest":
-            batch_info = _retry_call(
-                lambda: _batch_send_gemini_rest(prompts, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level),
+        if provider == "gemini" and method == "rest":
+            return _retry_call(
+                lambda: _batch_send_gemini_rest(single_prompts, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level),
                 max_retries=3, base_delay=3.0, description=f"Gemini Batch REST {model}"
             )
-        elif (provider == "gemini" or provider == "vertex") and method == "vertex":
+        if (provider == "gemini" or provider == "vertex") and method == "vertex":
             # Vertex AI Batch Prediction
             actual_model = model.split(":", 1)[1] if ":" in model else model
-            batch_info = _retry_call(
-                lambda: _batch_send_vertex(prompts, actual_model, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, labels=labels),
+            return _retry_call(
+                lambda: _batch_send_vertex(single_prompts, actual_model, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, labels=single_labels),
                 max_retries=3, base_delay=3.0, description=f"Vertex AI Batch {actual_model}"
             )
-        elif provider == "claude":
-            batch_info = _retry_call(
-                lambda: _batch_send_claude(prompts, model, api_key, system_prompt, temperature, max_tokens),
+        if provider == "claude":
+            return _retry_call(
+                lambda: _batch_send_claude(single_prompts, model, api_key, system_prompt, temperature, max_tokens),
                 max_retries=3, base_delay=3.0, description=f"Claude Batch {model}"
             )
-        else:
-            raise EngineError(
-                f"Batch غير مدعوم للمزود: {provider} بالطريقة: {method}",
-                code="BATCH_NOT_SUPPORTED"
+        raise EngineError(
+            f"Batch غير مدعوم للمزود: {provider} بالطريقة: {method}",
+            code="BATCH_NOT_SUPPORTED"
+        )
+
+    try:
+        chunks = _split_prompts_for_batch(prompts)
+        if len(chunks) > 1:
+            max_requests, max_bytes = _batch_split_limits()
+            log(f"  [auto-split] تقسيم الباتش إلى {len(chunks)} jobs | حد الطلبات/job={max_requests} | حد الحجم/job={max_bytes // (1024 * 1024)}MB")
+            chunk_infos = []
+            for chunk_idx, (global_indexes, chunk_prompts) in enumerate(chunks, start=1):
+                chunk_labels = dict(labels or {})
+                chunk_labels["chunk"] = str(chunk_idx)
+                log(f"  [auto-split] إرسال جزء {chunk_idx}/{len(chunks)}: {len(chunk_prompts)} طلب")
+                chunk_info = _send_single_batch(chunk_prompts, chunk_labels if chunk_labels else None)
+                chunk_info.item_order = list(global_indexes)
+                chunk_infos.append(chunk_info)
+
+            first = chunk_infos[0]
+            batch_info = BatchInfo(
+                provider=first.provider,
+                model=first.model,
+                job_id=f"multi-{len(chunk_infos)}-{first.job_id[:32]}",
+                job_name=f"multi-batch-{len(chunk_infos)}-jobs",
+                item_order=list(range(len(prompts))),
+                items_count=len(prompts),
+                created_at=datetime.now().isoformat(),
+                status="submitted",
+                extra={
+                    "method": "multi",
+                    "labels": labels or {},
+                    "split": {
+                        "chunks": len(chunk_infos),
+                        "max_requests": max_requests,
+                        "max_mb": max_bytes / (1024 * 1024),
+                    },
+                    "chunks": [asdict(c) for c in chunk_infos],
+                },
             )
+        else:
+            batch_info = _send_single_batch(prompts, labels)
 
         # حفظ معلومات الـ Batch
         if save_path:
@@ -1488,7 +1893,7 @@ def _batch_retrieve_gemini_rest(batch_info: BatchInfo, api_key: str) -> list:
         "x-goog-api-key": api_key
     }
 
-    response = httpx.get(batch_url, headers=headers, timeout=60.0)
+    response = httpx.get(batch_url, headers=headers, timeout=300.0)
     response.raise_for_status()
     data = response.json()
 
@@ -1534,6 +1939,31 @@ def _batch_retrieve_gemini_rest(batch_info: BatchInfo, api_key: str) -> list:
     return results
 
 
+def _extract_vertex_batch_response(record: dict):
+    response = record.get("prediction") or record.get("response") or record
+    if not isinstance(response, dict):
+        raise KeyError("response")
+
+    if response.get("error"):
+        raise ValueError(f"response error: {response.get('error')}")
+    if record.get("status") and str(record.get("status")).strip():
+        raise ValueError(f"record status: {record.get('status')}")
+
+    text_parts = []
+    candidates = response.get("candidates") or []
+    for candidate in candidates:
+        content = candidate.get("content", {}) if isinstance(candidate, dict) else {}
+        parts = content.get("parts") or []
+        for part in parts:
+            if isinstance(part, dict) and part.get("text"):
+                text_parts.append(str(part["text"]))
+
+    text = "\n".join(text_parts).strip()
+    if not text:
+        raise KeyError("response.candidates[].content.parts[].text")
+    return text, response.get("usageMetadata", {}) or {}
+
+
 def _batch_retrieve_vertex(batch_info: BatchInfo) -> list:
     """استقبال نتائج دفعة من Vertex AI Batch Prediction (من الوثيقة - طريقة 7)"""
     import json
@@ -1544,6 +1974,7 @@ def _batch_retrieve_vertex(batch_info: BatchInfo) -> list:
     project_id, location, bucket_name = _setup_gcs_credentials()
 
     # تهيئة Vertex AI
+    location = batch_info.extra.get("location", location) if batch_info.extra else location
     aiplatform.init(project=project_id, location=location)
 
     # جلب المهمة
@@ -1583,32 +2014,98 @@ def _batch_retrieve_vertex(batch_info: BatchInfo) -> list:
 
     # قراءة النتائج مع التوكنز
     results = []
+    parse_errors = []
+    total_lines = 0
     token_totals = {"input": 0, "output": 0, "thinking": 0, "total": 0}
     for blob in blobs:
         if blob.name.endswith('.jsonl'):
             content = blob.download_as_text()
             for line in content.strip().split('\n'):
                 if line:
+                    total_lines += 1
                     data = json.loads(line)
                     try:
-                        text = data['prediction']['candidates'][0]['content']['parts'][0]['text']
+                        text, usage = _extract_vertex_batch_response(data)
                         results.append(text)
                         # استخراج التوكنز
-                        usage = data.get('prediction', {}).get('usageMetadata', {})
                         if usage:
                             token_totals["input"] += usage.get('promptTokenCount', 0)
                             token_totals["output"] += usage.get('candidatesTokenCount', 0)
                             token_totals["thinking"] += usage.get('thoughtsTokenCount', 0)
                             token_totals["total"] += usage.get('totalTokenCount', 0)
-                    except (KeyError, IndexError) as e:
-                        log(f"[!] فشل استخراج نتيجة: {str(e)}")
-                        results.append("")
+                    except (KeyError, IndexError, TypeError, ValueError) as e:
+                        sample_keys = ",".join(data.keys()) if isinstance(data, dict) else type(data).__name__
+                        parse_errors.append(f"{str(e)} | keys={sample_keys}")
+
+    if parse_errors:
+        sample = " ; ".join(parse_errors[:3])
+        raise EngineError(
+            f"فشل استخراج {len(parse_errors)} نتيجة من Vertex Batch من أصل {total_lines}. مثال: {sample}",
+            code="BATCH_RESULT_PARSE_FAILED",
+        )
+
+    if not results:
+        raise EngineError(
+            "Vertex Batch اكتمل لكن لم يرجع أي نتائج قابلة للقراءة.",
+            code="BATCH_RESULT_EMPTY",
+        )
 
     if token_totals["total"] > 0:
         log(f"  [tokens] إجمالي Vertex Batch: input={token_totals['input']} output={token_totals['output']} thinking={token_totals['thinking']} total={token_totals['total']}")
     batch_info._token_totals = token_totals
 
     return results
+
+
+def _batch_retrieve_multi(info: BatchInfo, start_time: float) -> EngineResult:
+    chunks = info.extra.get("chunks", []) if info.extra else []
+    if not chunks:
+        raise EngineError("ملف batch_info متعدد الأجزاء لا يحتوي على chunks", code="BATCH_MULTI_EMPTY")
+
+    log(f"  [multi] استقبال باتش مقسم: {len(chunks)} jobs")
+    ordered_results = {}
+    token_usage = {"input": 0, "output": 0, "thinking": 0, "total": 0}
+    not_ready = []
+
+    for idx, chunk_data in enumerate(chunks, start=1):
+        chunk_info = BatchInfo(**chunk_data)
+        try:
+            chunk_result = batch_retrieve(batch_info=chunk_info)
+        except EngineError as e:
+            if e.code == "BATCH_JOB_NOT_READY":
+                not_ready.append(idx)
+                continue
+            raise
+
+        chunk_order = chunk_info.item_order or list(range(len(chunk_result.data or [])))
+        for global_idx, text in zip(chunk_order, chunk_result.data or []):
+            ordered_results[int(global_idx)] = text
+        for key in token_usage:
+            token_usage[key] += (chunk_result.token_usage or {}).get(key, 0) or 0
+        log(f"  [multi] تم استقبال جزء {idx}/{len(chunks)}: {len(chunk_result.data or [])} نتيجة")
+
+    if not_ready:
+        raise EngineError(
+            f"لم تكتمل كل أجزاء الباتش بعد: {not_ready}",
+            code="BATCH_JOB_NOT_READY",
+        )
+
+    results = [ordered_results.get(i, "") for i in range(info.items_count)]
+    if _strict_google_cost_tracking_enabled() and info.provider in ("vertex", "gemini") and (token_usage.get("total") or 0) <= 0:
+        raise EngineError(
+            "Google Batch اكتمل لكن لم يرجع usageMetadata للتكلفة. تم إيقاف الرن حتى لا يظهر بدون رقم تكلفة.",
+            code="BATCH_USAGE_MISSING",
+        )
+    duration = int((time.time() - start_time) * 1000)
+    log(f"<- batch_retrieve multi OK | {len(results)} نتيجة | {duration}ms")
+    return EngineResult(
+        success=True,
+        data=results,
+        model=info.model,
+        provider=info.provider,
+        duration_ms=duration,
+        token_usage=token_usage,
+    )
 
 
 def batch_retrieve(batch_info_path: str = None, batch_info: BatchInfo = None) -> EngineResult:
@@ -1621,6 +2118,9 @@ def batch_retrieve(batch_info_path: str = None, batch_info: BatchInfo = None) ->
     # فحوصات
     info = batch_info or (BatchInfo.load(batch_info_path) if batch_info_path else None)
     info = _check_batch_info(info)
+
+    if info.extra and info.extra.get("chunks"):
+        return _batch_retrieve_multi(info, start_time)
 
     provider = info.provider
     method = info.extra.get('method', 'sdk')  # الطريقة المستخدمة في الإرسال
@@ -1665,6 +2165,11 @@ def batch_retrieve(batch_info_path: str = None, batch_info: BatchInfo = None) ->
 
         # جمع التوكنز من batch_info
         token_usage = getattr(info, '_token_totals', {"input": 0, "output": 0, "thinking": 0, "total": 0})
+        if _strict_google_cost_tracking_enabled() and provider in ("vertex", "gemini") and (token_usage.get("total") or 0) <= 0:
+            raise EngineError(
+                "Google Batch اكتمل لكن لم يرجع usageMetadata للتكلفة. تم إيقاف الرن حتى لا يظهر بدون رقم تكلفة.",
+                code="BATCH_USAGE_MISSING",
+            )
 
         duration = int((time.time() - start_time) * 1000)
         log(f"<- batch_retrieve OK | {len(results)} نتيجة | {duration}ms")
@@ -1935,9 +2440,13 @@ def _tts_vertex_impl(text: str, voice: str, project_id: str, location: str) -> b
     # الاتصال بـ Vertex AI
     client = genai.Client(vertexai=True, project=project_id, location=location)
 
+    # موديل الـ TTS يتحدد من الواجهة (متغير البيئة) — الافتراضي gemini-2.5-pro-tts
+    tts_model = os.getenv("TTS_MODEL", "gemini-2.5-pro-tts").strip() or "gemini-2.5-pro-tts"
+    log(f"  Vertex TTS model: {tts_model}")
+
     # تحويل النص لصوت
     response = client.models.generate_content(
-        model="gemini-2.5-pro-tts",
+        model=tts_model,
         contents=text,
         config=types.GenerateContentConfig(
             response_modalities=["AUDIO"],
@@ -2142,3 +2651,4 @@ def _transcribe_timestamps_impl(audio_file: str, model: str, api_key: str, langu
             })
 
     return words
+

@@ -112,7 +112,9 @@ def create_sandbox_container(run_id: str, code: str, input_folder: str, content_
                 config_obj["_runtime"] = {
                     "execution_mode": os.getenv("EXECUTION_MODE", "instant"),
                     "model_name": os.getenv("MODEL_NAME", ""),
+                    "thinking_level": os.getenv("THINKING_LEVEL", "none"),
                     "tts_provider": os.getenv("TTS_PROVIDER", "vertex"),
+                    "tts_model": os.getenv("TTS_MODEL", "gemini-2.5-pro-tts"),
                     "topic_ids": os.getenv("TOPIC_IDS", ""),
                 }
                 code_with_runtime = json.dumps(config_obj, ensure_ascii=False, indent=2)
@@ -169,10 +171,12 @@ run_pipeline(config)
                         "OUTPUT_DIR": "/mnt/output",
                         "PYTHONUNBUFFERED": "1",
                         "MODEL_NAME": os.getenv("MODEL_NAME", ""),
+                        "THINKING_LEVEL": os.getenv("THINKING_LEVEL", "none"),
                         "CHANNEL_NAME": os.getenv("CHANNEL_NAME", ""),
                         "CHANNEL_ROOT": os.getenv("CHANNEL_ROOT", ""),
                         "RECIPE_OUTPUT_DIR": "/mnt/recipe_output" if _recipe_out_dir else "",
                         "TTS_PROVIDER": os.getenv("TTS_PROVIDER", "vertex"),
+                        "TTS_MODEL": os.getenv("TTS_MODEL", "gemini-2.5-pro-tts"),
                         "TTS_VOICE_ID": _get_api_env().get("TTS_VOICE_ID", "Achird"),
                         "EXECUTION_MODE": os.getenv("EXECUTION_MODE", "instant"),
                         "TOPIC_IDS": os.getenv("TOPIC_IDS", ""),
@@ -300,7 +304,9 @@ run_pipeline(config)
                     "PYTHONUNBUFFERED": "1",
                     # تمرير اسم الموديل المختار من الواجهة
                     "MODEL_NAME": os.getenv("MODEL_NAME", ""),
+                    "THINKING_LEVEL": os.getenv("THINKING_LEVEL", "none"),
                     "TTS_PROVIDER": os.getenv("TTS_PROVIDER", "vertex"),
+                    "TTS_MODEL": os.getenv("TTS_MODEL", "gemini-2.5-pro-tts"),
                     "TTS_VOICE_ID": api_env.get("TTS_VOICE_ID", "Achird"),
                     "EXECUTION_MODE": os.getenv("EXECUTION_MODE", "instant"),
                     "TOPIC_IDS": os.getenv("TOPIC_IDS", ""),

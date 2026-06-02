@@ -758,6 +758,7 @@ async def create_run(run_data: RunCreate, background_tasks: BackgroundTasks, cur
         model_name=run_data.model_name or "gemini-2.5-flash",
         thinking_level=_normalize_thinking_level(run_data.thinking_level),
         tts_provider=run_data.tts_provider or "vertex",
+        tts_model=run_data.tts_model or "gemini-2.5-pro-tts",
         execution_mode=run_data.execution_mode or "instant",
         topic_ids=topic_ids_str,
         content_type=content_type
@@ -961,7 +962,7 @@ def _normalize_thinking_level(value: str | None) -> str:
     return value if value in {"none", "low", "medium", "high"} else "none"
 
 
-def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = None, model_name: str = "gemini-2.5-flash", thinking_level: str = "none", tts_provider: str = "vertex", execution_mode: str = "instant", topic_ids: str = "", content_type: str = "shorts"):
+def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = None, model_name: str = "gemini-2.5-flash", thinking_level: str = "none", tts_provider: str = "vertex", tts_model: str = "gemini-2.5-pro-tts", execution_mode: str = "instant", topic_ids: str = "", content_type: str = "shorts"):
     db = SessionLocal()
     try:
         db_run = db.query(Run).filter(Run.run_id == run_id).first()
@@ -1005,6 +1006,7 @@ def execute_run(run_id: str, code: str, input_folder: str, recipe_name: str = No
             os.environ["MODEL_NAME"] = model_name
             os.environ["THINKING_LEVEL"] = _normalize_thinking_level(thinking_level)
             os.environ["TTS_PROVIDER"] = tts_provider
+            os.environ["TTS_MODEL"] = tts_model
             os.environ["EXECUTION_MODE"] = execution_mode
             os.environ["TOPIC_IDS"] = topic_ids
             os.environ["RUN_ID"] = run_id

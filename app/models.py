@@ -41,7 +41,9 @@ class RunCreate(BaseModel):
     input_folder: str
     recipe_id: Optional[int] = None
     model_name: Optional[str] = "gemini-2.5-flash"
+    thinking_level: Optional[str] = "none"
     tts_provider: Optional[str] = "vertex"
+    tts_model: Optional[str] = "gemini-2.5-pro-tts"
     execution_mode: Optional[str] = "instant"
     topic_ids: Optional[List[int]] = None
     content_type: str = "shorts"

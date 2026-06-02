@@ -21,10 +21,61 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from engine import generate, tts, transcribe, transcribe_with_timestamps, batch_send, batch_retrieve, log, EngineError, BatchInfo, detect_provider
+from engine import generate, tts, transcribe, transcribe_with_timestamps, batch_send, batch_retrieve, log, EngineError, BatchInfo, detect_provider, ensure_gemini_cache
 
 
 # ========== PipelineContext ==========
+
+def _send_run_id_from_batch_info(batch_info_path: str):
+    def _from_text(value: str):
+        if not value:
+            return None
+        match = re.search(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', str(value).lower())
+        return match.group(0) if match else None
+
+    def _from_extra(extra):
+        if not isinstance(extra, dict):
+            return None
+        for key in ("labels", "job_labels"):
+            labels = extra.get(key)
+            if isinstance(labels, dict) and labels.get("run_id"):
+                return labels.get("run_id")
+        for key in ("gcs_output", "input_uri", "display_name", "job_name"):
+            found = _from_text(extra.get(key))
+            if found:
+                return found
+        return None
+
+    try:
+        batch_info = BatchInfo.load(batch_info_path)
+        found = _from_extra(batch_info.extra or {})
+        if found:
+            return found
+        for chunk in (batch_info.extra or {}).get("chunks", []) if isinstance(batch_info.extra, dict) else []:
+            if not isinstance(chunk, dict):
+                continue
+            found = _from_extra(chunk.get("extra") or {})
+            if found:
+                return found
+            found = _from_text(chunk.get("job_name") or chunk.get("job_id"))
+            if found:
+                return found
+    except Exception:
+        pass
+    return None
+
+
+def _normalize_thinking_level(value):
+    value = (value or "").strip().lower()
+    return value if value in {"none", "low", "medium", "high"} else ""
+
+
+def _effective_thinking(step, ctx, default_level=None):
+    override = _normalize_thinking_level(getattr(ctx, "thinking_level", ""))
+    if override:
+        return None, override
+    return step.get("thinking_budget", None), step.get("thinking_level", default_level)
+
 
 class PipelineContext:
     """سياق التنفيذ - يخزن المتغيرات والنتائج"""
@@ -40,8 +91,10 @@ class PipelineContext:
         os.makedirs(self.output_dir, exist_ok=True)
         self.model = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
         self.tts_provider = os.environ.get("TTS_PROVIDER", "vertex")
+        self.tts_model = os.environ.get("TTS_MODEL", "gemini-2.5-pro-tts")
         self.tts_voice = os.environ.get("TTS_VOICE_ID", "Achird")
         self.execution_mode = os.environ.get("EXECUTION_MODE", "instant")
+        self.thinking_level = _normalize_thinking_level(os.environ.get("THINKING_LEVEL", "none")) or "none"
         self.channel_name = os.environ.get("CHANNEL_NAME", "")
         self.run_id = os.environ.get("RUN_ID", "")
         self.recipe_name = os.environ.get("RECIPE_NAME", "")
@@ -130,6 +183,11 @@ class PipelineContext:
         path = os.path.join(self.output_dir, "usage_summary.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
+        if self._work_dir and os.path.abspath(self._work_dir) != os.path.abspath(self.output_dir):
+            os.makedirs(self._work_dir, exist_ok=True)
+            work_path = os.path.join(self._work_dir, "usage_summary.json")
+            with open(work_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=False, indent=2)
         log(f"  [usage] حفظ ملخص الاستهلاك: {summary['totals']['total_tokens']} tokens في {len(self.usage_records)} calls")
 
     def input_path(self, filename):
@@ -191,8 +249,7 @@ def action_generate(step, ctx):
     system_prompt = ctx.resolve(step.get("system_prompt", "")) if step.get("system_prompt") else ""
     temperature = step.get("temperature", 0.7)
     max_tokens = step.get("max_tokens", None)
-    thinking_budget = step.get("thinking_budget", None)  # None = الموديل يقرر، 0 = بدون تفكير
-    thinking_level = step.get("thinking_level", None)  # "low", "medium", "high" — أولوية أعلى من thinking_budget
+    thinking_budget, thinking_level = _effective_thinking(step, ctx)
     step_model = step.get("model", None)  # موديل خاص بالخطوة — لو None يستخدم ctx.model
     effective_model = step_model or ctx.model
     prompt_str = str(prompt)
@@ -205,6 +262,17 @@ def action_generate(step, ctx):
 
     if step_model:
         log(f"  [model override] {step_model}")
+
+    min_topics_for_cache = int(step.get("min_topics_for_cache", 1) or 1)
+    if cache_content and min_topics_for_cache > 1:
+        if ctx.topic_ids:
+            requested_topic_count = len(ctx.topic_ids)
+        else:
+            content_section = prompt_str[prompt_str.rfind("\n---\n") + 5:] if "\n---\n" in prompt_str else prompt_str
+            requested_topic_count = len(set(re.findall(r'<<<(?:SCRIPT|INTRO)_\d+>>>', content_section)))
+        if requested_topic_count and requested_topic_count < min_topics_for_cache:
+            log(f"  [cache] OFF: {requested_topic_count} موضوع < min_topics_for_cache={min_topics_for_cache}")
+            cache_content = None
 
     # Labels لتتبع التكلفة الفعلية في BigQuery Billing
     direct_labels = {}
@@ -219,7 +287,23 @@ def action_generate(step, ctx):
 
     # === لو المدخل فيه أكتر من ماركر → توليد كل واحد لوحده بالتوازي ===
     max_workers = step.get("max_workers", 5)  # قابل للتخصيص للـ batches الكبيرة
-    per_marker_result = _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget, thinking_level, effective_model, labels=direct_labels, cache_content=cache_content, max_workers=max_workers)
+    per_marker_result = _generate_per_marker(
+        prompt_str,
+        ctx,
+        system_prompt,
+        temperature,
+        max_tokens,
+        thinking_budget,
+        thinking_level,
+        effective_model,
+        labels=direct_labels,
+        cache_content=cache_content,
+        max_workers=max_workers,
+        require_topic_ids=bool(step.get("require_topic_ids", False)),
+        max_topics_per_run=step.get("max_topics_per_run"),
+        allow_all_topics=bool(step.get("allow_all_topics", False)),
+        retry_max_tokens=step.get("retry_max_tokens"),
+    )
     if per_marker_result is not None:
         text = per_marker_result
     else:
@@ -251,7 +335,32 @@ def action_generate(step, ctx):
     return text
 
 
-def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget=None, thinking_level=None, effective_model=None, labels=None, cache_content=None, max_workers=5):
+def _build_retry_max_tokens(base_max_tokens, configured=None):
+    """Build a de-duplicated max_tokens schedule for direct per-marker retries."""
+    schedule = []
+
+    def add(value):
+        if value in ("", None):
+            value = None
+        else:
+            value = int(value)
+        if value not in schedule:
+            schedule.append(value)
+
+    add(base_max_tokens)
+    if configured:
+        values = configured if isinstance(configured, (list, tuple)) else str(configured).split(",")
+        for value in values:
+            add(str(value).strip())
+    elif base_max_tokens:
+        for value in (24000, 32000):
+            if int(base_max_tokens) < value:
+                add(value)
+
+    return schedule
+
+
+def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens, thinking_budget=None, thinking_level=None, effective_model=None, labels=None, cache_content=None, max_workers=5, require_topic_ids=False, max_topics_per_run=None, allow_all_topics=False, retry_max_tokens=None):
     """
     لو المدخل فيه أكتر من ماركر SCRIPT/INTRO → يقسّمه ويولّد كل واحد لوحده بالتوازي.
     بيرجع None لو المدخل مش multi-marker (يعني استخدم generate العادي).
@@ -276,6 +385,8 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
             seen.add(m)
             input_markers.append(m)
 
+    original_marker_count = len(input_markers)
+
     # فلترة الماركرز حسب TOPIC_IDS (لو محدد)
     if ctx.topic_ids and input_markers:
         filtered_markers = []
@@ -283,11 +394,22 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
             id_match = re.search(r'_(\d+)', m)
             if id_match and int(id_match.group(1)) in ctx.topic_ids:
                 filtered_markers.append(m)
-        if filtered_markers:
-            log(f"  [filter] فلترة الماركرز: {len(filtered_markers)} من {len(input_markers)} (TOPIC_IDS)")
-            input_markers = filtered_markers
+        log(f"  [filter] فلترة الماركرز: {len(filtered_markers)} من {len(input_markers)} (TOPIC_IDS)")
+        input_markers = filtered_markers
 
-    if len(input_markers) <= 1:
+    if original_marker_count > 1 and require_topic_ids and not ctx.topic_ids and not allow_all_topics:
+        raise EngineError("هذه الخطوة تتطلب TOPIC_IDS محددة قبل التوليد المباشر.", code="TOPIC_IDS_REQUIRED")
+
+    if original_marker_count > 1 and not input_markers:
+        raise EngineError("لا توجد ماركرز مطابقة لـ TOPIC_IDS المحددة.", code="NO_MATCHING_TOPICS")
+
+    if original_marker_count > 1 and max_topics_per_run and len(input_markers) > int(max_topics_per_run) and not allow_all_topics:
+        raise EngineError(
+            f"عدد المواضيع المحددة ({len(input_markers)}) أكبر من الحد المسموح ({max_topics_per_run}).",
+            code="TOO_MANY_TOPICS",
+        )
+
+    if len(input_markers) <= 1 and original_marker_count <= 1:
         return None  # مش multi-marker — الـ caller يستخدم generate العادي
 
     # --- استخراج التعليمات (كل شيء قبل أول ماركر في المحتوى) ---
@@ -307,58 +429,85 @@ def _generate_per_marker(prompt_str, ctx, system_prompt, temperature, max_tokens
         if match:
             sections[marker] = match.group(1).strip()
 
+    retry_schedule = _build_retry_max_tokens(max_tokens, retry_max_tokens)
     log(f"  [*] {len(input_markers)} ماركر — توليد كل واحد منفصلاً ({MAX_WORKERS} بالتوازي)...")
+    log(f"  [retry] max_tokens schedule: {retry_schedule}")
+
+    if cache_content:
+        ensure_gemini_cache(model_to_use, cache_content)
 
     # --- توليد كل واحد بالتوازي ---
-    def _gen_one(marker):
+    def _gen_one(marker, attempt_max_tokens):
         section = sections.get(marker)
         if not section:
-            return marker, None, {}
+            return marker, None, {}, "missing marker section"
         single_prompt = instructions_part + section
         # نحط marker كـ label إضافي لكل طلب (يفيد للتتبع داخل التشغيلة الواحدة)
         per_call_labels = dict(labels) if labels else {}
         per_call_labels["marker"] = marker.lower()
-        result = generate(
-            prompt=single_prompt,
-            model=model_to_use,
-            system_prompt=system_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            thinking_budget=thinking_budget,
-            thinking_level=thinking_level,
-            labels=per_call_labels,
-            cache_content=cache_content,
-        )
-        return marker, result.data if result.success else None, result.token_usage if result.success else {}
+        try:
+            result = generate(
+                prompt=single_prompt,
+                model=model_to_use,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=attempt_max_tokens,
+                thinking_budget=thinking_budget,
+                thinking_level=thinking_level,
+                labels=per_call_labels,
+                cache_content=cache_content,
+            )
+            if result.success and result.data:
+                return marker, result.data, result.token_usage, ""
+            return marker, None, result.token_usage if result else {}, (result.error if result else "unknown error")
+        except Exception as e:
+            return marker, None, {}, str(e)[:500]
+
+    def _run_markers(markers, attempt_max_tokens, usage_suffix=""):
+        attempt_results = {}
+        attempt_failed = {}
+        with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(markers)))) as executor:
+            futures = {executor.submit(_gen_one, m, attempt_max_tokens): m for m in markers}
+            done_count = 0
+            for future in as_completed(futures):
+                marker = futures[future]
+                try:
+                    marker, data, usage, error = future.result()
+                except Exception as e:
+                    data, usage, error = None, {}, str(e)[:500]
+                done_count += 1
+                if data:
+                    attempt_results[marker] = data
+                    ctx.record_usage(f"generate_{marker}{usage_suffix}", "direct", detect_provider(model_to_use) if hasattr(ctx, 'model') else "gemini", model_to_use, usage)
+                    log(f"  ✓ {marker} ({done_count}/{len(markers)})")
+                else:
+                    attempt_failed[marker] = error or "empty result"
+                    log(f"  [!] فشل {marker} ({done_count}/{len(markers)}): {attempt_failed[marker]}")
+        return attempt_results, attempt_failed
 
     results = {}
-    failed = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(_gen_one, m): m for m in input_markers}
-        done_count = 0
-        for future in as_completed(futures):
-            marker, data, usage = future.result()
-            done_count += 1
-            if data:
-                results[marker] = data
-                # تسجيل التوكنز من كل marker
-                ctx.record_usage(f"generate_{marker}", "direct", detect_provider(model_to_use) if hasattr(ctx, 'model') else "gemini", model_to_use, usage)
-                log(f"  ✓ {marker} ({done_count}/{len(input_markers)})")
-            else:
-                failed.append(marker)
-                log(f"  [!] فشل {marker} ({done_count}/{len(input_markers)})")
+    first_max_tokens = retry_schedule[0] if retry_schedule else max_tokens
+    initial_results, failed = _run_markers(input_markers, first_max_tokens)
+    results.update(initial_results)
 
-    # --- إعادة محاولة الفاشلين (مرة واحدة) ---
+    # --- إعادة محاولة الفاشلين بتدرج max_tokens ---
     if failed:
-        log(f"  → إعادة محاولة {len(failed)} ماركر فاشل...")
-        for marker in failed:
-            _, data, usage = _gen_one(marker)
-            if data:
-                results[marker] = data
-                ctx.record_usage(f"generate_{marker}_retry", "direct", detect_provider(model_to_use) if hasattr(ctx, 'model') else "gemini", model_to_use, usage)
-                log(f"  ✓ {marker} (إعادة)")
-            else:
-                log(f"  [!!] فشل نهائي: {marker}")
+        for attempt_idx, attempt_max_tokens in enumerate(retry_schedule[1:], start=2):
+            if not failed:
+                break
+            failed_markers = list(failed.keys())
+            log(f"  → إعادة محاولة {len(failed_markers)} ماركر فاشل (محاولة {attempt_idx}/{len(retry_schedule)}, max_tokens={attempt_max_tokens})...")
+            retry_results, failed = _run_markers(failed_markers, attempt_max_tokens, usage_suffix=f"_retry{attempt_idx}")
+            results.update(retry_results)
+
+    if failed:
+        report_path = ctx.output_path("generate_failures.json")
+        try:
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump({"failed_count": len(failed), "failed": failed}, f, ensure_ascii=False, indent=2)
+            log(f"  [!!] فشل نهائي لـ {len(failed)} ماركر — تم حفظ التقرير: {report_path}")
+        except Exception as e:
+            log(f"  [!!] فشل نهائي لـ {len(failed)} ماركر، وتعذر حفظ التقرير: {e}")
 
     # --- تجميع بالترتيب الأصلي ---
     combined = []
@@ -640,8 +789,7 @@ def action_batch_send(step, ctx):
     system_prompt = ctx.resolve(step.get("system_prompt", "")) if step.get("system_prompt") else ""
     temperature = step.get("temperature", 0.7)
     max_tokens = step.get("max_tokens", 8192)
-    thinking_budget = step.get("thinking_budget", None)
-    thinking_level = step.get("thinking_level", None)
+    thinking_budget, thinking_level = _effective_thinking(step, ctx)
     step_model = step.get("model", None)
     effective_model = step_model or ctx.model
 
@@ -695,8 +843,8 @@ def action_batch_send(step, ctx):
 def action_batch_retrieve(step, ctx):
     """استدعاء engine.batch_retrieve() مع polling"""
     batch_info_path = str(ctx.resolve(step["input"]))
-    poll_interval = step.get("poll_interval", 30)
-    max_wait = step.get("max_wait", 3600)
+    poll_interval = int(step.get("poll_interval", os.getenv("BATCH_POLL_INTERVAL", "60")))
+    max_wait = int(step.get("max_wait", os.getenv("BATCH_MAX_WAIT_SECONDS", "86400")))
 
     log(f"  انتظار نتائج الدفعة (كل {poll_interval}s، حد أقصى {max_wait}s)")
 
@@ -714,13 +862,7 @@ def action_batch_retrieve(step, ctx):
             if result.success:
                 log(f"  تم استقبال {len(result.data)} نتيجة")
                 # استخراج send_run_id الأصلي من batch_info (اللي اتبعت لجوجل)
-                _send_run_id = None
-                try:
-                    from engine import BatchInfo
-                    _bi = BatchInfo.load(batch_info_path)
-                    _send_run_id = (_bi.extra or {}).get("labels", {}).get("run_id", None)
-                except Exception:
-                    pass
+                _send_run_id = _send_run_id_from_batch_info(batch_info_path)
                 # تسجيل استهلاك التوكنز من الباتش
                 ctx.record_usage(step["id"], "batch", result.provider, result.model, result.token_usage, send_run_id=_send_run_id)
                 return result.data
@@ -1175,7 +1317,26 @@ def action_save_docx(step, ctx):
                 if block:
                     _add_text_to_doc(doc, block, line_spacing)
 
-    doc.save(filepath)
+    meaningful_paragraphs = [
+        p.text.strip()
+        for p in doc.paragraphs
+        if p.text.strip() and not re.fullmatch(r'(Script|Part)\s+\d+', p.text.strip())
+    ]
+    if not meaningful_paragraphs:
+        msg = f"رفض حفظ {filename}: لا توجد أي فقرات صالحة بعد تحليل الماركرز — غالباً نتائج الباتش فاضية أو غير مستخرجة"
+        log(f"  [XX] save_docx: {msg}")
+        raise RuntimeError(msg)
+
+    try:
+        doc.save(filepath)
+    except PermissionError:
+        base, ext = os.path.splitext(filepath)
+        run_suffix = os.environ.get("RUN_ID") or datetime.now().strftime("%Y%m%d_%H%M%S")
+        fallback_path = f"{base}_{run_suffix[:8]}{ext}"
+        log(f"  [!] ملف Word مقفول أو غير قابل للكتابة: {filepath}")
+        log(f"  [!] سيتم الحفظ باسم بديل: {fallback_path}")
+        doc.save(fallback_path)
+        filepath = fallback_path
 
     # ضمانة نهائية: post-process لإجبار RTL + Right Alignment على كل XML
     try:
@@ -2881,6 +3042,19 @@ def action_scripts_to_topics_json(step, ctx):
         content = match.group(2).strip()
         topics.append({"id": topic_id, "title": content})
 
+    if not topics:
+        raise EngineError(
+            "رفض تصدير topics.json: لم يتم العثور على أي سكريبتات داخل الماركرز.",
+            code="EMPTY_SCRIPT_TOPICS",
+        )
+
+    empty_count = sum(1 for topic in topics if not topic["title"].strip())
+    if empty_count == len(topics):
+        raise EngineError(
+            "رفض تصدير topics.json: كل السكريبتات فارغة بعد الاستقبال.",
+            code="EMPTY_SCRIPT_TOPICS",
+        )
+
     topics.sort(key=lambda x: x["id"])
     output = {"total_count": len(topics), "titles": topics}
 
@@ -3561,8 +3735,7 @@ def action_regenerate_failed_intros(step, ctx):
 
     temperature = step.get("temperature", 0.1)
     max_tokens = step.get("max_tokens", 15000)
-    thinking_level = step.get("thinking_level", "low")
-    thinking_budget = step.get("thinking_budget", None)
+    thinking_budget, thinking_level = _effective_thinking(step, ctx, default_level="low")
     step_model = step.get("model", None)
     effective_model = step_model or ctx.model
     max_attempts = step.get("max_attempts", 3)
@@ -4048,8 +4221,7 @@ def action_regenerate_failed(step, ctx):
 
     temperature = step.get("temperature", 0.3)
     max_tokens = step.get("max_tokens", 16000)
-    thinking_budget = step.get("thinking_budget", None)
-    thinking_level = step.get("thinking_level", None)
+    thinking_budget, thinking_level = _effective_thinking(step, ctx)
     step_model = step.get("model", None)
     effective_model = step_model or ctx.model
     expected_parts = step.get("expected_parts", 4)
@@ -4579,19 +4751,33 @@ def _build_batch_prompts(config, ctx, topics, marker_prefix):
         return None
 
     template_text = template_step["text"]
+    marker_step_ids = {
+        step.get("id"): step.get("marker_prefix", marker_prefix)
+        for step in steps
+        if step.get("action") == "topics_to_markers" and step.get("id")
+    }
 
     prompts = []
     for topic in topics:
         topic_id = topic.get("id", 0)
+        topic_title = str(topic.get("title", "")).strip()
 
         # صياغة موضوع واحد كـ JSON
         single_topic_json = json.dumps([topic], ensure_ascii=False, indent=2)
+        single_topic_marker_cache = {}
+
+        def _single_topic_marker(prefix):
+            if prefix not in single_topic_marker_cache:
+                single_topic_marker_cache[prefix] = f"<<<{prefix}_{topic_id}>>>\n{topic_title}\n<<<END_{prefix}>>>"
+            return single_topic_marker_cache[prefix]
 
         # حل المتغيرات يدوياً — استبدال {step_id} بالنتائج
         prompt_text = template_text
         for step_id, result in ctx.results.items():
             if step_id == topics_step_id:
                 prompt_text = prompt_text.replace(f"{{{step_id}}}", single_topic_json)
+            elif step_id in marker_step_ids:
+                prompt_text = prompt_text.replace(f"{{{step_id}}}", _single_topic_marker(marker_step_ids[step_id]))
             else:
                 prompt_text = prompt_text.replace(f"{{{step_id}}}", str(result))
 
@@ -4779,6 +4965,19 @@ def _reassemble_batch_results(results, topics, marker_prefix):
     عشان كده بنربط كل نتيجة بالموضوع الصح عن طريق الماركر اللي الـ AI حطه،
     مش عن طريق ترتيب النتائج (index).
     """
+    if not results:
+        raise EngineError(
+            "استقبال الباتش لم يرجع أي نتائج قابلة للتجميع.",
+            code="BATCH_EMPTY_RESULTS",
+        )
+
+    blank_results = sum(1 for text in results if not str(text or "").strip())
+    if blank_results:
+        raise EngineError(
+            f"استقبال الباتش رجع {blank_results} نتيجة فارغة من {len(results)}.",
+            code="BATCH_EMPTY_RESULTS",
+        )
+
     # الخطوة 1: تصنيف النتائج حسب الماركر الموجود فيها
     marker_pattern = re.compile(rf'<<<{marker_prefix}_(\d+)>>>')
     result_by_topic_id = {}  # topic_id → result text
@@ -5015,8 +5214,7 @@ def _run_mode_send_only(config, ctx, steps):
     system_prompt = ctx.resolve(gen_step.get("system_prompt", "")) if gen_step.get("system_prompt") else ""
     temperature = gen_step.get("temperature", 0.7)
     max_tokens = gen_step.get("max_tokens", 8192)
-    thinking_budget = gen_step.get("thinking_budget", None)
-    thinking_level = gen_step.get("thinking_level", None)
+    thinking_budget, thinking_level = _effective_thinking(gen_step, ctx)
 
     save_path = ctx.output_path("batch_job_info.json")
 
@@ -5083,8 +5281,8 @@ def _run_mode_receive_only(config, ctx, steps):
 
     # استقبال نتائج الباتش مع polling
     log(f"--- استقبال نتائج الباتش ---")
-    poll_interval = 30
-    max_wait = 7200  # ساعتين
+    poll_interval = int(os.getenv("BATCH_POLL_INTERVAL", "60"))
+    max_wait = int(os.getenv("BATCH_MAX_WAIT_SECONDS", "86400"))
     start_time = time.time()
 
     batch_results = None
@@ -5119,7 +5317,8 @@ def _run_mode_receive_only(config, ctx, steps):
             call_type="batch",
             provider=result.provider or "unknown",
             model=result.model or "unknown",
-            token_usage=result.token_usage
+            token_usage=result.token_usage,
+            send_run_id=_send_run_id_from_batch_info(batch_info_path),
         )
 
     # === تجميع النتائج حسب batch_mode ===
@@ -5340,8 +5539,7 @@ def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=Fal
     system_prompt = ctx.resolve(gen_step.get("system_prompt", "")) if gen_step.get("system_prompt") else ""
     temperature = gen_step.get("temperature", 0.7)
     max_tokens = gen_step.get("max_tokens", 8192)
-    thinking_budget = gen_step.get("thinking_budget", None)
-    thinking_level = gen_step.get("thinking_level", None)
+    thinking_budget, thinking_level = _effective_thinking(gen_step, ctx)
     effective_model = gen_step.get("model") or ctx.model
 
     if gen_step.get("model"):
@@ -5446,8 +5644,8 @@ def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=Fal
 
     # انتظار واستقبال النتائج
     log(f"--- انتظار نتائج الباتش ({gen_step['id']}) ---")
-    poll_interval = 30
-    max_wait = 7200  # ساعتين — التشكيل بياخد وقت أطول
+    poll_interval = int(os.getenv("BATCH_POLL_INTERVAL", "60"))
+    max_wait = int(os.getenv("BATCH_MAX_WAIT_SECONDS", "86400"))
     start_time = time.time()
 
     batch_results = None
@@ -5479,7 +5677,8 @@ def _batch_single_generate(gen_step, gen_idx, config, ctx, steps, is_primary=Fal
             call_type="batch",
             provider=result.provider or "unknown",
             model=result.model or effective_model,
-            token_usage=result.token_usage
+            token_usage=result.token_usage,
+            send_run_id=_send_run_id_from_batch_info(save_path),
         )
 
     # لو كان تقسيم حسب المواضيع → تجميع + retry المقطوعة
@@ -5587,15 +5786,22 @@ def run_pipeline(config):
             log(f"  [runtime] execution_mode = {ctx.execution_mode} (من recipe_config.json)")
         if runtime.get("model_name"):
             ctx.model = runtime["model_name"]
+        if runtime.get("thinking_level"):
+            ctx.thinking_level = _normalize_thinking_level(runtime["thinking_level"]) or ctx.thinking_level
+            log(f"  [runtime] thinking_level = {ctx.thinking_level}")
         if runtime.get("tts_provider"):
             ctx.tts_provider = runtime["tts_provider"]
+        if runtime.get("tts_model"):
+            ctx.tts_model = runtime["tts_model"]
+            os.environ["TTS_MODEL"] = runtime["tts_model"]  # عشان engine.tts يقراه من البيئة
+            log(f"  [runtime] tts_model = {ctx.tts_model}")
         if runtime.get("topic_ids"):
             os.environ["TOPIC_IDS"] = runtime["topic_ids"]
             ctx.topic_ids = ctx._parse_topic_ids()  # إعادة قراءة بعد تحديث البيئة
 
     mode = ctx.execution_mode
 
-    log(f"عدد الخطوات: {len(steps)} | الموديل: {ctx.model} | TTS: {ctx.tts_provider} | الوضع: {mode}")
+    log(f"عدد الخطوات: {len(steps)} | الموديل: {ctx.model} | التفكير: {ctx.thinking_level} | TTS: {ctx.tts_provider} | الوضع: {mode}")
 
     if mode == "instant":
         _run_steps(steps, ctx)
