@@ -2554,6 +2554,128 @@ def _tts_vertex_impl(text: str, voice: str, project_id: str, location: str, usag
     return wav_data
 
 
+def _pcm_to_wav(raw_data, mime_type: str = "") -> bytes:
+    """تحويل بيانات PCM خام لملف WAV.
+    - الـ genai SDK بيرجّع الصوت bytes جاهزة (PCM خام) → تُستخدم زي ما هي.
+    - REST/JSON بيرجّع base64 string → تُفك.
+    ⚠️ ممنوع تخمين base64 على bytes — الصوت بيبدأ بأصفار (سكوت) فبيتلغبط الـ heuristic."""
+    import base64
+    import io
+    import wave as wav_module
+
+    if isinstance(raw_data, str):
+        pcm_data = base64.b64decode(raw_data)  # REST: base64 نصي
+    else:
+        pcm_data = bytes(raw_data)  # SDK: PCM خام جاهز
+
+    sample_rate = 24000
+    if mime_type and 'rate=' in mime_type:
+        try:
+            sample_rate = int(mime_type.split('rate=')[1].split(';')[0].strip())
+        except (ValueError, IndexError):
+            pass
+
+    wav_buffer = io.BytesIO()
+    with wav_module.open(wav_buffer, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_data)
+    return wav_buffer.getvalue()
+
+
+def batch_send_tts(texts: list, model: str, voice: str = "Achird", style: str = "", display_name: str = "tts_batch") -> BatchInfo:
+    """إرسال باتش TTS عبر Gemini Developer API (api_key) — المسار الوحيد المدعوم للصوت.
+    البنية الصحيحة المؤكّدة: config فيه response_modalities=['AUDIO'] + speech_config."""
+    from google import genai
+
+    api_key = _check_api_key("GEMINI_API_KEY")
+    client = genai.Client(api_key=api_key)
+
+    # 🔒 الصوت مثبّت على Achird دائماً (قرار المستخدم) — زي المسار المتزامن
+    voice = "Achird"
+
+    src = []
+    for t in texts:
+        content_text = f"{style}\n\n{t}" if style else t
+        src.append({
+            "contents": [{"parts": [{"text": content_text}], "role": "user"}],
+            "config": {
+                "response_modalities": ["AUDIO"],
+                "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": voice}}},
+            },
+        })
+
+    log(f"→ Batch TTS | عدد الطلبات: {len(src)} | الموديل: {model} | الصوت: {voice} | style: {'نعم' if style else 'لا'}")
+    job = client.batches.create(model=model, src=src, config={"display_name": display_name})
+    log(f"<- Batch TTS مُرسَل | job: {job.name} | الحالة: {getattr(job, 'state', '')}")
+
+    return BatchInfo(
+        provider="gemini_tts",
+        model=model,
+        job_id=job.name,
+        job_name=display_name,
+        items_count=len(texts),
+        item_order=list(range(len(texts))),
+        created_at=datetime.now().isoformat(),
+        status="submitted",
+        extra={"voice": voice},
+    )
+
+
+def batch_retrieve_tts(job_name: str) -> list:
+    """استقبال نتائج باتش TTS. يرفع EngineError لو لسه شغّال.
+    يرجّع list مرتبة [{wav: bytes|None, error: str|None, token_usage: dict}]."""
+    from google import genai
+
+    api_key = _check_api_key("GEMINI_API_KEY")
+    client = genai.Client(api_key=api_key)
+    job = client.batches.get(name=job_name)
+    state = str(job.state)
+    log(f"  Batch TTS حالة: {state}")
+
+    if any(x in state for x in ("FAILED", "CANCELLED", "EXPIRED")):
+        raise EngineError(f"باتش TTS فشل: {state} | {getattr(job, 'error', None)}", code="BATCH_TTS_FAILED")
+    if "SUCCEEDED" not in state:
+        raise EngineError(f"باتش TTS لسه شغّال: {state}", code="BATCH_TTS_NOT_READY")
+
+    dest = getattr(job, "dest", None)
+    responses = getattr(dest, "inlined_responses", None) if dest else None
+    if not responses:
+        raise EngineError("باتش TTS اكتمل لكن مفيش نتائج inline", code="BATCH_TTS_EMPTY")
+
+    results = []
+    for r in responses:
+        resp = getattr(r, "response", None)
+        if not resp:
+            results.append({"wav": None, "error": str(getattr(r, "error", "no response")), "token_usage": {}})
+            continue
+        wav = None
+        for c in (resp.candidates or []):
+            content = getattr(c, "content", None)
+            for p in (getattr(content, "parts", None) or []):
+                inline = getattr(p, "inline_data", None)
+                if inline and inline.data:
+                    wav = _pcm_to_wav(inline.data, getattr(inline, "mime_type", "") or "")
+                    break
+            if wav:
+                break
+        # التوكنز (مع fallback تقدير 25 توكن/ثانية لو الصوت موجود والـ output صفر)
+        tu = {}
+        um = getattr(resp, "usage_metadata", None)
+        if um:
+            _in = getattr(um, "prompt_token_count", 0) or 0
+            _out = getattr(um, "candidates_token_count", 0) or 0
+            if not _out and wav:
+                _out = int(round(((len(wav) - 44) / 2.0 / 24000) * 25))
+            tu = {"input": _in, "output": _out, "thinking": 0, "cached": 0, "total": (_in + _out)}
+        results.append({"wav": wav, "error": None if wav else "no audio in response", "token_usage": tu})
+
+    ok = sum(1 for x in results if x["wav"])
+    log(f"<- Batch TTS استقبال | {ok}/{len(results)} ملف صوتي")
+    return results
+
+
 def transcribe(audio_file: str, model: str = "whisper-1", language: str = None) -> EngineResult:
     """
     الدالة 6: تحويل صوت لنص عبر Whisper (OpenAI)

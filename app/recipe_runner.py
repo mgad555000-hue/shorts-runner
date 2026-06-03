@@ -21,7 +21,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from engine import generate, tts, transcribe, transcribe_with_timestamps, batch_send, batch_retrieve, log, EngineError, BatchInfo, detect_provider, ensure_gemini_cache
+from engine import generate, tts, transcribe, transcribe_with_timestamps, batch_send, batch_retrieve, batch_send_tts, batch_retrieve_tts, log, EngineError, BatchInfo, detect_provider, ensure_gemini_cache
 
 
 # ========== PipelineContext ==========
@@ -743,9 +743,103 @@ def action_tts_multi(step, ctx):
 
         return False, "max_tts_retries"
 
-    # === loop تلقائي: حتى max_passes جولات ===
+    # ========== نمط الباتش (Gemini API) — المسار الوحيد المدعوم للصوت ==========
+    mode = getattr(ctx, "execution_mode", "instant")
+    batch_info_path = ctx.output_path("batch_tts_info.json")
+
+    def _verify_and_fix_from_batch(batch_results):
+        """يكتب WAV من نتائج الباتش + تحقق Whisper (الخيار A). يرجّع (success_count, pending_failures)."""
+        succ = 0
+        pend = []
+        for idx, item in enumerate(all_items):
+            res = batch_results[idx] if idx < len(batch_results) else None
+            wav_bytes = res.get("wav") if res else None
+            if not wav_bytes:
+                reason = (res or {}).get("error", "no_audio")
+                log(f"  ⚠️ {item['filename']}: مفيش صوت من الباتش ({reason}) — هيتعاد فوري")
+                pend.append({**item, "last_reason": f"batch_{reason}"})
+                continue
+            wav_path = get_wav_path(item)
+            with open(wav_path, "wb") as f:
+                f.write(wav_bytes)
+            # تسجيل التوكنز (باتش = خصم 50% تلقائي في حساب التكلفة)
+            tu = res.get("token_usage") or {}
+            if tu.get("total"):
+                ctx.record_usage(item["filename"], "batch", "gemini_tts", ctx.tts_model, tu)
+            # تحقق Whisper إلزامي
+            try:
+                w = transcribe(wav_path, language=language)
+                sim = _calculate_text_similarity(item["text"], w.data) if w.success else 0
+                match_pct = round(sim * 100, 1)
+                if sim >= min_match:
+                    log(f"  ✅ {item['filename']}: Whisper {match_pct}% [batch]")
+                    succ += 1
+                else:
+                    log(f"  ⚠️ {item['filename']}: Whisper {match_pct}% < {int(min_match*100)}% [batch] — حذف وإعادة فوري")
+                    if os.path.exists(wav_path):
+                        os.remove(wav_path)
+                    pend.append({**item, "last_reason": f"batch_low_match_{match_pct}"})
+            except Exception as e:
+                log(f"  [!] {item['filename']}: خطأ Whisper [batch] — {str(e)[:100]}")
+                if os.path.exists(wav_path):
+                    os.remove(wav_path)
+                pend.append({**item, "last_reason": "batch_whisper_error"})
+        return succ, pend
+
+    def _send_batch():
+        style = os.environ.get("TTS_STYLE", "").strip()
+        voice = getattr(ctx, "tts_voice", "Achird")
+        texts = [it["text"] for it in all_items]
+        disp = f"tts_{ctx.run_id[:8]}" if getattr(ctx, "run_id", "") else "tts_batch"
+        info = batch_send_tts(texts, model=ctx.tts_model, voice=voice, style=style, display_name=disp)
+        # نحفظ ترتيب العناصر (filename + subfolder + text) عشان الاستقبال يطابقها
+        info.extra["items"] = all_items
+        info.save(batch_info_path)
+        log(f"  [batch] تم الإرسال + حفظ batch_tts_info.json | job: {info.job_id}")
+        return info
+
+    if mode == "send_only":
+        _send_batch()
+        return f"تم إرسال باتش الصوت ({total} طلب) — استخدم 'استقبال فقط' لاحقاً لإكمال التوليد ⏳"
+
     success_count = 0
-    pending = list(all_items)  # الملفات المتبقية
+    if mode in ("batch_auto", "receive_only"):
+        if mode == "batch_auto":
+            info = _send_batch()
+            job_id = info.job_id
+        else:  # receive_only
+            if not os.path.exists(batch_info_path):
+                raise EngineError("استقبال فقط: مفيش batch_tts_info.json — لازم 'إرسال فقط' الأول", code="BATCH_TTS_NO_INFO")
+            info = BatchInfo.load(batch_info_path)
+            job_id = info.job_id
+            if info.extra.get("items"):
+                all_items[:] = info.extra["items"]  # استرجاع نفس ترتيب الإرسال
+
+        # polling حتى الاكتمال
+        max_wait_min = int(step.get("batch_max_wait_min", 360))
+        poll_every = int(step.get("batch_poll_sec", 30))
+        deadline = _time.time() + max_wait_min * 60
+        batch_results = None
+        while True:
+            try:
+                batch_results = batch_retrieve_tts(job_id)
+                break
+            except EngineError as e:
+                if getattr(e, "code", "") == "BATCH_TTS_NOT_READY":
+                    if _time.time() > deadline:
+                        raise EngineError(f"باتش الصوت تجاوز مهلة الانتظار ({max_wait_min} دقيقة)", code="BATCH_TTS_TIMEOUT")
+                    log(f"  [batch] لسه شغّال — انتظار {poll_every}s...")
+                    _time.sleep(poll_every)
+                    continue
+                raise
+
+        success_count, pending = _verify_and_fix_from_batch(batch_results)
+        log(f"  [batch] نجح {success_count} | فاشل {len(pending)} — الفاشل هيتعاد فوري (الخيار A)")
+    else:
+        # instant: كل الملفات تتولّد متزامن
+        pending = list(all_items)
+
+    # === loop تلقائي: حتى max_passes جولات (instant كامل، أو إصلاح فاشلي الباتش) ===
 
     for pass_num in range(1, max_passes + 1):
         if not pending:
@@ -5830,7 +5924,14 @@ def run_pipeline(config):
 
     log(f"عدد الخطوات: {len(steps)} | الموديل: {ctx.model} | التفكير: {ctx.thinking_level} | TTS: {ctx.tts_provider} | الوضع: {mode}")
 
+    # وصفة صوت (فيها tts/tts_multi وملهاش generate): الباتش بيتدار جوه tts_multi حسب الوضع
+    _has_generate = _find_generate_step_index(steps) is not None
+    _has_tts = any(s.get("action") in ("tts", "tts_multi", "tts_segments") for s in steps)
+
     if mode == "instant":
+        _run_steps(steps, ctx)
+    elif _has_tts and not _has_generate:
+        log(f"  [mode] وصفة صوت — الوضع '{mode}' بيتدار داخل tts_multi (Gemini batch)")
         _run_steps(steps, ctx)
     elif mode == "send_only":
         _run_mode_send_only(config, ctx, steps)
