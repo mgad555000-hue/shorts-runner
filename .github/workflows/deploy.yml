@@ -18,5 +18,7 @@ jobs:
             cd /opt/mg-ranner
             git fetch origin master
             git reset --hard origin/master
+            # إعادة بناء صورة الـ sandbox عشان كود الوصفات الجديد (engine/recipe_runner) يتحدّث
+            docker build -f sandbox.Dockerfile -t shorts-runner-sandbox .
             docker compose -f docker-compose.vps.yml restart shorts-app
             echo "Deploy done at $(date)"
