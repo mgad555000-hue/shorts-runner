@@ -645,6 +645,9 @@ def action_tts_multi(step, ctx):
     language = step.get("language", "ar")
     tts_retries = step.get("tts_retries", 3)    # محاولات TTS داخل كل جولة
     max_passes = step.get("max_passes", 5)       # أقصى عدد جولات retry
+    # موديل التفريغ للمطابقة والتحقق: gpt-4o-transcribe أدق من whisper-1 في العربي
+    # بنفس التكلفة ($0.006/دقيقة). المونتاج (timestamps) بيفضل على whisper-1.
+    verify_model = step.get("verify_model", "gpt-4o-transcribe")
 
     parts = re.split(rf'<<<{prefix}_(\d+)>>>', text)
     if len(parts) < 3:
@@ -708,11 +711,11 @@ def action_tts_multi(step, ctx):
                     continue
                 return False, "tts_failed"
 
-            # Whisper تحقق إلزامي
+            # تحقق إلزامي — نعرف النص هنا فبنمرّره كـ prompt لأعلى دقة (آمن: مفيش تحيّز مطابقة)
             try:
-                w_result = transcribe(wav_path, language=language)
+                w_result = transcribe(wav_path, language=language, model=verify_model, prompt=text_content)
                 if not w_result.success:
-                    log(f"  [!] {filename}: Whisper فشل — {w_result.error} — إعادة TTS")
+                    log(f"  [!] {filename}: التفريغ فشل — {w_result.error} — إعادة TTS")
                     if os.path.exists(wav_path):
                         os.remove(wav_path)
                     if attempt < tts_retries:
@@ -771,11 +774,12 @@ def action_tts_multi(step, ctx):
                 f.write(wav_bytes)
             wtext = None
             try:
-                w = transcribe(tmp_path, language=language)
+                # بدون prompt: الترتيب مجهول، أي توجيه ممكن يحيّز المطابقة لنص غلط
+                w = transcribe(tmp_path, language=language, model=verify_model)
                 if w.success:
                     wtext = w.data
             except Exception as e:
-                log(f"  [!] استقبال[{ridx}]: خطأ Whisper — {str(e)[:80]}")
+                log(f"  [!] استقبال[{ridx}]: خطأ تفريغ — {str(e)[:80]}")
             cand.append({"tmp": tmp_path, "text": wtext, "tu": res.get("token_usage") or {}})
 
         # (2) مصفوفة التشابه (مرشّح صالح × عنصر مطلوب) مرتّبة تنازلياً

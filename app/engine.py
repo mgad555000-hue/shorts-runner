@@ -2676,21 +2676,23 @@ def batch_retrieve_tts(job_name: str) -> list:
     return results
 
 
-def transcribe(audio_file: str, model: str = "whisper-1", language: str = None) -> EngineResult:
+def transcribe(audio_file: str, model: str = "whisper-1", language: str = None, prompt: str = None) -> EngineResult:
     """
-    الدالة 6: تحويل صوت لنص عبر Whisper (OpenAI)
+    الدالة 6: تحويل صوت لنص عبر OpenAI (whisper-1 أو gpt-4o-transcribe)
     language: كود اللغة (مثل 'ar' للعربي، 'en' للإنجليزي) - اختياري
+    prompt: نص توجيهي اختياري (بيحسّن دقة الكلمات المتوقعة) — يُستخدم بس لما نكون
+            عارفين النص الصحيح (تحقق)، وممنوع في المطابقة عشان ميحيّزش النتيجة.
     """
     start_time = time.time()
     audio_file = _check_audio_file(audio_file)
     api_key = _check_api_key("OPENAI_API_KEY")
 
-    log(f"→ Whisper | الملف: {os.path.basename(audio_file)} | الحجم: {os.path.getsize(audio_file)} bytes" + (f" | اللغة: {language}" if language else ""))
+    log(f"→ STT | الموديل: {model} | الملف: {os.path.basename(audio_file)} | الحجم: {os.path.getsize(audio_file)} bytes" + (f" | اللغة: {language}" if language else "") + (" | prompt: نعم" if prompt else ""))
 
     try:
         text = _retry_call(
-            lambda: _transcribe_impl(audio_file, model, api_key, language=language),
-            max_retries=3, base_delay=3.0, description="Whisper"
+            lambda: _transcribe_impl(audio_file, model, api_key, language=language, prompt=prompt),
+            max_retries=3, base_delay=3.0, description="STT"
         )
 
         # فحص النتيجة
@@ -2723,8 +2725,8 @@ def transcribe(audio_file: str, model: str = "whisper-1", language: str = None) 
         )
 
 
-def _transcribe_impl(audio_file: str, model: str, api_key: str, language: str = None) -> str:
-    """تنفيذ Whisper Transcription"""
+def _transcribe_impl(audio_file: str, model: str, api_key: str, language: str = None, prompt: str = None) -> str:
+    """تنفيذ التفريغ (whisper-1 أو gpt-4o-transcribe) — كلاهما يرجّع .text"""
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key)
@@ -2732,6 +2734,8 @@ def _transcribe_impl(audio_file: str, model: str, api_key: str, language: str = 
     kwargs = {"model": model}
     if language:
         kwargs["language"] = language
+    if prompt:
+        kwargs["prompt"] = prompt
 
     with open(audio_file, 'rb') as f:
         kwargs["file"] = f
