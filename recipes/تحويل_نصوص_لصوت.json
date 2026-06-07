@@ -4,7 +4,6 @@
     {
       "id": "scripts",
       "action": "read_docx",
-      "file": "texts_output.docx",
       "reconstruct_markers": true,
       "marker_prefix": "SCRIPT",
       "label": "قراءة النصوص من Word وبناء الماركرز"

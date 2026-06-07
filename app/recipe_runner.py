@@ -657,6 +657,9 @@ def action_tts_multi(step, ctx):
     all_items = []
     for i in range(1, len(parts), 2):
         script_num = parts[i]
+        # فلترة بـ topic_ids: لو المستخدم اختار مواضيع معيّنة من الواجهة، نشتغل عليها بس
+        if ctx.topic_ids and int(script_num) not in ctx.topic_ids:
+            continue
         script_text = parts[i + 1] if i + 1 < len(parts) else ""
         script_text = script_text.replace(f"<<<END_{prefix}>>>", "").strip()
         if not script_text:
@@ -748,42 +751,86 @@ def action_tts_multi(step, ctx):
     batch_info_path = ctx.output_path("batch_tts_info.json")
 
     def _verify_and_fix_from_batch(batch_results):
-        """يكتب WAV من نتائج الباتش + تحقق Whisper (الخيار A). يرجّع (success_count, pending_failures)."""
-        succ = 0
-        pend = []
-        for idx, item in enumerate(all_items):
-            res = batch_results[idx] if idx < len(batch_results) else None
+        """يكتب WAV من نتائج الباتش بمطابقة المحتوى (Whisper) مش الترتيب.
+        السبب: باتش Gemini بيرجّع النتايج بترتيب مختلف عن الإرسال ومفيش key للربط،
+        فالمطابقة بالـ index كانت بتقارن كل صوت بالنص الغلط. هنا بنفرّغ كل صوت،
+        نعمله Whisper مرة واحدة، وبعدين نسند كل صوت لأقرب نص (إسناد جشِع فريد).
+        يرجّع (success_count, pending_failures)."""
+        assign_min = step.get("batch_assign_min", 0.5)  # عتبة قبول الإسناد بالمحتوى
+        tmp_dir = os.path.join(ctx.output_dir, "_batch_tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        # (1) فرّغ كل صوت لملف مؤقت + Whisper مرة واحدة لكل صوت
+        cand = []  # [{tmp, text, tu}]
+        for ridx, res in enumerate(batch_results):
             wav_bytes = res.get("wav") if res else None
             if not wav_bytes:
-                reason = (res or {}).get("error", "no_audio")
-                log(f"  ⚠️ {item['filename']}: مفيش صوت من الباتش ({reason}) — هيتعاد فوري")
-                pend.append({**item, "last_reason": f"batch_{reason}"})
                 continue
-            wav_path = get_wav_path(item)
-            with open(wav_path, "wb") as f:
+            tmp_path = os.path.join(tmp_dir, f"_r{ridx}.wav")
+            with open(tmp_path, "wb") as f:
                 f.write(wav_bytes)
-            # تسجيل التوكنز (باتش = خصم 50% تلقائي في حساب التكلفة)
-            tu = res.get("token_usage") or {}
-            if tu.get("total"):
-                ctx.record_usage(item["filename"], "batch", "gemini_tts", ctx.tts_model, tu)
-            # تحقق Whisper إلزامي
+            wtext = None
             try:
-                w = transcribe(wav_path, language=language)
-                sim = _calculate_text_similarity(item["text"], w.data) if w.success else 0
-                match_pct = round(sim * 100, 1)
-                if sim >= min_match:
-                    log(f"  ✅ {item['filename']}: Whisper {match_pct}% [batch]")
-                    succ += 1
-                else:
-                    log(f"  ⚠️ {item['filename']}: Whisper {match_pct}% < {int(min_match*100)}% [batch] — حذف وإعادة فوري")
-                    if os.path.exists(wav_path):
-                        os.remove(wav_path)
-                    pend.append({**item, "last_reason": f"batch_low_match_{match_pct}"})
+                w = transcribe(tmp_path, language=language)
+                if w.success:
+                    wtext = w.data
             except Exception as e:
-                log(f"  [!] {item['filename']}: خطأ Whisper [batch] — {str(e)[:100]}")
-                if os.path.exists(wav_path):
-                    os.remove(wav_path)
-                pend.append({**item, "last_reason": "batch_whisper_error"})
+                log(f"  [!] استقبال[{ridx}]: خطأ Whisper — {str(e)[:80]}")
+            cand.append({"tmp": tmp_path, "text": wtext, "tu": res.get("token_usage") or {}})
+
+        # (2) مصفوفة التشابه (مرشّح صالح × عنصر مطلوب) مرتّبة تنازلياً
+        pairs = []
+        for ci, c in enumerate(cand):
+            if not c["text"]:
+                continue
+            for ii, item in enumerate(all_items):
+                s = _calculate_text_similarity(item["text"], c["text"])
+                if s >= assign_min:
+                    pairs.append((s, ci, ii))
+        pairs.sort(reverse=True, key=lambda x: x[0])
+
+        # (3) إسناد جشِع فريد: كل صوت لأفضل نص متاح، وكل نص لصوت واحد
+        item_to = {}   # ii -> (ci, sim)
+        used_cand = set()
+        for s, ci, ii in pairs:
+            if ci in used_cand or ii in item_to:
+                continue
+            item_to[ii] = (ci, s)
+            used_cand.add(ci)
+
+        # (4) احفظ المسنَدين بأسماءهم الصحيحة + سجّل التوكنز
+        succ = 0
+        pend = []
+        for ii, item in enumerate(all_items):
+            if ii in item_to:
+                ci, s = item_to[ii]
+                c = cand[ci]
+                wav_path = get_wav_path(item)
+                try:
+                    os.replace(c["tmp"], wav_path)
+                except Exception:
+                    with open(c["tmp"], "rb") as rf, open(wav_path, "wb") as wf:
+                        wf.write(rf.read())
+                tu = c["tu"]
+                if tu.get("total"):
+                    ctx.record_usage(item["filename"], "batch", "gemini_tts", ctx.tts_model, tu)
+                log(f"  ✅ {item['filename']}: Whisper {round(s*100,1)}% [batch/مطابقة محتوى]")
+                succ += 1
+            else:
+                log(f"  ⚠️ {item['filename']}: مفيش صوت مطابق في الباتش — هيتعاد فوري")
+                pend.append({**item, "last_reason": "batch_unmatched"})
+
+        # (5) تنظيف المؤقت
+        for c in cand:
+            if os.path.exists(c["tmp"]):
+                try:
+                    os.remove(c["tmp"])
+                except Exception:
+                    pass
+        try:
+            os.rmdir(tmp_dir)
+        except Exception:
+            pass
         return succ, pend
 
     def _send_batch():
@@ -2666,12 +2713,30 @@ def _normalize_arabic(text):
     return text
 
 
+def _normalize_for_match(text):
+    """تطبيع قوي للمقارنة الدلالية: تشكيل + ألف + أرقام + رموز → مقارنة بالكلمات.
+    الهدف: صوت سليم اتقرأ صح يطلع نسبة عالية حتى لو Whisper غلط في كلمة أو كتب رقم
+    بدل كلمة (مثل '80%' بدل 'ثمانين بالمئة'). المقارنة بتتم على مستوى الكلمات مش الحروف."""
+    text = _normalize_arabic(text)
+    # توحيد الياء/الألف المقصورة والهاء/التاء المربوطة (مصادر شائعة لأخطاء Whisper)
+    text = text.replace('ى', 'ي').replace('ة', 'ه')
+    # حذف الأرقام (عربية/لاتينية) — لأن منها يُكتب كلمات ومنها أرقام فيختلفوا بلا داعٍ
+    text = re.sub(r'[0-9٠-٩]+', ' ', text)
+    # إبقاء الحروف العربية والمسافات فقط
+    text = re.sub(r'[^؀-ۿ\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
 def _calculate_text_similarity(text1, text2):
-    """حساب نسبة التشابه بين نصين عربيين"""
+    """نسبة التشابه بين نصين عربيين — على مستوى الكلمات (متسامح مع أخطاء Whisper البسيطة).
+    المقارنة الحرفية كانت ظالمة: تغيير حرف واحد في كلمة يكسر التطابق. الكلمات أعدل."""
     from difflib import SequenceMatcher
-    t1 = _normalize_arabic(text1)
-    t2 = _normalize_arabic(text2)
-    return SequenceMatcher(None, t1, t2).ratio()
+    w1 = _normalize_for_match(text1).split()
+    w2 = _normalize_for_match(text2).split()
+    if not w1 or not w2:
+        return 0.0
+    return SequenceMatcher(None, w1, w2).ratio()
 
 
 def action_tts_segments(step, ctx):
