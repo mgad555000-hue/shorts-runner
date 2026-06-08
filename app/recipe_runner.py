@@ -21,7 +21,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from engine import generate, tts, transcribe, transcribe_with_timestamps, batch_send, batch_retrieve, batch_send_tts, batch_retrieve_tts, log, EngineError, BatchInfo, detect_provider, ensure_gemini_cache
+from engine import generate, tts, transcribe, transcribe_with_timestamps, batch_send, batch_retrieve, batch_send_tts, batch_retrieve_tts, batch_state, batch_is_terminal, log, EngineError, BatchInfo, detect_provider, ensure_gemini_cache
 
 
 # ========== PipelineContext ==========
@@ -838,15 +838,20 @@ def action_tts_multi(step, ctx):
         return succ, pend
 
     def _send_batch():
-        """إرسال الباتش — مع تقسيم تلقائي لدفعات صغيرة لو العدد كبير (احترام حد TPM).
-        كل دفعة = batch job مستقل. الاستقبال بيجمّعهم كلهم ويطابق بالمحتوى (الترتيب مش مهم).
-        بيحفظ batch_tts_info.json تدريجياً بعد كل دفعة عشان لو حصل فشل في النص نقدر نستقبل المُرسَل."""
+        """إرسال الباتش مع تقسيم تلقائي + gating على إكمال الباتشات.
+        حد Gemini على الباتشات الـ in-flight (PENDING/RUNNING) في نفس الوقت — مش على معدّل الإرسال.
+        فبنخلي أقصى batch_max_inflight باتش شغّال معاً، ونستنى واحد يخلص قبل ما نبعت اللي بعده.
+        + استئناف: لو الرن اتقطع، يكمّل من الدفعات المحفوظة (مش يبدأ من الأول).
+        + حفظ تدريجي بعد كل دفعة."""
         style = os.environ.get("TTS_STYLE", "").strip()
         voice = getattr(ctx, "tts_voice", "Achird")
         disp = f"tts_{ctx.run_id[:8]}" if getattr(ctx, "run_id", "") else "tts_batch"
-        chunk_size = int(step.get("batch_chunk_size", 100))      # مجرّب آمن تحت TPM 100K
-        chunk_delay = int(step.get("batch_chunk_delay_sec", 65)) # فاصل بين الدفعات (نافذة الدقيقة)
-        send_retries = int(step.get("batch_send_retries", 4))    # إعادة محاولة على 429
+        chunk_size = int(step.get("batch_chunk_size", 100))
+        chunk_delay = int(step.get("batch_chunk_delay_sec", 10))   # فاصل صغير بعد توفّر مكان
+        send_retries = int(step.get("batch_send_retries", 6))      # backstop على 429
+        max_inflight = int(step.get("batch_max_inflight", 2))      # أقصى باتشات شغّالة معاً (حد الكوتة)
+        gate_poll = int(step.get("batch_gate_poll_sec", 30))       # تردد فحص الحالة
+        gate_max_min = int(step.get("batch_gate_max_min", 240))    # أقصى انتظار للـ gating
         n = len(all_items)
 
         def _send_one(texts, dname, label):
@@ -857,39 +862,73 @@ def action_tts_multi(step, ctx):
                     msg = str(e)
                     is_quota = ("429" in msg) or ("RESOURCE_EXHAUSTED" in msg) or ("quota" in msg.lower())
                     if is_quota and attempt < send_retries:
-                        wait = 90 * attempt  # backoff متصاعد لإراحة نافذة TPM
-                        log(f"  [batch] {label}: حد المعدّل (429) — انتظار {wait}s ثم إعادة ({attempt}/{send_retries})")
+                        wait = min(60 * attempt, 180)
+                        log(f"  [batch] {label}: 429 (الكوتة لسه مشغولة) — انتظار {wait}s ثم إعادة ({attempt}/{send_retries})")
                         _time.sleep(wait)
                         continue
                     raise
 
-        def _save(first_info, job_ids):
+        def _inflight_count(jids):
+            c = 0
+            for j in jids:
+                try:
+                    if not batch_is_terminal(batch_state(j)):
+                        c += 1
+                except Exception:
+                    pass
+            return c
+
+        def _wait_for_slot(jids):
+            deadline = _time.time() + gate_max_min * 60
+            while _inflight_count(jids) >= max_inflight:
+                if _time.time() > deadline:
+                    log(f"  [batch] ⚠️ تجاوز مهلة انتظار إفراغ مكان ({gate_max_min}د) — محاولة الإرسال برضه")
+                    return
+                log(f"  [batch] {max_inflight} باتش شغّال (ماسكين الكوتة) — انتظار {gate_poll}s لحد ما يخلص واحد...")
+                _time.sleep(gate_poll)
+
+        # === استئناف من المحفوظ (نفس العناصر) ===
+        job_ids = []
+        first_info = None
+        start_chunk = 0
+        if os.path.exists(batch_info_path):
+            try:
+                _prev = BatchInfo.load(batch_info_path)
+                _pj = _prev.extra.get("job_ids", [])
+                _pi = _prev.extra.get("items", [])
+                if _pj and len(_pi) == n:
+                    job_ids = list(_pj)
+                    first_info = _prev
+                    start_chunk = len(job_ids)
+                    log(f"  [batch] استئناف: {start_chunk} دفعة محفوظة — هنكمّل من دفعة {start_chunk+1}")
+            except Exception:
+                pass
+
+        n_chunks = (n + chunk_size - 1) // chunk_size
+
+        def _save():
             first_info.extra["items"] = all_items
             first_info.extra["job_ids"] = list(job_ids)
             first_info.save(batch_info_path)
 
-        job_ids = []
-        first_info = None
-        if n <= chunk_size:
-            texts = [it["text"] for it in all_items]
-            first_info = _send_one(texts, disp, "دفعة وحيدة")
-            job_ids = [first_info.job_id]
-            _save(first_info, job_ids)
-        else:
-            n_chunks = (n + chunk_size - 1) // chunk_size
-            log(f"  [batch] تقسيم {n} طلب إلى {n_chunks} دفعة × {chunk_size} (فاصل {chunk_delay}s) — احترام حد TPM")
-            for ci in range(n_chunks):
-                chunk = all_items[ci * chunk_size:(ci + 1) * chunk_size]
-                texts = [it["text"] for it in chunk]
-                label = f"دفعة {ci+1}/{n_chunks}"
-                cinfo = _send_one(texts, f"{disp}_p{ci+1}", label)
-                if first_info is None:
-                    first_info = cinfo
-                job_ids.append(cinfo.job_id)
-                _save(first_info, job_ids)  # حفظ تدريجي بعد كل دفعة
-                log(f"  [batch] {label} مُرسلة | job: {cinfo.job_id} | {len(chunk)} طلب")
-                if ci < n_chunks - 1:
-                    _time.sleep(chunk_delay)
+        if start_chunk == 0:
+            log(f"  [batch] تقسيم {n} طلب إلى {n_chunks} دفعة × {chunk_size} | أقصى {max_inflight} باتش معاً (gating على الإكمال)")
+
+        for ci in range(start_chunk, n_chunks):
+            chunk = all_items[ci * chunk_size:(ci + 1) * chunk_size]
+            texts = [it["text"] for it in chunk]
+            label = f"دفعة {ci+1}/{n_chunks}"
+            if job_ids:
+                _wait_for_slot(job_ids)   # استنى لحد ما يخلص باتش ويتفضّى مكان
+            cinfo = _send_one(texts, f"{disp}_p{ci+1}", label)
+            if first_info is None:
+                first_info = cinfo
+            job_ids.append(cinfo.job_id)
+            _save()
+            log(f"  [batch] {label} مُرسلة | job: {cinfo.job_id} | {len(chunk)} طلب")
+            if chunk_delay and ci < n_chunks - 1:
+                _time.sleep(chunk_delay)
+
         log(f"  [batch] تم الإرسال + حفظ batch_tts_info.json | {len(job_ids)} job(s) | {n} طلب")
         return first_info
 

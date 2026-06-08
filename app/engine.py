@@ -2623,6 +2623,19 @@ def batch_send_tts(texts: list, model: str, voice: str = "Achird", style: str = 
     )
 
 
+def batch_state(job_name: str) -> str:
+    """فحص خفيف لحالة batch job (بدون تنزيل النتائج) — يرجّع نص الحالة.
+    يُستخدم في الـ gating: نعرف هل الباتش لسه ماسك الكوتة (PENDING/RUNNING) ولا خلص."""
+    from google import genai
+    client = genai.Client(api_key=_check_api_key("GEMINI_API_KEY"))
+    return str(client.batches.get(name=job_name).state)
+
+
+def batch_is_terminal(state: str) -> bool:
+    """هل الباتش خلص (نجح/فشل/أُلغي/انتهت صلاحيته)؟ يعني سابِق الكوتة (مش in-flight)."""
+    return any(x in (state or "") for x in ("SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"))
+
+
 def batch_retrieve_tts(job_name: str) -> list:
     """استقبال نتائج باتش TTS. يرفع EngineError لو لسه شغّال.
     يرجّع list مرتبة [{wav: bytes|None, error: str|None, token_usage: dict}]."""
