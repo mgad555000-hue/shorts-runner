@@ -2407,14 +2407,64 @@ def tts_vertex(text: str, voice: str = "Achird", project_id: str = None, locatio
             token_usage=_usage_holder.get("token_usage", {})
         )
 
-    except EngineError:
-        raise
     except Exception as e:
+        msg = str(e)
+        # الموديل مش موجود على Vertex (زي gemini-3.1-flash-tts-preview) → fallback للـ Developer API (api_key)
+        if ("404" in msg) or ("NOT_FOUND" in msg) or ("was not found" in msg):
+            log("  [tts] الموديل مش متاح على Vertex (404) — تحويل تلقائي للـ Developer API (api_key)")
+            return tts_gemini_api(text, voice=voice, model=(os.getenv("TTS_MODEL", "").strip() or None))
+        if isinstance(e, EngineError):
+            raise
         duration = int((time.time() - start_time) * 1000)
         raise EngineError(
             f"خطأ غير متوقع من Vertex AI TTS: {str(e)[:500]}",
             code="UNEXPECTED_ERROR"
         )
+
+
+def tts_gemini_api(text: str, voice: str = "Achird", model: str = None) -> EngineResult:
+    """TTS متزامن عبر Gemini Developer API (api_key) — للموديلات اللي مش على Vertex
+    (زي gemini-3.1-flash-tts-preview). نفس مسار الباتش الناجح بس لطلب واحد."""
+    from google import genai
+    start_time = time.time()
+    text = _check_text_for_tts(text)
+    api_key = _check_api_key("GEMINI_API_KEY")
+    model = model or os.getenv("TTS_MODEL", "gemini-2.5-flash-tts-preview").strip()
+    style = os.environ.get("TTS_STYLE", "").strip()
+    content = f"{style}\n\n{text}" if style else text
+    voice = voice or "Achird"
+    log(f"→ TTS Gemini API | طول النص: {len(text)} | الصوت: {voice} | الموديل: {model}")
+    client = genai.Client(api_key=api_key)
+
+    def _call():
+        resp = client.models.generate_content(
+            model=model, contents=content,
+            config={"response_modalities": ["AUDIO"],
+                    "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": voice}}}},
+        )
+        wav = None
+        for c in (resp.candidates or []):
+            for p in (getattr(getattr(c, "content", None), "parts", None) or []):
+                inl = getattr(p, "inline_data", None)
+                if inl and inl.data:
+                    wav = _pcm_to_wav(inl.data, getattr(inl, "mime_type", "") or "")
+                    break
+            if wav:
+                break
+        tu = {}
+        um = getattr(resp, "usage_metadata", None)
+        if um:
+            _in = getattr(um, "prompt_token_count", 0) or 0
+            _out = getattr(um, "candidates_token_count", 0) or 0
+            if not _out and wav:
+                _out = int(round(((len(wav) - 44) / 2.0 / 24000) * 25))
+            tu = {"input": _in, "output": _out, "thinking": 0, "cached": 0, "total": _in + _out}
+        return _check_audio_data(wav, "Gemini API TTS"), tu
+
+    audio_data, tu = _retry_call(_call, max_retries=3, base_delay=3.0, description="Gemini API TTS")
+    duration = int((time.time() - start_time) * 1000)
+    log(f"<- TTS Gemini API OK | {len(audio_data)} bytes | {duration}ms")
+    return EngineResult(success=True, data=audio_data, provider="gemini_api", model=model, duration_ms=duration, token_usage=tu)
 
 
 def _tts_vertex_impl(text: str, voice: str, project_id: str, location: str, usage_holder: dict = None) -> bytes:
