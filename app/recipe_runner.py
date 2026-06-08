@@ -896,11 +896,16 @@ def action_tts_multi(step, ctx):
                 _prev = BatchInfo.load(batch_info_path)
                 _pj = _prev.extra.get("job_ids", [])
                 _pi = _prev.extra.get("items", [])
-                if _pj and len(_pi) == n:
+                # استئناف بس لو نفس الـ batch بالظبط (نفس أسماء الملفات) — مش مجرد نفس العدد،
+                # عشان ميستأنفش غلط على batch تاني ليه نفس العدد (مثلاً 2001-3000 بدل 1001-2000).
+                _same = (len(_pi) == n) and ([x.get("filename") for x in _pi] == [it["filename"] for it in all_items])
+                if _pj and _same:
                     job_ids = list(_pj)
                     first_info = _prev
                     start_chunk = len(job_ids)
-                    log(f"  [batch] استئناف: {start_chunk} دفعة محفوظة — هنكمّل من دفعة {start_chunk+1}")
+                    log(f"  [batch] استئناف: {start_chunk} دفعة محفوظة لنفس الـ batch — هنكمّل من دفعة {start_chunk+1}")
+                elif _pj:
+                    log(f"  [batch] batch مختلف عن المحفوظ — بدء إرسال جديد (هيتكتب فوق batch_tts_info.json)")
             except Exception:
                 pass
 
