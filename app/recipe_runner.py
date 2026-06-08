@@ -838,20 +838,65 @@ def action_tts_multi(step, ctx):
         return succ, pend
 
     def _send_batch():
+        """إرسال الباتش — مع تقسيم تلقائي لدفعات صغيرة لو العدد كبير (احترام حد TPM).
+        كل دفعة = batch job مستقل. الاستقبال بيجمّعهم كلهم ويطابق بالمحتوى (الترتيب مش مهم).
+        بيحفظ batch_tts_info.json تدريجياً بعد كل دفعة عشان لو حصل فشل في النص نقدر نستقبل المُرسَل."""
         style = os.environ.get("TTS_STYLE", "").strip()
         voice = getattr(ctx, "tts_voice", "Achird")
-        texts = [it["text"] for it in all_items]
         disp = f"tts_{ctx.run_id[:8]}" if getattr(ctx, "run_id", "") else "tts_batch"
-        info = batch_send_tts(texts, model=ctx.tts_model, voice=voice, style=style, display_name=disp)
-        # نحفظ ترتيب العناصر (filename + subfolder + text) عشان الاستقبال يطابقها
-        info.extra["items"] = all_items
-        info.save(batch_info_path)
-        log(f"  [batch] تم الإرسال + حفظ batch_tts_info.json | job: {info.job_id}")
-        return info
+        chunk_size = int(step.get("batch_chunk_size", 100))      # مجرّب آمن تحت TPM 100K
+        chunk_delay = int(step.get("batch_chunk_delay_sec", 65)) # فاصل بين الدفعات (نافذة الدقيقة)
+        send_retries = int(step.get("batch_send_retries", 4))    # إعادة محاولة على 429
+        n = len(all_items)
+
+        def _send_one(texts, dname, label):
+            for attempt in range(1, send_retries + 1):
+                try:
+                    return batch_send_tts(texts, model=ctx.tts_model, voice=voice, style=style, display_name=dname)
+                except Exception as e:
+                    msg = str(e)
+                    is_quota = ("429" in msg) or ("RESOURCE_EXHAUSTED" in msg) or ("quota" in msg.lower())
+                    if is_quota and attempt < send_retries:
+                        wait = 90 * attempt  # backoff متصاعد لإراحة نافذة TPM
+                        log(f"  [batch] {label}: حد المعدّل (429) — انتظار {wait}s ثم إعادة ({attempt}/{send_retries})")
+                        _time.sleep(wait)
+                        continue
+                    raise
+
+        def _save(first_info, job_ids):
+            first_info.extra["items"] = all_items
+            first_info.extra["job_ids"] = list(job_ids)
+            first_info.save(batch_info_path)
+
+        job_ids = []
+        first_info = None
+        if n <= chunk_size:
+            texts = [it["text"] for it in all_items]
+            first_info = _send_one(texts, disp, "دفعة وحيدة")
+            job_ids = [first_info.job_id]
+            _save(first_info, job_ids)
+        else:
+            n_chunks = (n + chunk_size - 1) // chunk_size
+            log(f"  [batch] تقسيم {n} طلب إلى {n_chunks} دفعة × {chunk_size} (فاصل {chunk_delay}s) — احترام حد TPM")
+            for ci in range(n_chunks):
+                chunk = all_items[ci * chunk_size:(ci + 1) * chunk_size]
+                texts = [it["text"] for it in chunk]
+                label = f"دفعة {ci+1}/{n_chunks}"
+                cinfo = _send_one(texts, f"{disp}_p{ci+1}", label)
+                if first_info is None:
+                    first_info = cinfo
+                job_ids.append(cinfo.job_id)
+                _save(first_info, job_ids)  # حفظ تدريجي بعد كل دفعة
+                log(f"  [batch] {label} مُرسلة | job: {cinfo.job_id} | {len(chunk)} طلب")
+                if ci < n_chunks - 1:
+                    _time.sleep(chunk_delay)
+        log(f"  [batch] تم الإرسال + حفظ batch_tts_info.json | {len(job_ids)} job(s) | {n} طلب")
+        return first_info
 
     if mode == "send_only":
-        _send_batch()
-        return f"تم إرسال باتش الصوت ({total} طلب) — استخدم 'استقبال فقط' لاحقاً لإكمال التوليد ⏳"
+        _info = _send_batch()
+        _njobs = len(_info.extra.get("job_ids", [])) or 1
+        return f"تم إرسال باتش الصوت ({total} طلب في {_njobs} دفعة/job) — استخدم 'استقبال فقط' لاحقاً لإكمال التوليد ⏳"
 
     success_count = 0
     if mode in ("batch_auto", "receive_only"):
@@ -864,25 +909,39 @@ def action_tts_multi(step, ctx):
             info = BatchInfo.load(batch_info_path)
             job_id = info.job_id
             if info.extra.get("items"):
-                all_items[:] = info.extra["items"]  # استرجاع نفس ترتيب الإرسال
+                all_items[:] = info.extra["items"]  # استرجاع نفس العناصر المُرسَلة
 
-        # polling حتى الاكتمال
+        # قائمة كل الـ jobs (دفعة واحدة أو عدة دفعات بعد التقسيم)
+        job_ids = info.extra.get("job_ids") or ([job_id] if job_id else [])
+        if not job_ids:
+            raise EngineError("مفيش أي job id للاستقبال في batch_tts_info.json", code="BATCH_TTS_NO_INFO")
+
+        # polling حتى الاكتمال — بنجمّع نتايج كل الـ jobs (الترتيب مش مهم، المطابقة بالمحتوى)
         max_wait_min = int(step.get("batch_max_wait_min", 360))
         poll_every = int(step.get("batch_poll_sec", 30))
         deadline = _time.time() + max_wait_min * 60
-        batch_results = None
-        while True:
-            try:
-                batch_results = batch_retrieve_tts(job_id)
-                break
-            except EngineError as e:
-                if getattr(e, "code", "") == "BATCH_TTS_NOT_READY":
-                    if _time.time() > deadline:
-                        raise EngineError(f"باتش الصوت تجاوز مهلة الانتظار ({max_wait_min} دقيقة)", code="BATCH_TTS_TIMEOUT")
-                    log(f"  [batch] لسه شغّال — انتظار {poll_every}s...")
-                    _time.sleep(poll_every)
-                    continue
-                raise
+        batch_results = []
+        for ji, jid in enumerate(job_ids):
+            label = f"job {ji+1}/{len(job_ids)}"
+            while True:
+                try:
+                    res = batch_retrieve_tts(jid)
+                    batch_results.extend(res)
+                    log(f"  [batch] استلام {label} | {len(res)} نتيجة (إجمالي {len(batch_results)})")
+                    break
+                except EngineError as e:
+                    code = getattr(e, "code", "")
+                    if code == "BATCH_TTS_NOT_READY":
+                        if _time.time() > deadline:
+                            raise EngineError(f"باتش الصوت تجاوز مهلة الانتظار ({max_wait_min} دقيقة)", code="BATCH_TTS_TIMEOUT")
+                        log(f"  [batch] {label} لسه شغّال — انتظار {poll_every}s...")
+                        _time.sleep(poll_every)
+                        continue
+                    elif code in ("BATCH_TTS_FAILED", "BATCH_TTS_EMPTY"):
+                        # job واحد فشل/فاضي — منتخطّاه وعناصره هتتعوّض بإعادة التوليد، مش بنوقف الباقي
+                        log(f"  [batch] ⚠️ {label} فشل/فاضي ({code}) — هيتعوّض بإعادة التوليد")
+                        break
+                    raise
 
         success_count, pending = _verify_and_fix_from_batch(batch_results)
         log(f"  [batch] نجح {success_count} | فاشل {len(pending)} — الفاشل هيتعاد فوري (الخيار A)")
