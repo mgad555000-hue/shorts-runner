@@ -1997,7 +1997,7 @@ async function openFolder(dockerPath) {
     await authFetch(`/api/open-folder?docker_path=${encodeURIComponent(dockerPath)}`, {method:'POST'}).catch(()=>{});
     // محاولة فتح المجلد عن طريق الـ helper (port 8002)
     try {
-        const res = await fetch(`http://127.0.0.1:8002/open?path=${encodeURIComponent(localPath)}`, {signal: AbortSignal.timeout(2000)});
+        const res = await fetch(`http://127.0.0.1:8011/open?path=${encodeURIComponent(localPath)}`, {signal: AbortSignal.timeout(2000)});
         const data = await res.json();
         if (data.success) {
             showAlert('success', 'تم فتح المجلد');
