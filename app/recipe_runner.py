@@ -2847,11 +2847,60 @@ def _calculate_text_similarity(text1, text2):
     return SequenceMatcher(None, w1, w2).ratio()
 
 
+def _detect_part_of_segments(script_text, parsed_segments):
+    """
+    للقوائم الطويلة (لونج): تحديد الجزء بتاع كل بند.
+    الدعم: ماركرز <<<PART_N>>> أو علامات "الجزء N:" (العلامة بتيجي بعد أول بند في الجزء —
+    نفس منطق تطبيق المونتاج الطويل بالظبط).
+    يرجع dict {seg_num: part_num} — أو None لو القائمة شورتس (مفيش أجزاء).
+    """
+    # طريقة 1: ماركرز MG Ranner
+    if re.search(r'<<<PART_\d+>>>', script_text):
+        mapping = {}
+        for m in re.finditer(r'<<<PART_(\d+)>>>(.*?)<<<END_PART>>>', script_text, re.DOTALL):
+            p = int(m.group(1))
+            for seg in _parse_video_list_segments(m.group(2)):
+                mapping[seg['num']] = p
+        return mapping or None
+
+    # طريقة 2: علامات "الجزء N:"
+    labels = list(re.finditer(r'الجزء\s*(\d+)\s*:', script_text))
+    if len(labels) < 2:
+        return None
+    entry_pattern = re.compile(r'^\s*[\(]?\s*\d+\s*[\).\-]', re.MULTILINE)
+    entries = list(entry_pattern.finditer(script_text))
+    part_starts = {}
+    for lm in labels:
+        p = int(lm.group(1))
+        prev = None
+        for e in entries:
+            if e.start() < lm.start():
+                prev = e
+            else:
+                break
+        part_starts[p] = prev.start() if prev else 0
+    ordered = sorted(part_starts.items(), key=lambda x: x[1])
+
+    full_pattern = re.compile(r'[\(]?\s*(\d+)\s*[\).\-]\s*(.+?)\((\d+)\)\s*\((مطابق|تقريبي)\)')
+    mapping = {}
+    for m in full_pattern.finditer(script_text):
+        num = int(m.group(1))
+        part = ordered[0][0]
+        for p, start in ordered:
+            if m.start() >= start:
+                part = p
+        mapping[num] = part
+    return mapping or None
+
+
 def action_tts_segments(step, ctx):
     """
     TTS لكل بند من قائمة الفيديوهات + تحقق إجباري بويسبر.
     المدخل: نص قائمة الفيديوهات (بماركرز SCRIPT)
-    المخرج: ملفات WAV لكل بند + full.wav + verification.json لكل سكريبت
+    المخرج:
+      - شورتس: audio/SCRIPT_N/seg_NN.wav + full.wav + verification.json
+      - لونج (قائمة فيها أجزاء): audio/SCRIPT_N/part_P/seg_NN.wav + part_P.wav لكل جزء
+        + full.wav — متوافق مباشرة مع Long Montage Tool
     """
     _apply_tts_style(step, ctx)
     text = str(ctx.resolve(step["input"]))
@@ -2896,14 +2945,26 @@ def action_tts_segments(step, ctx):
         script_folder = os.path.join(ctx.output_dir, "audio", f"{prefix}_{script_num}")
         os.makedirs(script_folder, exist_ok=True)
 
-        log(f"  {prefix}_{script_num}: {len(segments)} بنود")
+        # لونج؟ تحديد جزء كل بند (None = شورتس، سلوك قديم بدون تغيير)
+        part_map = _detect_part_of_segments(script_text, segments)
+        if part_map:
+            n_parts = len(set(part_map.values()))
+            log(f"  {prefix}_{script_num}: {len(segments)} بنود في {n_parts} أجزاء (لونج)")
+        else:
+            log(f"  {prefix}_{script_num}: {len(segments)} بنود")
 
         script_report = []
         wav_files = []
+        wav_files_by_part = {}
 
         for seg in segments:
             seg_label = f"seg_{seg['num']:02d}"
             narration = seg['narration']
+            seg_part = part_map.get(seg['num']) if part_map else None
+            seg_dir = script_folder
+            if seg_part is not None:
+                seg_dir = os.path.join(script_folder, f"part_{seg_part}")
+                os.makedirs(seg_dir, exist_ok=True)
 
             if not narration:
                 log(f"  [!] {prefix}_{script_num}/{seg_label}: نص فارغ — تخطي")
@@ -2935,10 +2996,12 @@ def action_tts_segments(step, ctx):
                 })
                 continue
 
-            wav_path = os.path.join(script_folder, f"{seg_label}.wav")
+            wav_path = os.path.join(seg_dir, f"{seg_label}.wav")
             with open(wav_path, "wb") as f:
                 f.write(tts_result.data)
             wav_files.append(wav_path)
+            if seg_part is not None:
+                wav_files_by_part.setdefault(seg_part, []).append(wav_path)
 
             # --- 2. Whisper verification (إجباري) ---
             log(f"  {prefix}_{script_num}/{seg_label}: تحقق ويسبر...")
@@ -2992,24 +3055,30 @@ def action_tts_segments(step, ctx):
                     'file': f"{seg_label}.wav",
                 })
 
-        # --- 3. دمج كل البنود في full.wav ---
-        if wav_files:
-            full_wav = os.path.join(script_folder, "full.wav")
-            list_file = os.path.join(script_folder, "_concat.txt")
+        def _merge_wavs(files, out_path, label):
+            list_file = out_path + "_concat.txt"
             with open(list_file, "w", encoding="utf-8") as f:
-                for wf in wav_files:
-                    f.write(f"file '{wf}'\n")
+                for wf in files:
+                    f.write("file '{}'\n".format(wf.replace("\\", "/")))
             try:
                 subprocess.run(
                     ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                     "-i", list_file, "-c", "copy", full_wav],
+                     "-i", list_file, "-c", "copy", out_path],
                     capture_output=True, timeout=120
                 )
-                if os.path.exists(full_wav):
-                    log(f"  {prefix}_{script_num}/full.wav: دمج {len(wav_files)} ملف")
+                if os.path.exists(out_path):
+                    log(f"  {prefix}_{script_num}/{label}: دمج {len(files)} ملف")
                 os.remove(list_file)
             except Exception as e:
-                log(f"  [!] فشل دمج full.wav: {e}")
+                log(f"  [!] فشل دمج {label}: {e}")
+
+        # --- 3أ. لونج: دمج بنود كل جزء في part_P.wav (متوافق مع Long Montage Tool) ---
+        for p_num in sorted(wav_files_by_part):
+            _merge_wavs(wav_files_by_part[p_num], os.path.join(script_folder, f"part_{p_num}.wav"), f"part_{p_num}.wav")
+
+        # --- 3ب. دمج كل البنود في full.wav ---
+        if wav_files:
+            _merge_wavs(wav_files, os.path.join(script_folder, "full.wav"), "full.wav")
 
         # --- 4. حفظ تقرير التحقق ---
         report_path = os.path.join(script_folder, "verification.json")
