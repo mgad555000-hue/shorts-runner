@@ -18,6 +18,9 @@ services:
       - ./static:/app/static:ro
       - /var/run/docker.sock:/var/run/docker.sock:rw
       - C:/Users/w10/AppData/Roaming/gcloud:/root/.config/gcloud:ro
+      # مخرجات وصفة الفيديوهات التوضيحية على D: مباشرة (قرار تنظيم المساحة 2026-06-12)
+      # — C: ممنوع يتملي بنسخ الفيديوهات؛ النقل للرينجات بعدها يبقى على نفس القرص (فوري)
+      - "D:/مخرجات الوصفات/My_Kidney/فيديوهات_توضيحية:/app/data/channels/My_Kidney/إنشاء_قائمة_فيديوهات_توضيحية/output:rw"
       # ربط فيديوهات كل قناة (read-only)
       - "D:/Ranner paython/ranner paython channel videos lists/Alhashab2000:/app/data/channels/Alhashab2000/videos:ro"
       - "D:/Ranner paython/ranner paython channel videos lists/My_Kidney:/app/data/channels/My_Kidney/videos:ro"
