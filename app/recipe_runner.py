@@ -2771,8 +2771,9 @@ def _parse_video_list_segments(text):
     i = 0
     while i < len(lines):
         line = lines[i].strip()
-        # مطابقة: "N. وصف (رقم_فيديو) (مطابق/تقريبي)" أو "N- وصف..."
-        match = re.match(r'(\d+)[.\-]\s*(.+?)\((\d+)\)\s*\((مطابق|تقريبي)\)', line)
+        # مطابقة: "N. وصف (رقم_فيديو) (مطابق/تقريبي)" أو "N- وصف..." أو "(N) وصف..."
+        # نفس نمط تطبيق المونتاج (run_montage.parse_video_segments) عشان التنسيقين يتقبلوا
+        match = re.match(r'\(?(\d+)[.\-)]\s*(.+?)\((\d+)\)\s*\((مطابق|تقريبي)\)', line)
         if match:
             seg_num = int(match.group(1))
             description = match.group(2).strip()
@@ -2789,7 +2790,7 @@ def _parse_video_list_segments(text):
                         break
                     i += 1
                     continue
-                if re.match(r'\d+[.\-]\s*', next_line) and re.search(r'\(\d+\)\s*\((مطابق|تقريبي)\)', next_line):
+                if re.match(r'\(?\d+[.\-)]\s*', next_line) and re.search(r'\(\d+\)\s*\((مطابق|تقريبي)\)', next_line):
                     break
                 # شيل النقطة من أول السطر لو موجودة
                 clean = next_line.lstrip('.').strip()
@@ -2911,17 +2912,26 @@ def action_tts_segments(step, ctx):
             if max_chars and len(narration) > max_chars:
                 narration = narration[:max_chars]
 
-            # --- 1. TTS ---
+            # --- 1. TTS (مع فحص الحجم + إعادة محاولة — TTS أحياناً بيرجع صوت فاضي ~100 بايت) ---
+            # WAV PCM 24kHz 16bit مونو = ~48KB لكل ثانية. أقل من ثانية لنص بند = صوت فاضي مؤكد.
+            MIN_AUDIO_BYTES = 50000
             log(f"  {prefix}_{script_num}/{seg_label}: TTS ({len(narration)} حرف)...")
             tts_result = tts(narration)
-            if not tts_result.success:
-                log(f"  [!] {seg_label}: فشل TTS — {tts_result.error}")
+            for retry in (1, 2):
+                if tts_result.success and len(tts_result.data or b"") >= MIN_AUDIO_BYTES:
+                    break
+                got = len(tts_result.data or b"") if tts_result.success else -1
+                log(f"  [!] {seg_label}: صوت فاضي/فاشل (bytes={got}) — إعادة محاولة {retry}/2")
+                tts_result = tts(narration)
+            if not tts_result.success or len(tts_result.data or b"") < MIN_AUDIO_BYTES:
+                err = tts_result.error if not tts_result.success else f"audio too short ({len(tts_result.data or b'')} bytes) after retries"
+                log(f"  [!] {seg_label}: فشل TTS نهائياً — {err}")
                 total_fail += 1
                 script_report.append({
                     'segment': seg['num'],
                     'video_num': seg['video_num'],
                     'status': 'tts_failed',
-                    'error': tts_result.error,
+                    'error': err,
                 })
                 continue
 
@@ -3012,6 +3022,14 @@ def action_tts_segments(step, ctx):
 
     if total_success == 0:
         raise EngineError("فشل TTS لكل البنود", code="TTS_SEGMENTS_ALL_FAILED")
+
+    # صفر fallback صامت: أي بند فشل = التشغيلة كلها تتعلم فاشلة بوضوح
+    # (تقارير verification.json متكتبة لكل سكريبت — أعد التشغيل بعد مراجعتها)
+    if total_fail > 0:
+        raise EngineError(
+            f"فشل TTS في {total_fail} بند (نجح {total_success}) — راجع verification.json وأعد التشغيل",
+            code="TTS_SEGMENTS_PARTIAL_FAIL",
+        )
 
     result_msg = f"تم تحويل {total_success} بند"
     if total_warnings > 0:
