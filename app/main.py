@@ -832,7 +832,10 @@ MODEL_PRICING = {
     "gpt-4o-mini": {"input": 0.15, "output": 0.60, "thinking": 0, "batch_discount": 0.5},
 
     # ========== Claude (Anthropic) — batch discount = 50% ==========
+    # سونيت 5: عرض تمهيدي 2/10 ساري حتى 2026-08-31 — بعدها يرجع 3/15 (حدّث السطر ده)
+    "claude-sonnet-5": {"input": 2.00, "output": 10.00, "thinking": 10.00, "batch_discount": 0.5},
     "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "thinking": 15.00, "batch_discount": 0.5},
+    "claude-opus-4-8": {"input": 5.00, "output": 25.00, "thinking": 25.00, "batch_discount": 0.5},
     "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00, "thinking": 4.00, "batch_discount": 0.5},
 }
 
