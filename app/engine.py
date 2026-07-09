@@ -890,6 +890,13 @@ def _generate_openai(prompt: str, model: str, api_key: str, system_prompt: str, 
     return response.choices[0].message.content, _token_usage
 
 
+def _is_claude_next_gen(model: str) -> bool:
+    """موديلات كلود الحديثة (Sonnet 5 / Opus 4.7+ / Fable): temperature غير الافتراضية
+    وthinking budget_tokens بيرجعوا 400 — التفكير adaptive فقط وعمقه بـ output_config.effort."""
+    m = (model or "").lower()
+    return m.startswith(("claude-sonnet-5", "claude-opus-4-7", "claude-opus-4-8", "claude-fable", "claude-mythos"))
+
+
 def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None) -> str:
     """ربط Claude عبر anthropic SDK"""
     import anthropic
@@ -897,20 +904,43 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
     client = anthropic.Anthropic(api_key=api_key)
 
     final_max_tokens = max_tokens or 16384
+    next_gen = _is_claude_next_gen(model)
 
     kwargs = {
         "model": model,
         "max_tokens": final_max_tokens,
-        "temperature": temperature,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if not next_gen:
+        # الجيل الجديد بيرفض temperature غير الافتراضية (400) — بنبعتها للموديلات القديمة بس
+        kwargs["temperature"] = temperature
     if system_prompt:
         kwargs["system"] = system_prompt
 
-    # Extended thinking — Sonnet 4.6
+    if next_gen:
+        # Sonnet 5 / Opus 4.7+: التفكير adaptive فقط (budget_tokens بيرجع 400)، والعمق بـ effort
+        level = (thinking_level or "").lower()
+        if level and level != "none":
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["output_config"] = {"effort": level}
+            # adaptive بياخد من max_tokens نفسه — مساحة أمان للتفكير + الخرج
+            if final_max_tokens < 16384:
+                kwargs["max_tokens"] = 16384
+            log(f"  [thinking] Claude adaptive effort={level} max_tokens={kwargs['max_tokens']}")
+        elif thinking_budget is not None and thinking_budget > 0:
+            # وصفات قديمة بتبعت budget رقمي — بنحوّله adaptive (الـ budget ملغي في الجيل الجديد)
+            kwargs["thinking"] = {"type": "adaptive"}
+            if final_max_tokens < 16384:
+                kwargs["max_tokens"] = 16384
+            log(f"  [thinking] Claude adaptive (legacy budget={thinking_budget} ignored) max_tokens={kwargs['max_tokens']}")
+        elif model.lower().startswith(("claude-fable", "claude-mythos")):
+            pass  # Fable/Mythos: التفكير دايماً شغال — إرسال disabled بيرجع 400، فبنسيب الحقل
+        else:
+            kwargs["thinking"] = {"type": "disabled"}
+    # Extended thinking — الجيل القديم (Sonnet 4.6 وما قبله)
     # نستخدم enabled mode بـ budget محدد (لا adaptive) لأن adaptive بيستهلك كل max_tokens المتاح
     # القاعدة الذهبية: max_tokens = budget + مساحة output كافية (لا تتجاوز 16K بدون داعي)
-    if thinking_level and thinking_level.lower() != "none":
+    elif thinking_level and thinking_level.lower() != "none":
         level_map = {"low": 2048, "medium": 5000, "high": 10000}
         budget = level_map.get(thinking_level.lower(), 5000)
         # نضمن مساحة output كافية بعد thinking (4K توكن على الأقل)
@@ -927,7 +957,8 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
         log(f"  [thinking] Claude enabled budget={thinking_budget} max_tokens={kwargs['max_tokens']}")
 
     # Streaming إجباري لما thinking مفعل + max_tokens كبير (SDK يرفض غير streaming لو متوقع > 10 دقائق)
-    use_stream = "thinking" in kwargs and kwargs["max_tokens"] >= 8192
+    _thinking_on = (kwargs.get("thinking") or {}).get("type") in ("enabled", "adaptive")
+    use_stream = _thinking_on and kwargs["max_tokens"] >= 8192
 
     if use_stream:
         log(f"  [stream] Claude streaming mode (thinking + max_tokens={kwargs['max_tokens']})")
