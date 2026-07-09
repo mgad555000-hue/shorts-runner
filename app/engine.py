@@ -331,8 +331,9 @@ def detect_provider(model: str) -> str:
 
 
 def _normalize_thinking_level(value: str = None) -> Optional[str]:
+    # xhigh/max: درجات كلود الجيل الجديد (effort) — بتتسقف لـ high مع Gemini والأجيال القديمة
     value = (value or "").strip().lower()
-    return value if value in {"none", "low", "medium", "high"} else None
+    return value if value in {"none", "low", "medium", "high", "xhigh", "max"} else None
 
 
 def _is_gemini_3_model(model: str = "") -> bool:
@@ -350,6 +351,8 @@ def _gemini_3_thinking_level(model: str, thinking_level: str = None) -> Optional
         return None
     if level == "none":
         return "minimal" if _gemini_3_supports_minimal_thinking(model) else None
+    if level in ("xhigh", "max"):
+        return "high"  # درجات كلود الأعلى — أقصى مقابل عند Gemini هو high
     return level
 
 
@@ -791,7 +794,7 @@ def _generate_gemini(prompt: str, model: str, api_key: str, system_prompt: str, 
         config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
     elif thinking_level and not is_gemini_3:
         # fallback: حوّل thinking_level لـ thinking_budget للموديلات القديمة
-        level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576}
+        level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576, "xhigh": 24576, "max": 24576}
         budget = level_to_budget.get(thinking_level.lower(), 1024)
         config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
     config = types.GenerateContentConfig(**config_params)
@@ -941,7 +944,7 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
     # نستخدم enabled mode بـ budget محدد (لا adaptive) لأن adaptive بيستهلك كل max_tokens المتاح
     # القاعدة الذهبية: max_tokens = budget + مساحة output كافية (لا تتجاوز 16K بدون داعي)
     elif thinking_level and thinking_level.lower() != "none":
-        level_map = {"low": 2048, "medium": 5000, "high": 10000}
+        level_map = {"low": 2048, "medium": 5000, "high": 10000, "xhigh": 16000, "max": 24576}
         budget = level_map.get(thinking_level.lower(), 5000)
         # نضمن مساحة output كافية بعد thinking (4K توكن على الأقل)
         if final_max_tokens < budget + 4096:
@@ -1108,7 +1111,7 @@ def _generate_vertex(prompt: str, model: str, system_prompt: str, temperature: f
     elif thinking_budget is not None:
         config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
     elif thinking_level and not is_gemini_3:
-        level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576}
+        level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576, "xhigh": 24576, "max": 24576}
         config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=level_to_budget.get(thinking_level.lower(), 1024))
 
     config = types.GenerateContentConfig(**config_params)
@@ -1292,7 +1295,7 @@ def _batch_send_gemini(prompts: list, model: str, api_key: str, system_prompt: s
         elif thinking_budget is not None:
             request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": thinking_budget}
         elif thinking_level and not is_gemini_3:
-            level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576}
+            level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576, "xhigh": 24576, "max": 24576}
             request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": level_to_budget.get(thinking_level.lower(), 1024)}
         if system_prompt:
             request["systemInstruction"] = {"parts": [{"text": system_prompt}]}
@@ -1432,7 +1435,7 @@ def _batch_send_gemini_rest(prompts: list, model: str, api_key: str, system_prom
         elif thinking_budget is not None:
             request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": thinking_budget}
         elif thinking_level and not is_gemini_3:
-            level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576}
+            level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576, "xhigh": 24576, "max": 24576}
             request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": level_to_budget.get(thinking_level.lower(), 1024)}
         if system_prompt:
             request["systemInstruction"] = {"parts": [{"text": system_prompt}]}
@@ -1551,7 +1554,7 @@ def _batch_send_vertex(prompts: list, model: str, system_prompt: str, temperatur
         elif thinking_budget is not None:
             request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": thinking_budget}
         elif thinking_level and not is_gemini_3:
-            level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576}
+            level_to_budget = {"none": 0, "low": 1024, "medium": 8192, "high": 24576, "xhigh": 24576, "max": 24576}
             request["generationConfig"]["thinkingConfig"] = {"thinkingBudget": level_to_budget.get(thinking_level.lower(), 1024)}
         if system_prompt:
             request["systemInstruction"] = {"parts": [{"text": system_prompt}]}
