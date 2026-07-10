@@ -2445,8 +2445,9 @@ def tts(text: str) -> EngineResult:
     """
     الدالة الموحدة: تحويل نص لصوت
     بتقرأ المزود والصوت من متغيرات البيئة:
-    - TTS_PROVIDER: elevenlabs / minimax / vertex (الافتراضي: vertex)
+    - TTS_PROVIDER: elevenlabs / minimax / grok / vertex (الافتراضي: vertex)
     - TTS_VOICE_ID: معرف الصوت (الافتراضي: Achird)
+    - GROK_TTS_LANGUAGE: لهجة صوت جروك (الافتراضي: ar-EG المصرية)
     الوصفة بتنادي tts(text) وبس - مش محتاجة تعرف أي تفاصيل.
     """
     provider = os.getenv("TTS_PROVIDER", "vertex").lower().strip()
@@ -2458,6 +2459,8 @@ def tts(text: str) -> EngineResult:
         return tts_elevenlabs(text, voice_id=voice_id)
     elif provider == "minimax":
         return tts_minimax(text, voice_id=voice_id)
+    elif provider == "grok":
+        return tts_grok(text, voice_id=voice_id)
     else:
         return tts_vertex(text, voice=voice_id)
 
@@ -2525,6 +2528,67 @@ def _tts_elevenlabs_impl(text: str, voice_id: str, api_key: str) -> bytes:
     response = httpx.post(url, headers=headers, json=data, timeout=60.0)
     response.raise_for_status()
 
+    return response.content
+
+
+GROK_TTS_VOICES = {"ara", "eve", "rex", "sal", "leo"}
+
+
+def tts_grok(text: str, voice_id: str = "rex") -> EngineResult:
+    """
+    تحويل نص لصوت عبر Grok (xAI) — endpoint /v1/tts
+    الأصوات: ara / eve (نسائية) + rex / sal / leo — واللهجة من GROK_TTS_LANGUAGE
+    (الافتراضي ar-EG المصرية). السعر ~4.20 دولار لكل مليون حرف. حد 15 ألف حرف للطلب.
+    """
+    start_time = time.time()
+    text = _check_text_for_tts(text)
+    api_key = _check_api_key("XAI_API_KEY")
+
+    if voice_id not in GROK_TTS_VOICES:
+        log(f"  [تحذير] الصوت '{voice_id}' مش من أصوات جروك {sorted(GROK_TTS_VOICES)} — هستخدم rex")
+        voice_id = "rex"
+    language = os.getenv("GROK_TTS_LANGUAGE", "ar-EG").strip()
+
+    log(f"→ TTS Grok | طول النص: {len(text)} | الصوت: {voice_id} | اللهجة: {language}")
+
+    try:
+        audio_data = _retry_call(
+            lambda: _tts_grok_impl(text, voice_id, language, api_key),
+            max_retries=3, base_delay=3.0, description="Grok TTS"
+        )
+
+        audio_data = _check_audio_data(audio_data, "Grok")
+
+        duration = int((time.time() - start_time) * 1000)
+        log(f"<- TTS Grok OK | {len(audio_data)} bytes | {duration}ms")
+
+        return EngineResult(
+            success=True,
+            data=audio_data,
+            provider="grok_tts",
+            duration_ms=duration
+        )
+
+    except EngineError:
+        raise
+    except Exception as e:
+        raise EngineError(
+            f"خطأ غير متوقع من Grok TTS: {str(e)[:500]}",
+            code="UNEXPECTED_ERROR"
+        )
+
+
+def _tts_grok_impl(text: str, voice_id: str, language: str, api_key: str) -> bytes:
+    """تنفيذ TTS عبر xAI API"""
+    import httpx
+
+    response = httpx.post(
+        "https://api.x.ai/v1/tts",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={"text": text, "voice_id": voice_id, "language": language},
+        timeout=120.0
+    )
+    response.raise_for_status()
     return response.content
 
 

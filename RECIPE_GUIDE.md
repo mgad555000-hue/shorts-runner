@@ -197,6 +197,8 @@ shorts-runner/
 | `max_chars` | لا | الحد الأقصى لعدد الحروف |
 | `save_as` | لا | اسم الملف **بدون امتداد** — النظام بيضيف `.wav` و `.mp3` تلقائي |
 
+**اختيار المزود** (متغيرات بيئة، مش من الوصفة): `TTS_PROVIDER` = `vertex` (الافتراضي) / `elevenlabs` / `minimax` / `grok` + `TTS_VOICE_ID`. مزود **grok** (xAI، ~4.20 دولار/مليون حرف): أصواته `ara/eve/rex/sal/leo` واللهجة من `GROK_TTS_LANGUAGE` (الافتراضي `ar-EG` المصرية)، ومفتاحه `XAI_API_KEY`.
+
 ---
 
 ### 7. `transcribe` — تحويل صوت لنص
