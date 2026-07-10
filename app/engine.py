@@ -323,9 +323,11 @@ def detect_provider(model: str) -> str:
         return "claude"
     elif model_lower.startswith("glm"):
         return "glm"
+    elif model_lower.startswith("grok"):
+        return "grok"
     else:
         raise EngineError(
-            f"موديل غير معروف: {model}. الموديلات المدعومة: gemini, gpt, claude, glm, vertex:gemini-*",
+            f"موديل غير معروف: {model}. الموديلات المدعومة: gemini, gpt, claude, glm, grok, vertex:gemini-*",
             code="UNKNOWN_MODEL"
         )
 
@@ -493,6 +495,7 @@ def _get_api_key_for_provider(provider: str) -> str:
         "openai": "OPENAI_API_KEY",
         "claude": "CLAUDE_API_KEY",
         "glm": "GLM_API_KEY",
+        "grok": "XAI_API_KEY",
     }
     key_name = key_map.get(provider)
     if not key_name:
@@ -534,7 +537,7 @@ def _build_clean_labels(labels: dict) -> dict:
 def generate(prompt: str, model: str, system_prompt: str = "", temperature: float = 0.7, max_tokens: int = None, thinking_budget: int = None, thinking_level: str = None, labels: dict = None, cache_content: str = None) -> EngineResult:
     """
     الدالة 1: توليد نص من برومبت
-    تدعم: Gemini, OpenAI, Claude, GLM, Vertex AI
+    تدعم: Gemini, OpenAI, Claude, GLM, Grok (xAI), Vertex AI
 
     ملاحظة: لاستخدام Vertex AI، استخدم "vertex:gemini-2.5-pro" مثلاً
 
@@ -591,6 +594,11 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
             result_tuple = _retry_call(
                 lambda: _generate_glm(prompt, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level),
                 max_retries=3, base_delay=3.0, description=f"GLM {model}"
+            )
+        elif provider == "grok":
+            result_tuple = _retry_call(
+                lambda: _generate_grok(prompt, model, api_key, system_prompt, temperature, max_tokens),
+                max_retries=3, base_delay=3.0, description=f"Grok {model}"
             )
         else:
             raise EngineError(f"مزود غير مدعوم: {provider}", code="UNSUPPORTED_PROVIDER")
@@ -883,6 +891,45 @@ def _generate_openai(prompt: str, model: str, api_key: str, system_prompt: str, 
         raise ValueError("OpenAI returned empty response")
 
     # استخراج التوكنز
+    _token_usage = {"input": 0, "output": 0, "thinking": 0, "cached": 0, "total": 0}
+    if hasattr(response, 'usage') and response.usage:
+        _token_usage["input"] = getattr(response.usage, 'prompt_tokens', 0) or 0
+        _token_usage["output"] = getattr(response.usage, 'completion_tokens', 0) or 0
+        _token_usage["total"] = _token_usage["input"] + _token_usage["output"]
+        log(f"  [tokens] input={_token_usage['input']} output={_token_usage['output']} total={_token_usage['total']}")
+
+    return response.choices[0].message.content, _token_usage
+
+
+def _generate_grok(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+    """ربط Grok (xAI) — الـAPI متوافق OpenAI بالكامل عبر base_url.
+
+    الموديلات: grok-4.5 (الرائد، سياق 500K) وعائلة grok-4/grok-3.
+    التفكير مدمج في عائلة grok-4 بلا باراميتر خارجي — فمفيش thinking_level هنا.
+    المفتاح: XAI_API_KEY في .env
+    """
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    call_params = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if max_tokens:
+        call_params["max_tokens"] = max_tokens
+
+    response = client.chat.completions.create(**call_params)
+
+    if not response.choices or not response.choices[0].message.content:
+        raise ValueError("Grok returned empty response")
+
     _token_usage = {"input": 0, "output": 0, "thinking": 0, "cached": 0, "total": 0}
     if hasattr(response, 'usage') and response.usage:
         _token_usage["input"] = getattr(response.usage, 'prompt_tokens', 0) or 0
