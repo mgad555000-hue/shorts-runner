@@ -5221,23 +5221,38 @@ def _retry_truncated_batch_results(batch_results, topics, marker_prefix, config,
     except Exception as e:
         log(f"  [!] فشل كشف المقطوعات: {str(e)[:200]}")
 
+    # [إصلاح 2026-07-10] النتائج الفاضية (عنصر رجع من الباتش بدون نص — أي مزود) كانت
+    # بتعدي صامتة في وضع topics وتتحول لسكريبت فاضي — بقت مرشحة لإعادة التوليد زي المقطوع
+    for _i, _r in enumerate(batch_results):
+        if not (_r or "").strip() and _i not in truncated_indices:
+            truncated_indices.append(_i)
+            log(f"  [!] نتيجة فاضية من الباتش في index {_i} — هتتعاد")
+
     if not truncated_indices:
         return batch_results
 
-    log(f"  [!] تم كشف {len(truncated_indices)} سكريبت مقطوع (MAX_TOKENS) — إعادة توليد...")
+    log(f"  [!] تم كشف {len(truncated_indices)} سكريبت مقطوع/فاضي — إعادة توليد...")
 
     # الخطوة 2: تحديد الـ topic ID لكل نتيجة مقطوعة من الـ SCRIPT marker
     truncated_topic_ids = []
+    _batch_idx_by_topic = {}
     for batch_idx in truncated_indices:
         if batch_idx >= len(batch_results):
             continue
-        text = batch_results[batch_idx]
+        text = batch_results[batch_idx] or ""
         marker_match = re.search(rf'<<<{marker_prefix}_(\d+)>>>', text)
         if marker_match:
             topic_id = int(marker_match.group(1))
-            truncated_topic_ids.append(topic_id)
+        elif not text.strip() and batch_idx < len(topics):
+            # [إصلاح 2026-07-10] نتيجة فاضية = مفيش marker — إسناد موضعي
+            # (في وضع topics ترتيب النتائج = ترتيب topics/prompts وقت الإرسال)
+            topic_id = topics[batch_idx].get("id", 0)
+            log(f"  [!] نتيجة فاضية في index {batch_idx} — إسناد موضعي لـ{marker_prefix}_{topic_id}")
         else:
             log(f"  [!] نتيجة مقطوعة في index {batch_idx} بدون marker — تخطي")
+            continue
+        truncated_topic_ids.append(topic_id)
+        _batch_idx_by_topic[topic_id] = batch_idx
 
     if not truncated_topic_ids:
         return batch_results
@@ -5278,14 +5293,15 @@ def _retry_truncated_batch_results(batch_results, topics, marker_prefix, config,
             log(f"  [!] SCRIPT_{topic_id}: لا يوجد prompt مطابق — تخطي")
             continue
 
-        # إيجاد النتيجة المقطوعة في batch_results
-        batch_idx = None
-        for bi in truncated_indices:
-            if bi < len(batch_results):
-                m = re.search(rf'<<<{marker_prefix}_{topic_id}>>>', batch_results[bi])
-                if m:
-                    batch_idx = bi
-                    break
+        # إيجاد النتيجة المقطوعة في batch_results — الخريطة الموضعية أولاً (بتغطي الفاضي)
+        batch_idx = _batch_idx_by_topic.get(topic_id)
+        if batch_idx is None:
+            for bi in truncated_indices:
+                if bi < len(batch_results):
+                    m = re.search(rf'<<<{marker_prefix}_{topic_id}>>>', batch_results[bi] or "")
+                    if m:
+                        batch_idx = bi
+                        break
 
         if batch_idx is None:
             log(f"  [!] SCRIPT_{topic_id}: لم يتم العثور على النتيجة المقطوعة — تخطي")
@@ -5819,6 +5835,12 @@ def _run_mode_receive_only(config, ctx, steps):
     elif batch_mode == "single":
         # برومبت واحد — النتيجة مباشرة
         combined = batch_results[0] if batch_results else ""
+        if not (combined or "").strip():
+            # [إصلاح 2026-07-10] النتيجة الوحيدة فاضية — فشل صريح بدل حفظ ملف فاضي بصمت
+            raise EngineError(
+                "الباتش رجع نتيجة فاضية (وضع single) — أعد الإرسال أو شغّل فوري (instant)",
+                code="BATCH_SINGLE_EMPTY_RESULT"
+            )
         log(f"  النتيجة: {combined[:100]}..." if len(combined) > 100 else f"  النتيجة: {combined}")
 
     else:
