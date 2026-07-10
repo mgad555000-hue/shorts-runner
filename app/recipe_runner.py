@@ -5448,6 +5448,86 @@ def _save_batch_metadata(ctx, batch_info_path, topics, gen_step_id, gen_idx, mar
     log(f"  [metadata] recipe={ctx.recipe_name} | channel={ctx.channel_name} | mode={batch_mode} | prompts={prompts_count}")
 
 
+def _rebuild_marker_prompt(gen_step, ctx, marker):
+    """[إصلاح 2026-07-10] إعادة بناء برومبت ماركر واحد من مدخل خطوة generate —
+    نفس منطق التقسيم بتاع الإرسال بالظبط (التعليمات + قسم الماركر المطلوب).
+    بيشتغل في receive_only لأن pre_results بتترجع لـ ctx قبل النداء."""
+    prompt_str = str(ctx.resolve(gen_step["input"]))
+    MARKER_PAT = r'<<<((?:SCRIPT|INTRO)_\d+)>>>'
+    separator = "\n---\n"
+    content_start = prompt_str.rfind(separator) + len(separator) if separator in prompt_str else 0
+    content_with_markers = prompt_str[content_start:]
+    first_match = re.search(MARKER_PAT, content_with_markers)
+    instructions_part = prompt_str[:content_start + first_match.start()] if first_match else prompt_str
+    escaped = re.escape(f'<<<{marker}>>>')
+    pat = rf'({escaped}.*?)(?=<<<(?:SCRIPT|INTRO)_\d+>>>|\Z)'
+    match = re.search(pat, content_with_markers, re.DOTALL)
+    if not match:
+        return None
+    return instructions_part + match.group(1).strip()
+
+
+def _regen_missing_marker_results(id_to_result, topics, steps, gen_idx, gen_step_id, ctx, batch_info_path, marker_prefix):
+    """[إصلاح 2026-07-10] إعادة توليد فورية صريحة للعناصر الناقصة/المقطوعة من الباتش
+    (وضع markers) — بدل إسقاط الدفعة كلها بسبب عنصر واحد. بترمي خطأ لو الإعادة فشلت
+    (صفر فقد صامت). بترجّع قائمة الأرقام اللي اتعادت."""
+    expected = [t for t in (topics or []) if isinstance(t, dict) and "id" in t]
+    expected_ids = [t["id"] for t in expected]
+    id_to_marker = {t["id"]: t.get("marker", f"{marker_prefix}_{t['id']}") for t in expected}
+    missing_ids = [tid for tid in expected_ids if tid not in id_to_result]
+    truncated_ids = [tid for tid, text in id_to_result.items() if '<<<END_' not in text]
+    regen_ids = sorted(set(missing_ids) | set(truncated_ids))
+    if not regen_ids:
+        return []
+
+    # موديل الباتش الأصلي — نفس طريقة التوليد بالظبط
+    batch_model = ctx.model
+    try:
+        with open(batch_info_path, 'r', encoding='utf-8') as f:
+            batch_model = json.load(f).get("model") or ctx.model
+    except Exception:
+        pass
+
+    gen_step = steps[gen_idx]
+    system_prompt = ctx.resolve(gen_step.get("system_prompt", "")) if gen_step.get("system_prompt") else ""
+    temperature = gen_step.get("temperature", 0.7)
+    max_tokens = gen_step.get("max_tokens", None)
+    thinking_budget, thinking_level = _effective_thinking(gen_step, ctx)
+
+    log(f"  [إصلاح] {len(regen_ids)} عنصر ناقص/مقطوع في نتائج الباتش: {regen_ids} — إعادة توليد فورية بموديل {batch_model}")
+    for tid in regen_ids:
+        marker = id_to_marker.get(tid)
+        if not marker:
+            raise EngineError(f"العنصر {tid} ناقص ومفيش marker ليه في الميتاداتا", code="BATCH_REGEN_NO_MARKER")
+        prompt = _rebuild_marker_prompt(gen_step, ctx, marker)
+        if not prompt:
+            raise EngineError(f"تعذر إعادة بناء برومبت {marker} من مدخل الخطوة", code="BATCH_REGEN_NO_PROMPT")
+        reason = "ناقص من نتائج الباتش" if tid in missing_ids else "مقطوع (بدون END marker)"
+        last_err = ""
+        done = False
+        for attempt in (1, 2):
+            log(f"  → [إصلاح صريح] {marker}: {reason} — إعادة توليد فورية (محاولة {attempt}/2)...")
+            rr = generate(prompt=prompt, model=batch_model, system_prompt=system_prompt,
+                          temperature=temperature, max_tokens=max_tokens,
+                          thinking_budget=thinking_budget, thinking_level=thinking_level)
+            text = (rr.data or "").strip() if rr.success else ""
+            if text and f'<<<{marker}>>>' in text and '<<<END_' in text:
+                id_to_result[tid] = text
+                tu = getattr(rr, "token_usage", None)
+                if tu:
+                    ctx.record_usage(step_id=f"{gen_step_id}_regen_{marker}", call_type="direct",
+                                     provider=getattr(rr, "provider", None) or "unknown",
+                                     model=getattr(rr, "model", None) or batch_model,
+                                     token_usage=tu)
+                done = True
+                break
+            last_err = (getattr(rr, "error", "") or "نص ناقص الماركرز")[:150]
+        if not done:
+            raise EngineError(f"فشل إعادة توليد {marker} بعد محاولتين: {last_err}", code="BATCH_REGEN_FAILED")
+    log(f"  [إصلاح] ✅ تمت إعادة توليد {len(regen_ids)} عنصر بنجاح: {regen_ids}")
+    return regen_ids
+
+
 def _load_batch_metadata(ctx):
     """تحميل metadata الباتش — البحث في output_dir فقط (= مجلد الوصفة الدائم).
 
@@ -5715,30 +5795,21 @@ def _run_mode_receive_only(config, ctx, steps):
         MARKER_PAT_RE = re.compile(r'<<<((?:SCRIPT|INTRO)_(\d+))>>>')
         id_to_result = {}
         unmatched = []
+        empty_count = 0
         for r in batch_results:
-            m = MARKER_PAT_RE.search(r)
+            m = MARKER_PAT_RE.search(r or "")
             if m:
                 id_to_result[int(m.group(2))] = r
-            else:
+            elif (r or "").strip():
                 unmatched.append(r)
+            else:
+                empty_count += 1  # عنصر فاضي من الباتش — هيتعوض بالإعادة الفورية تحت
+        if empty_count:
+            log(f"  [!] {empty_count} نتيجة فاضية من الباتش — هتتعوض بإعادة توليد فورية")
 
-        # كشف المقطوعات (بدون END marker)
-        truncated_ids = [tid for tid, text in id_to_result.items() if '<<<END_' not in text]
-        if truncated_ids:
-            log(f"  [!] {len(truncated_ids)} نتيجة بدون END marker — إعادة توليد...")
-            gen_step = steps[gen_idx]
-            # بناء prompts من topics (markers)
-            prompts_by_id = {}
-            for t in topics:
-                tid = t.get("id", 0)
-                prompts_by_id[tid] = True  # placeholder
-
-            # البرومبتات الأصلية غير متاحة في receive_only — نسجل تحذير بالمقطوعات
-            for tid in truncated_ids:
-                text = id_to_result.get(tid, "")
-                marker_match = re.search(r'<<<((?:SCRIPT|INTRO)_\d+)>>>', text)
-                marker_id = marker_match.group(1) if marker_match else f"index_{tid}"
-                log(f"  [!] {marker_id} مقطوع (بدون END marker) — البرومبت الأصلي غير متاح للـ retry")
+        # [إصلاح 2026-07-10] إعادة توليد فورية صريحة للناقص/المقطوع بدل إسقاط الدفعة كلها
+        _regen_missing_marker_results(id_to_result, topics, steps, gen_idx, gen_step_id,
+                                      ctx, batch_info_path, marker_prefix)
 
         sorted_results = [id_to_result[k] for k in sorted(id_to_result.keys())]
         sorted_results.extend(unmatched)

@@ -2231,15 +2231,16 @@ def _batch_retrieve_vertex(batch_info: BatchInfo) -> list:
                     except (KeyError, IndexError, TypeError, ValueError) as e:
                         sample_keys = ",".join(data.keys()) if isinstance(data, dict) else type(data).__name__
                         parse_errors.append(f"{str(e)} | keys={sample_keys}")
+                        # [إصلاح 2026-07-10] عنصر فاضي في مكانه بدل إسقاط الدفعة كلها —
+                        # بيحافظ على المحاذاة، والتعويض بإعادة توليد فورية صريحة عند الاستقبال
+                        results.append("")
 
     if parse_errors:
         sample = " ; ".join(parse_errors[:3])
-        raise EngineError(
-            f"فشل استخراج {len(parse_errors)} نتيجة من Vertex Batch من أصل {total_lines}. مثال: {sample}",
-            code="BATCH_RESULT_PARSE_FAILED",
-        )
+        log(f"  [!] {len(parse_errors)} نتيجة من أصل {total_lines} رجعت من Vertex Batch بدون نص — "
+            f"هتتعوض بإعادة توليد فورية صريحة (مثال: {sample})")
 
-    if not results:
+    if not results or not any(results):
         raise EngineError(
             "Vertex Batch اكتمل لكن لم يرجع أي نتائج قابلة للقراءة.",
             code="BATCH_RESULT_EMPTY",
