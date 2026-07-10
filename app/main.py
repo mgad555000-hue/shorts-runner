@@ -831,6 +831,9 @@ MODEL_PRICING = {
     "gpt-4o": {"input": 2.50, "output": 10.00, "thinking": 0, "batch_discount": 0.5},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60, "thinking": 0, "batch_discount": 0.5},
 
+    # ========== GLM (Zhipu / Z.AI) ==========
+    "glm-5.2": {"input": 1.40, "cached_input": 0.26, "output": 4.40, "thinking": 4.40, "batch_discount": 0.5},
+
     # ========== Claude (Anthropic) — batch discount = 50% ==========
     # سونيت 5: عرض تمهيدي 2/10 ساري حتى 2026-08-31 — بعدها يرجع 3/15 (حدّث السطر ده)
     "claude-sonnet-5": {"input": 2.00, "output": 10.00, "thinking": 10.00, "batch_discount": 0.5},

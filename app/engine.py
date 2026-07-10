@@ -589,7 +589,7 @@ def generate(prompt: str, model: str, system_prompt: str = "", temperature: floa
             )
         elif provider == "glm":
             result_tuple = _retry_call(
-                lambda: _generate_glm(prompt, model, api_key, system_prompt, temperature, max_tokens),
+                lambda: _generate_glm(prompt, model, api_key, system_prompt, temperature, max_tokens, thinking_budget, thinking_level),
                 max_retries=3, base_delay=3.0, description=f"GLM {model}"
             )
         else:
@@ -993,7 +993,7 @@ def _generate_claude(prompt: str, model: str, api_key: str, system_prompt: str, 
     return text_out, _token_usage
 
 
-def _generate_glm(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int) -> str:
+def _generate_glm(prompt: str, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None) -> str:
     """ربط GLM عبر REST API"""
     import httpx
 
@@ -1002,19 +1002,31 @@ def _generate_glm(prompt: str, model: str, api_key: str, system_prompt: str, tem
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
+    payload = {k: v for k, v in {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }.items() if v is not None}
+
+    # GLM-5.x موديلات تفكير — التفكير شغال افتراضياً؛ بنطفيه لو المستخدم اختار «بدون»
+    # (مفيش درجات عمق عند GLM: أي مستوى مختار = enabled)
+    if (model or "").lower().startswith("glm-5"):
+        level = (thinking_level or "").lower()
+        if level == "none" and (thinking_budget is None or thinking_budget == 0):
+            payload["thinking"] = {"type": "disabled"}
+        else:
+            payload["thinking"] = {"type": "enabled"}
+        log(f"  [thinking] GLM {payload['thinking']['type']} (level={thinking_level})")
+
     response = httpx.post(
         "https://open.bigmodel.cn/api/paas/v4/chat/completions",
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
-        json={k: v for k, v in {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }.items() if v is not None},
-        timeout=180.0,
+        json=payload,
+        timeout=300.0,
     )
     response.raise_for_status()
     data = response.json()
@@ -1022,14 +1034,18 @@ def _generate_glm(prompt: str, model: str, api_key: str, system_prompt: str, tem
     if not data.get("choices") or not data["choices"][0].get("message", {}).get("content"):
         raise ValueError("GLM returned empty response")
 
-    # استخراج التوكنز
+    # استخراج التوكنز — GLM بيرجع توكنز التفكير جوه completion_tokens وبيفصلها في details
     _token_usage = {"input": 0, "output": 0, "thinking": 0, "cached": 0, "total": 0}
     usage = data.get("usage", {})
     if usage:
+        reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0) or 0
+        completion = usage.get("completion_tokens", 0) or 0
         _token_usage["input"] = usage.get("prompt_tokens", 0)
-        _token_usage["output"] = usage.get("completion_tokens", 0)
-        _token_usage["total"] = usage.get("total_tokens", 0) or (_token_usage["input"] + _token_usage["output"])
-        log(f"  [tokens] input={_token_usage['input']} output={_token_usage['output']} total={_token_usage['total']}")
+        _token_usage["output"] = max(completion - reasoning, 0)
+        _token_usage["thinking"] = reasoning
+        _token_usage["cached"] = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0
+        _token_usage["total"] = usage.get("total_tokens", 0) or (_token_usage["input"] + completion)
+        log(f"  [tokens] input={_token_usage['input']} output={_token_usage['output']} thinking={_token_usage['thinking']} total={_token_usage['total']}")
 
     return data["choices"][0]["message"]["content"], _token_usage
 
