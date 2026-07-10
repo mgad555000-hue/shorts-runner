@@ -1427,6 +1427,78 @@ def _batch_send_claude(prompts: list, model: str, api_key: str, system_prompt: s
     return batch_info
 
 
+def _glm_batch_error_hint(stage: str, resp) -> str:
+    """رسالة خطأ عربية واضحة لأخطاء GLM Batch بدل HTTP status صامت."""
+    body = (resp.text or "")[:300]
+    hint = ""
+    if "实名认证" in body:
+        hint = " — حساب زيبو محتاج توثيق هوية (实名认证) من لوحة تحكم bigmodel.cn قبل تفعيل Batch API"
+    elif "模型名称错误" in body:
+        hint = " — الموديل ده مش مدعوم في الباتش عند زيبو (المدعوم حالياً: glm-5 / glm-5.1 / glm-5-turbo وعائلة glm-4)"
+    return f"GLM Batch: فشل {stage} (HTTP {resp.status_code}): {body}{hint}"
+
+
+def _batch_send_glm(prompts: list, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_level: str = None) -> BatchInfo:
+    """إرسال دفعة عبر GLM (Zhipu) Batch API — بنص السعر.
+    التدفق: رفع ملف JSONL (purpose=batch) ← إنشاء /v4/batches ← job_id للمتابعة."""
+    import httpx
+    import json as _json
+
+    base = "https://open.bigmodel.cn/api/paas/v4"
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    # نفس منطق التفكير بتاع المسار الفوري: glm-5.x تفكيرها شغال افتراضياً
+    thinking = None
+    if (model or "").lower().startswith("glm-5"):
+        level = (thinking_level or "").lower()
+        thinking = {"type": "disabled"} if level == "none" else {"type": "enabled"}
+
+    lines = []
+    for i, prompt in enumerate(prompts):
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+        if thinking:
+            body["thinking"] = thinking
+        # زيبو بتشترط custom_id بطول 6 أحرف على الأقل
+        lines.append(_json.dumps(
+            {"custom_id": f"req-{i:06d}", "method": "POST", "url": "/v4/chat/completions", "body": body},
+            ensure_ascii=False))
+    payload = ("\n".join(lines) + "\n").encode("utf-8")
+
+    # 1) رفع ملف الطلبات
+    up = httpx.post(f"{base}/files", headers=headers,
+                    files={"file": ("batch_requests.jsonl", payload, "application/jsonl")},
+                    data={"purpose": "batch"}, timeout=300.0)
+    if up.status_code >= 400:
+        raise EngineError(_glm_batch_error_hint("رفع ملف الباتش", up), code="BATCH_UPLOAD_FAILED")
+    file_id = up.json().get("id")
+    if not file_id:
+        raise EngineError(f"GLM: رفع ملف الباتش رجع من غير id: {up.text[:200]}", code="BATCH_UPLOAD_FAILED")
+
+    # 2) إنشاء الدفعة
+    cr = httpx.post(f"{base}/batches", headers={**headers, "Content-Type": "application/json"},
+                    json={"input_file_id": file_id, "endpoint": "/v4/chat/completions",
+                          "completion_window": "24h"}, timeout=120.0)
+    if cr.status_code >= 400:
+        raise EngineError(_glm_batch_error_hint("إنشاء الدفعة", cr), code="BATCH_CREATE_FAILED")
+    b = cr.json()
+
+    return BatchInfo(
+        provider="glm",
+        model=model,
+        job_id=b["id"],
+        job_name=b["id"],
+        item_order=list(range(len(prompts))),
+        items_count=len(prompts),
+        created_at=datetime.now().isoformat(),
+        status=b.get("status", "submitted"),
+        extra={"input_file_id": file_id},
+    )
+
+
 def _batch_send_gemini_rest(prompts: list, model: str, api_key: str, system_prompt: str, temperature: float, max_tokens: int, thinking_budget: int = None, thinking_level: str = None) -> BatchInfo:
     """إرسال دفعة عبر Gemini REST API (من الوثيقة - طريقة 4)"""
     import httpx
@@ -1665,8 +1737,9 @@ def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: 
     if _strict_google_cost_tracking_enabled() and provider in ("gemini", "vertex") and os.getenv("RUN_ID") and not (labels and labels.get("run_id")):
         labels = {**(labels or {}), "run_id": os.getenv("RUN_ID")}
 
-    # Vertex لا يحتاج API key (سواء بالـ method أو بالـ provider)
-    api_key = None if method == "vertex" or provider == "vertex" else _get_api_key_for_provider(provider)
+    # Vertex لا يحتاج API key — بس method="vertex" (الافتراضي) يخص Gemini/Vertex فقط:
+    # المزودين التانيين (claude/glm) لازم ياخدوا مفتاحهم وإلا بيتبعت "Bearer None" → 401
+    api_key = None if (provider == "vertex" or (provider == "gemini" and method == "vertex")) else _get_api_key_for_provider(provider)
 
     log(f"→ إرسال دفعة | الموديل: {model} | المزود: {provider} | الطريقة: {method} | العدد: {len(prompts)}")
 
@@ -1692,6 +1765,11 @@ def batch_send(prompts: list, model: str, system_prompt: str = "", temperature: 
             return _retry_call(
                 lambda: _batch_send_claude(single_prompts, model, api_key, system_prompt, temperature, max_tokens),
                 max_retries=3, base_delay=3.0, description=f"Claude Batch {model}"
+            )
+        if provider == "glm":
+            return _retry_call(
+                lambda: _batch_send_glm(single_prompts, model, api_key, system_prompt, temperature, max_tokens, thinking_level),
+                max_retries=3, base_delay=3.0, description=f"GLM Batch {model}"
             )
         raise EngineError(
             f"Batch غير مدعوم للمزود: {provider} بالطريقة: {method}",
@@ -1925,6 +2003,73 @@ def _batch_retrieve_claude(batch_info: BatchInfo, api_key: str) -> list:
 
     if token_totals["total"] > 0:
         log(f"  [tokens] إجمالي Claude Batch: input={token_totals['input']} output={token_totals['output']} total={token_totals['total']}")
+    batch_info._token_totals = token_totals
+
+    return results
+
+
+def _batch_retrieve_glm(batch_info: BatchInfo, api_key: str) -> list:
+    """استقبال نتائج دفعة من GLM (Zhipu): فحص الحالة ← تنزيل output_file ← ترتيب بالـ custom_id."""
+    import httpx
+    import json as _json
+
+    base = "https://open.bigmodel.cn/api/paas/v4"
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    r = httpx.get(f"{base}/batches/{batch_info.job_id}", headers=headers, timeout=120.0)
+    r.raise_for_status()
+    b = r.json()
+    status = (b.get("status") or "").lower()
+    log(f"  حالة المهمة: {status}")
+
+    if status in ("validating", "in_progress", "finalizing", "pending"):
+        raise EngineError(f"المهمة لم تكتمل بعد. الحالة: {status}", code="BATCH_JOB_NOT_READY")
+    if status != "completed":
+        raise EngineError(
+            f"باتش GLM انتهى بحالة: {status} | errors={_json.dumps(b.get('errors'), ensure_ascii=False)[:200]}",
+            code="BATCH_JOB_FAILED"
+        )
+
+    output_file_id = b.get("output_file_id")
+    if not output_file_id:
+        raise EngineError("باتش GLM مكتمل لكن من غير output_file_id", code="BATCH_JOB_NO_OUTPUT")
+
+    content = httpx.get(f"{base}/files/{output_file_id}/content", headers=headers, timeout=600.0)
+    content.raise_for_status()
+
+    # النتائج بترجع JSONL بترتيب غير مضمون — بنرتب بالـ custom_id
+    by_id = {}
+    token_totals = {"input": 0, "output": 0, "thinking": 0, "total": 0}
+    for line in content.text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = _json.loads(line)
+        except ValueError:
+            continue
+        cid = str(obj.get("custom_id", ""))
+        body = ((obj.get("response") or {}).get("body")) or {}
+        text = ""
+        try:
+            text = body["choices"][0]["message"].get("content") or ""
+        except (KeyError, IndexError, TypeError):
+            log(f"  [!] GLM batch: نتيجة {cid} من غير محتوى")
+        by_id[cid] = text
+        usage = body.get("usage") or {}
+        reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0) or 0
+        completion = usage.get("completion_tokens", 0) or 0
+        token_totals["input"] += usage.get("prompt_tokens", 0) or 0
+        token_totals["output"] += max(completion - reasoning, 0)
+        token_totals["thinking"] += reasoning
+        token_totals["total"] += usage.get("total_tokens", 0) or ((usage.get("prompt_tokens", 0) or 0) + completion)
+
+    results = [by_id.get(f"req-{i:06d}", "") for i in range(batch_info.items_count)]
+    missing = sum(1 for t in results if not t)
+    if missing:
+        log(f"  [!] GLM batch: {missing}/{batch_info.items_count} نتيجة فاضية")
+    if token_totals["total"] > 0:
+        log(f"  [tokens] إجمالي GLM Batch: input={token_totals['input']} output={token_totals['output']} thinking={token_totals['thinking']} total={token_totals['total']}")
     batch_info._token_totals = token_totals
 
     return results
@@ -2200,6 +2345,11 @@ def batch_retrieve(batch_info_path: str = None, batch_info: BatchInfo = None) ->
             results = _retry_call(
                 lambda: _batch_retrieve_claude(info, api_key),
                 max_retries=3, base_delay=3.0, description=f"Claude Batch Retrieve"
+            )
+        elif provider == "glm":
+            results = _retry_call(
+                lambda: _batch_retrieve_glm(info, api_key),
+                max_retries=3, base_delay=3.0, description=f"GLM Batch Retrieve"
             )
         else:
             raise EngineError(
