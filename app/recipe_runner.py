@@ -2850,8 +2850,8 @@ def _calculate_text_similarity(text1, text2):
 def _detect_part_of_segments(script_text, parsed_segments):
     """
     للقوائم الطويلة (لونج): تحديد الجزء بتاع كل بند.
-    الدعم: ماركرز <<<PART_N>>> أو علامات "الجزء N:" (العلامة بتيجي بعد أول بند في الجزء —
-    نفس منطق تطبيق المونتاج الطويل بالظبط).
+    الدعم: ماركرز <<<PART_N>>> أو علامات "الجزء N:" (العلامة عنوان يسبق بنود جزئه —
+    نفس منطق تطبيق المونتاج الطويل بالظبط، العُرف النهائي 2026-07-10).
     يرجع dict {seg_num: part_num} — أو None لو القائمة شورتس (مفيش أجزاء).
     """
     # طريقة 1: ماركرز MG Ranner
@@ -2863,32 +2863,23 @@ def _detect_part_of_segments(script_text, parsed_segments):
                 mapping[seg['num']] = p
         return mapping or None
 
-    # طريقة 2: علامات "الجزء N:"
+    # طريقة 2: علامات "الجزء N:" — العُرف النهائي (2026-07-10): العلامة عنوان
+    # يسبق بنود جزئه → البند تبع آخر علامة قبله (نفس منطق تطبيق المونتاج الطويل)
     labels = list(re.finditer(r'الجزء\s*(\d+)\s*:', script_text))
     if len(labels) < 2:
         return None
-    entry_pattern = re.compile(r'^\s*[\(]?\s*\d+\s*[\).\-]', re.MULTILINE)
-    entries = list(entry_pattern.finditer(script_text))
-    part_starts = {}
-    for lm in labels:
-        p = int(lm.group(1))
-        prev = None
-        for e in entries:
-            if e.start() < lm.start():
-                prev = e
-            else:
-                break
-        part_starts[p] = prev.start() if prev else 0
-    ordered = sorted(part_starts.items(), key=lambda x: x[1])
+    ordered = sorted(labels, key=lambda m: m.start())
 
     full_pattern = re.compile(r'[\(]?\s*(\d+)\s*[\).\-]\s*(.+?)\((\d+)\)\s*\((مطابق|تقريبي)\)')
     mapping = {}
     for m in full_pattern.finditer(script_text):
         num = int(m.group(1))
-        part = ordered[0][0]
-        for p, start in ordered:
-            if m.start() >= start:
-                part = p
+        part = int(ordered[0].group(1))  # بند شارد قبل أول علامة → أول جزء
+        for lm in ordered:
+            if lm.start() < m.start():
+                part = int(lm.group(1))
+            else:
+                break
         mapping[num] = part
     return mapping or None
 
