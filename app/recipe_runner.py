@@ -4858,6 +4858,438 @@ def action_update_memory_bank(step, ctx):
     return text
 
 
+# ========== أكشنز مراجعة توافق النصوص مع المقدمات ==========
+# بايثون بيجهّز «كارت» لكل موضوع (عنوان + 4 مقدمات + 4 نصوص) ويتحقق من اكتمال
+# الملفات بنيوياً قبل أي صرف API، والموديل بيحكم على التوافق الدلالي عبر الـ
+# Batch API (برومبت مستقل لكل موضوع)، وبايثون بيربط كل حكم بموضوعه عن طريق
+# topic_id المرجَّع جوه الرد نفسه — مش بترتيب النتائج (ترتيب الباتش غير مضمون).
+
+# التشكيل + علامات القرآن + التطويل — للتقطيع والمقارنة المتسامحين مع التشكيل
+_REVIEW_DIAC_CLASS = "ؐ-ًؚ-ٰٟۖ-ۭـ"
+
+
+def _review_marker_regex(marker_text):
+    """Regex بيطابق نص الماركر مهما كان التشكيل/المسافات وسط حروفه"""
+    skeleton = re.sub("[" + _REVIEW_DIAC_CLASS + r"\s]", "", str(marker_text))
+    filler = "[" + _REVIEW_DIAC_CLASS + r"\s]*"
+    return re.compile(filler.join(re.escape(c) for c in skeleton))
+
+
+def _review_ptext(p):
+    """نص الفقرة مع تحويل فواصل الأسطر الداخلية (<w:br/>/<w:cr/>) لـ \\n"""
+    out = []
+    for node in p._p.iter():
+        if node.tag == qn('w:t'):
+            out.append(node.text or '')
+        elif node.tag in (qn('w:br'), qn('w:cr')):
+            out.append('\n')
+    return ''.join(out)
+
+
+def _review_clean_ws(text):
+    """توحيد المسافات (مسافات التنسيق + NBSP + أسطر داخلية) لسطر واحد نظيف"""
+    return re.sub(r'\s+', ' ', str(text).replace(' ', ' ')).strip()
+
+
+def _review_norm_key(text):
+    """تطبيع للمقارنة الحرفية: شيل التشكيل والمسافات — لكشف التكرار/الاستبدال"""
+    return re.sub("[" + _REVIEW_DIAC_CLASS + r"\s ]", "", str(text))
+
+
+def _review_parse_intros(path, split_rx, expected):
+    """ملف المقدمات: فقرة نصها بالظبط 'Script N' (أياً كان ستايلها) = فاصل موضوع،
+    وأي فقرة تانية فيها نص = محتوى مقدمات. التقطيع لمقدمات منفصلة: أساسي على
+    ماركر نهاية المقدمة، واحتياطي على الأسطر الفاضية لو الماركر مش بيدّي العدد."""
+    d = Document(path)
+    cur = None
+    blobs = {}
+    for p in d.paragraphs:
+        t = p.text.strip()
+        h = re.match(r'^Script\s+(\d+)\s*$', t) if t else None
+        if h:
+            cur = h.group(1)
+            blobs.setdefault(cur, [])
+        elif cur is not None and t:
+            blobs[cur].append(_review_ptext(p))
+
+    result = {}
+    for n, parts in blobs.items():
+        blob = "\n\n".join(parts)
+        chunks = []
+        last = 0
+        for m in split_rx.finditer(blob):
+            chunks.append(blob[last:m.end()].strip())
+            last = m.end()
+        tail = blob[last:].strip()
+        if tail:
+            chunks.append(tail)
+        chunks = [c for c in chunks if c]
+        if len(chunks) != expected:
+            segs = [s.strip() for s in re.split(r'\n[ \t ]*\n+', blob) if s.strip()]
+            if len(segs) == expected:
+                chunks = segs
+        result[n] = [_review_clean_ws(c) for c in chunks]
+    return result
+
+
+def _review_parse_texts(path):
+    """ملف النصوص: فقرة 'Script N' = موضوع جديد، فقرة 'Part K' = نص جديد،
+    وأي فقرة تانية = محتوى النص الحالي (متسامح مع ستايلات متنسّقة غلط)."""
+    d = Document(path)
+    cur = None
+    part = None
+    m = {}
+    for p in d.paragraphs:
+        t = p.text.strip()
+        if not t:
+            continue
+        h = re.match(r'^Script\s+(\d+)\s*$', t)
+        pm = re.match(r'^Part\s+(\d+)\s*$', t)
+        if h:
+            cur = h.group(1)
+            m.setdefault(cur, {})
+            part = None
+        elif pm and cur is not None:
+            part = pm.group(1)
+            m[cur].setdefault(part, [])
+        elif cur is not None and part is not None:
+            m[cur][part].append(_review_clean_ws(_review_ptext(p)))
+    return {n: {k: " ".join(v).strip() for k, v in parts.items()} for n, parts in m.items()}
+
+
+def action_review_build_cards(step, ctx):
+    """قراءة ملفات المراجعة الثلاثة (مقدمات/نصوص/عناوين) وبناء كارت لكل موضوع
+    + بوابة اكتمال بنيوية: أي نقص أو خلل واضح بيوقف الوصفة قبل أي صرف API
+    (strict=true الافتراضي)، والتقرير البنيوي بيتحفظ دايماً في structure_report.txt"""
+    intros_file = step.get("intros_file", "intros_output.docx")
+    texts_file = step.get("texts_file", "texts_output.docx")
+    topics_file = step.get("topics_file", "topics.json")
+    expected = int(step.get("expected_pairs", 4))
+    min_words = int(step.get("min_words", 30))
+    strict = step.get("strict", True)
+    intro_end_marker = step.get("intro_end_marker", "تفاصيل أكتر في الفيديو التوضيحي التالي")
+
+    # 1) وجود الملفات الثلاثة
+    paths = {}
+    for key, fname in (("intros", intros_file), ("texts", texts_file), ("topics", topics_file)):
+        fp = ctx.input_path(fname)
+        if not os.path.exists(fp):
+            raise EngineError(f"ملف المراجعة غير موجود في input: {fname}", code="REVIEW_INPUT_MISSING")
+        paths[key] = fp
+
+    # 2) العناوين — يدعم {"titles": [...]} أو قائمة مباشرة من عناصر {id, title}
+    with open(paths["topics"], "r", encoding="utf-8") as f:
+        tdata = json.load(f)
+    items = tdata.get("titles") if isinstance(tdata, dict) else tdata
+    titles = {}
+    for it in (items or []):
+        if isinstance(it, dict) and "id" in it:
+            try:
+                titles[str(int(it["id"]))] = str(it.get("title", "")).strip()
+            except (TypeError, ValueError):
+                continue
+    if not titles:
+        raise EngineError(f"ملف العناوين {topics_file} لا يحتوي على عناصر id/title صالحة", code="REVIEW_TOPICS_EMPTY")
+
+    # 3) قراءة المقدمات والنصوص
+    split_rx = _review_marker_regex(intro_end_marker)
+    intros = _review_parse_intros(paths["intros"], split_rx, expected)
+    texts = _review_parse_texts(paths["texts"])
+
+    # 4) فلترة TOPIC_IDS لو محددة من الواجهة
+    if ctx.topic_ids:
+        wanted = {str(i) for i in ctx.topic_ids}
+        intros = {n: v for n, v in intros.items() if n in wanted}
+        texts = {n: v for n, v in texts.items() if n in wanted}
+
+    if not intros:
+        raise EngineError(f"ملف المقدمات {intros_file} لا يحتوي على أي موضوع (فواصل 'Script N' غير موجودة)", code="REVIEW_INTROS_EMPTY")
+    if not texts:
+        raise EngineError(f"ملف النصوص {texts_file} لا يحتوي على أي موضوع (فواصل 'Script N' غير موجودة)", code="REVIEW_TEXTS_EMPTY")
+
+    # 5) الفحص البنيوي: العدد + الاكتمال + الخلل الواضح + التكرار الحرفي
+    issues = []
+    ids = sorted(set(intros) | set(texts), key=int)
+    topics_out = {}
+    dup_map = {}
+    for n in ids:
+        n_issues = []
+        ins = intros.get(n, [])
+        txs = texts.get(n, {})
+        if n not in intros:
+            n_issues.append("المقدمات مفقودة بالكامل")
+        elif len(ins) != expected:
+            n_issues.append(f"عدد المقدمات = {len(ins)} (المطلوب {expected})")
+        if n not in texts:
+            n_issues.append("النصوص مفقودة بالكامل")
+        else:
+            missing_parts = [str(k) for k in range(1, expected + 1) if not (txs.get(str(k)) or "").strip()]
+            extra_parts = [k for k in txs if not (k.isdigit() and 1 <= int(k) <= expected)]
+            if missing_parts:
+                n_issues.append(f"نصوص ناقصة/فارغة: Part {', '.join(missing_parts)}")
+            if extra_parts:
+                n_issues.append(f"أجزاء نصوص خارج النطاق: Part {', '.join(sorted(extra_parts))}")
+        title = titles.get(n, "")
+        if not title:
+            n_issues.append(f"العنوان غير موجود في {topics_file}")
+
+        pieces = [(f"المقدمة {i + 1}", v) for i, v in enumerate(ins)]
+        pieces += [(f"النص {k}", txs.get(str(k), "")) for k in range(1, expected + 1)]
+        for label, txt in pieces:
+            if not (txt or "").strip():
+                continue
+            wc = len(txt.split())
+            if wc < min_words:
+                n_issues.append(f"{label}: قصير بشكل غير طبيعي ({wc} كلمة)")
+            if "�" in txt:
+                n_issues.append(f"{label}: أحرف ترميز فاسد (U+FFFD)")
+            if re.search(r'(\*\*|##|```|<<<|>>>)', txt):
+                n_issues.append(f"{label}: بقايا تنسيق/ماركرز دخيلة")
+            dup_map.setdefault(_review_norm_key(txt), []).append(f"الموضوع {n} — {label}")
+
+        if n_issues:
+            issues.extend(f"الموضوع {n}: {x}" for x in n_issues)
+        topics_out[n] = {
+            "title": title,
+            "intros": list(ins),
+            "texts": {str(k): (txs.get(str(k)) or "").strip() for k in range(1, expected + 1)},
+        }
+
+    # نفس المحتوى حرفياً في أكتر من مكان = استبدال/نسخ محتمل
+    for key, places in dup_map.items():
+        if key and len(places) > 1:
+            issues.append("تكرار حرفي لنفس المحتوى في: " + " + ".join(places))
+
+    # 6) التقرير البنيوي (يتحفظ دايماً) + بوابة الإيقاف
+    report_lines = [
+        "تقرير الفحص البنيوي — مراجعة توافق النصوص مع المقدمات",
+        f"عدد المواضيع: {len(ids)} | المدى: {ids[0]} - {ids[-1]}",
+        f"المطلوب لكل موضوع: {expected} مقدمات + {expected} نصوص",
+        "",
+    ]
+    if issues:
+        report_lines.append(f"عدد المشاكل: {len(issues)}")
+        report_lines.extend(f"- {x}" for x in issues)
+    else:
+        report_lines.append("النتيجة: الملفات كاملة — كل المواضيع سليمة بنيوياً")
+    with open(ctx.output_path("structure_report.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(report_lines))
+
+    ctx.results[step["id"] + "_issues"] = issues
+    log(f"  review_build_cards: {len(ids)} موضوع ({ids[0]}-{ids[-1]}) | مشاكل بنيوية: {len(issues)}")
+    for x in issues[:10]:
+        log(f"  [!] {x}")
+
+    if issues and strict:
+        sample = " | ".join(issues[:5])
+        raise EngineError(
+            f"فشل فحص اكتمال الملفات: {len(issues)} مشكلة بنيوية — التفاصيل في structure_report.txt — أمثلة: {sample}",
+            code="REVIEW_STRUCTURE_FAILED",
+        )
+
+    return {"expected_pairs": expected, "topics": topics_out, "issues": issues}
+
+
+def action_review_build_prompts(step, ctx):
+    """بناء قائمة برومبتات للباتش: برومبت مستقل لكل موضوع فيه تعليمات الحكم +
+    كارت الموضوع (العنوان + المقدمات + النصوص) + صيغة إخراج JSON إلزامية بترجيع topic_id"""
+    cards = ctx.resolve(step["input"])
+    if isinstance(cards, str):
+        cards = json.loads(cards)
+    instructions = str(ctx.resolve(step.get("instructions", ""))).strip()
+    expected = int(cards.get("expected_pairs", 4))
+    topics = cards.get("topics", {})
+    if not topics:
+        raise EngineError("مفيش مواضيع لبناء برومبتات المراجعة", code="REVIEW_NO_TOPICS")
+
+    prompts = []
+    ordered_ids = sorted(topics, key=int)
+    for n in ordered_ids:
+        t = topics[n]
+        lines = [f"=== الموضوع {n} ===", f"عنوان الموضوع: {t.get('title', '')}"]
+        for k in range(1, expected + 1):
+            ins = t.get("intros", [])
+            intro = ins[k - 1] if len(ins) >= k else ""
+            text = (t.get("texts", {}) or {}).get(str(k), "")
+            lines.append(f"\n--- المقدمة {k} ---\n{intro}")
+            lines.append(f"\n--- النص {k} ---\n{text}")
+        card_text = "\n".join(lines)
+
+        format_block = (
+            "تعليمات الإخراج (إلزامية):\n"
+            "- أجب بكائن JSON واحد صالح فقط، بدون أي كلام قبله أو بعده وبدون أسوار كود.\n"
+            '- الهيكل المطلوب بالظبط:\n'
+            '{"topic_id": ' + str(int(n)) + ', "pairs": ['
+            '{"pair": 1, "text_vs_intro": "...", "intro_vs_title": "...", "text_vs_title": "...", "reason": "..."}, '
+            '... حتى "pair": ' + str(expected) + ']}\n'
+            '- قيمة كل حكم من الحقول الثلاثة إما "مطابق" أو "غير مطابق" حصراً — ممنوع أي قيمة تانية.\n'
+            '- عند أي حكم "غير مطابق" اكتب في reason السبب باختصار مع اقتباس 3-5 كلمات دليل من النص أو المقدمة. '
+            'لو كل أحكام الزوج "مطابق" اترك reason نصاً فارغاً.\n'
+            f"- topic_id لازم يكون {int(n)} بالظبط، وكل الأزواج من 1 إلى {expected} لازم تظهر."
+        )
+        prompts.append(f"{instructions}\n\n{'=' * 30}\n\n{card_text}\n\n{'=' * 30}\n\n{format_block}")
+
+    ctx.results[step["id"] + "_ids"] = ordered_ids
+    log(f"  review_build_prompts: {len(prompts)} برومبت (موضوع واحد لكل طلب)")
+    return prompts
+
+
+def _review_extract_json(raw):
+    """استخراج كائن JSON من رد الموديل بتسامح: أسوار كود، كلام حواليه"""
+    s = str(raw).strip()
+    for candidate in (s, re.sub(r'^```(?:json)?\s*|\s*```\s*$', '', s)):
+        try:
+            return json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    start, end = s.find('{'), s.rfind('}')
+    if start != -1 and end > start:
+        try:
+            return json.loads(s[start:end + 1])
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return None
+
+
+def action_review_parse_verdicts(step, ctx):
+    """ربط أحكام الباتش بالمواضيع عبر topic_id المرجَّع في كل رد + بناء التقرير.
+    أي رد غير قابل للقراءة أو حكم بقيمة غير معتمدة = «غير محكوم» صريح (مفيش فقد صامت
+    ومفيش تطمين بلا حكم فعلي). التفاصيل الكاملة بتتحفظ JSON والملخص بيرجع نصاً."""
+    results = ctx.resolve(step["input"])
+    cards = ctx.resolve(step["cards"])
+    if isinstance(cards, str):
+        cards = json.loads(cards)
+    if not isinstance(results, list):
+        results = [results]
+    expected = int(cards.get("expected_pairs", 4))
+    topics = cards.get("topics", {})
+    structural_issues = list(cards.get("issues", []))
+    save_json = step.get("save_json", "review_report.json")
+
+    FIELD_LABELS = (
+        ("text_vs_intro", "النص لا يتوافق مع مقدمته"),
+        ("intro_vs_title", "المقدمة لا تتوافق مع العنوان"),
+        ("text_vs_title", "النص لا يتوافق مع العنوان"),
+    )
+
+    parsed = {}
+    conflicts = []
+    unparseable = []
+    for idx, raw in enumerate(results):
+        data = _review_extract_json(raw)
+        tid = None
+        if isinstance(data, dict):
+            try:
+                tid = str(int(data.get("topic_id")))
+            except (TypeError, ValueError):
+                tid = None
+        if tid is None:
+            unparseable.append({"index": idx, "raw": str(raw)[:2000]})
+            continue
+        if tid in parsed:
+            conflicts.append(tid)
+            continue
+        parsed[tid] = data
+
+    mismatches = []      # أحكام «غير مطابق» مؤكدة
+    unjudged = []        # (topic, تفصيلة) — لازم إعادة تشغيل ليها
+    detail = {}
+    for n in sorted(topics, key=int):
+        v = parsed.get(n)
+        if not v:
+            reason = "رد الموديل مفقود أو غير قابل للقراءة" + (" (topic_id مكرر)" if n in conflicts else "")
+            unjudged.append((n, reason))
+            detail[n] = {"status": "غير محكوم", "reason": reason}
+            continue
+        pairs_raw = v.get("pairs")
+        judged_pairs = {}
+        if isinstance(pairs_raw, list):
+            for pr in pairs_raw:
+                if isinstance(pr, dict):
+                    try:
+                        judged_pairs[int(pr.get("pair"))] = pr
+                    except (TypeError, ValueError):
+                        continue
+        topic_detail = {"status": "محكوم", "pairs": {}}
+        for k in range(1, expected + 1):
+            pr = judged_pairs.get(k)
+            if not pr:
+                unjudged.append((n, f"الزوج {k} بلا حكم في رد الموديل"))
+                topic_detail["pairs"][str(k)] = {"status": "غير محكوم"}
+                continue
+            pair_detail = {"status": "محكوم", "reason": str(pr.get("reason", "")).strip()}
+            for field, label in FIELD_LABELS:
+                val = str(pr.get(field, "")).strip()
+                pair_detail[field] = val
+                if val == "مطابق":
+                    continue
+                if val == "غير مطابق":
+                    mismatches.append({
+                        "topic": n, "pair": k, "field": field, "issue": label,
+                        "reason": str(pr.get("reason", "")).strip(),
+                    })
+                else:
+                    unjudged.append((n, f"الزوج {k} — حقل {field} بقيمة غير معتمدة: '{val[:40]}'"))
+                    pair_detail["status"] = "غير محكوم"
+            topic_detail["pairs"][str(k)] = pair_detail
+        detail[n] = topic_detail
+
+    # حفظ التفاصيل الكاملة JSON
+    report_data = {
+        "topics_total": len(topics),
+        "judged": len([n for n in topics if n in parsed]),
+        "mismatches": mismatches,
+        "unjudged": [{"topic": n, "reason": r} for n, r in unjudged],
+        "structural_issues": structural_issues,
+        "unparseable_responses": unparseable,
+        "detail": detail,
+    }
+    with open(ctx.output_path(save_json), "w", encoding="utf-8") as f:
+        json.dump(report_data, f, ensure_ascii=False, indent=2)
+
+    # التقرير النصي
+    ids = sorted(topics, key=int)
+    lines = [
+        "تقرير مراجعة توافق النصوص مع المقدمات والعناوين",
+        f"المواضيع المفحوصة: {len(ids)} (من {ids[0]} إلى {ids[-1]})" if ids else "المواضيع المفحوصة: 0",
+        f"أحكام واردة: {report_data['judged']}/{len(ids)}",
+        "",
+    ]
+    if mismatches:
+        lines.append(f"⚠️ أحكام «غير مطابق» ({len(mismatches)}):")
+        for mm in mismatches:
+            reason = f" — السبب: {mm['reason']}" if mm["reason"] else ""
+            lines.append(f"- الموضوع {mm['topic']} — النص {mm['pair']}: {mm['issue']}{reason}")
+        lines.append("")
+    if unjudged:
+        lines.append(f"⌛ غير محكوم ({len(unjudged)}) — يلزم إعادة تشغيل لهذه المواضيع:")
+        for n, r in unjudged:
+            lines.append(f"- الموضوع {n}: {r}")
+        lines.append("")
+    if structural_issues:
+        lines.append(f"🧱 مشاكل بنيوية من فحص الاكتمال ({len(structural_issues)}):")
+        lines.extend(f"- {x}" for x in structural_issues)
+        lines.append("")
+
+    lines.append("الخلاصة النهائية:")
+    if not mismatches and not unjudged and not structural_issues:
+        lines.append("✅ كل الموضوعات مطابقة")
+    else:
+        summary_parts = []
+        if mismatches:
+            uniq_pairs = dict.fromkeys(f"الموضوع {mm['topic']} نص {mm['pair']}" for mm in mismatches)
+            summary_parts.append("غير مطابق: " + "، ".join(uniq_pairs))
+        if unjudged:
+            summary_parts.append("غير محكوم: " + "، ".join(sorted({n for n, _ in unjudged}, key=int)))
+        if structural_issues:
+            summary_parts.append(f"مشاكل بنيوية: {len(structural_issues)}")
+        lines.append("⚠️ " + " | ".join(summary_parts))
+
+    report_text = "\n".join(lines)
+    log(f"  review_parse_verdicts: أحكام={report_data['judged']}/{len(ids)} | غير مطابق={len(mismatches)} | غير محكوم={len(unjudged)}")
+    return report_text
+
+
 # ========== ACTIONS Registry ==========
 
 ACTIONS = {
@@ -4895,6 +5327,9 @@ ACTIONS = {
     "regenerate_failed_intros": action_regenerate_failed_intros,
     "filter_by_topics": action_filter_by_topics,
     "update_memory_bank": action_update_memory_bank,
+    "review_build_cards": action_review_build_cards,
+    "review_build_prompts": action_review_build_prompts,
+    "review_parse_verdicts": action_review_parse_verdicts,
 }
 
 # ========== REQUIRED_PARAMS ==========
@@ -4934,6 +5369,9 @@ REQUIRED_PARAMS = {
     "regenerate_failed_intros": ["input"],
     "filter_by_topics": ["input"],
     "update_memory_bank": ["input"],
+    "review_build_cards": [],
+    "review_build_prompts": ["input"],
+    "review_parse_verdicts": ["input", "cards"],
 }
 
 

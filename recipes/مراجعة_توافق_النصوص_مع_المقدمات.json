@@ -1,0 +1,59 @@
+{
+  "name": "مراجعة توافق النصوص مع المقدمات",
+  "steps": [
+    {
+      "id": "instructions",
+      "action": "read_input",
+      "file": "instructions.txt",
+      "label": "قراءة تعليمات الحكم"
+    },
+    {
+      "id": "cards",
+      "action": "review_build_cards",
+      "intros_file": "intros_output.docx",
+      "texts_file": "texts_output.docx",
+      "topics_file": "topics.json",
+      "expected_pairs": 4,
+      "strict": true,
+      "label": "بناء الكروت + فحص اكتمال الملفات"
+    },
+    {
+      "id": "prompts",
+      "action": "review_build_prompts",
+      "input": "{cards}",
+      "instructions": "{instructions}",
+      "label": "برومبت مستقل لكل موضوع (عنوان + 4 مقدمات + 4 نصوص)"
+    },
+    {
+      "id": "batch_job",
+      "action": "batch_send",
+      "prompts": "{prompts}",
+      "temperature": 0.1,
+      "max_tokens": 8000,
+      "save_as": "batch_job_info.json",
+      "label": "إرسال الدفعة (Batch API)"
+    },
+    {
+      "id": "verdicts_raw",
+      "action": "batch_retrieve",
+      "input": "{batch_job}",
+      "poll_interval": 60,
+      "label": "استقبال نتائج الدفعة"
+    },
+    {
+      "id": "report",
+      "action": "review_parse_verdicts",
+      "input": "{verdicts_raw}",
+      "cards": "{cards}",
+      "save_json": "review_report.json",
+      "label": "تحليل الأحكام وبناء التقرير"
+    },
+    {
+      "id": "save_report",
+      "action": "save_file",
+      "input": "{report}",
+      "save_as": "review_report.txt",
+      "label": "حفظ التقرير النهائي"
+    }
+  ]
+}
