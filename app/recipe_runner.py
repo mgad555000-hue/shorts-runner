@@ -2005,8 +2005,10 @@ def action_extract_screen_text(step, ctx):
         para = out_doc.add_paragraph()
         para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         _set_paragraph_rtl(para)
+        para.paragraph_format.line_spacing = Pt(28)
         run = para.add_run(screen_text)
         _set_run_rtl(run)
+        _set_run_arabic_font(run, "Arial", 14)
 
     out_path = ctx.output_path(save_as)
     tmp_path = out_path + ".tmp_save"
