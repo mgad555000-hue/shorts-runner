@@ -102,3 +102,63 @@ def validate_evidence_quote(quote, sources, min_words=3, max_words=12):
     ):
         return "دليل الاقتباس مش موجود حرفيا بعد التطبيع الآمن في المصدر المطلوب"
     return ""
+
+
+def fit_overlong_evidence_quote(quote, sources, min_words=3, max_words=12):
+    """
+    Shorten only a fully literal overlong quote to a valid literal prefix.
+
+    Model responses sometimes copy an entire keywords field even when asked
+    for 3-12 words. This compatibility step is deliberately narrow:
+
+    - an already-valid quote is returned unchanged;
+    - the complete overlong quote must itself be contiguous in one source;
+    - only an original-text prefix is returned, never normalized or invented;
+    - non-literal, short, empty, or otherwise malformed evidence still fails.
+
+    Return ``(fitted_quote, error)`` where ``error`` is empty on success.
+    """
+    error = validate_evidence_quote(
+        quote,
+        sources,
+        min_words=min_words,
+        max_words=max_words,
+    )
+    if not error:
+        return quote, ""
+    if not isinstance(quote, str):
+        return quote, error
+
+    quote_norm = normalize_evidence(quote)
+    quote_words = quote_norm.split()
+    if len(quote_words) <= max_words:
+        return quote, error
+    source_norms = [
+        normalize_evidence(source)
+        for source in sources
+        if isinstance(source, str)
+    ]
+    if not any(
+        normalized_quote_in_source(quote_norm, source_norm)
+        for source_norm in source_norms
+    ):
+        return quote, error
+
+    fitted = ""
+    for match in re.finditer(r"\S+", quote):
+        candidate = quote[: match.end()].strip()
+        word_count = len(normalize_evidence(candidate).split())
+        if word_count > max_words:
+            break
+        if word_count >= min_words:
+            fitted = candidate
+    if fitted:
+        fitted_error = validate_evidence_quote(
+            fitted,
+            sources,
+            min_words=min_words,
+            max_words=max_words,
+        )
+        if not fitted_error:
+            return fitted, ""
+    return quote, error

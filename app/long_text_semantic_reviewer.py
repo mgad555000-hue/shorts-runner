@@ -22,7 +22,10 @@ from long_text_reviewer import (
     _clean_ws,
     _request_id,
 )
-from review_evidence import validate_evidence_quote
+from review_evidence import (
+    fit_overlong_evidence_quote,
+    validate_evidence_quote,
+)
 
 
 STATUS_VALUES = {"سليم", "خطأ"}
@@ -80,6 +83,20 @@ def _strict_json_object(raw):
     if not isinstance(raw, str):
         return None
 
+    text = raw.strip()
+    lines = text.splitlines()
+    if lines and lines[0].strip().casefold() in {"```", "```json"}:
+        # Accept one bare JSON fence because real Vertex responses can add it
+        # despite an explicit JSON-only instruction. Prose outside the fence,
+        # a missing closing fence, or nested/multiple fences still fails.
+        if (
+            len(lines) < 3
+            or lines[-1].strip() != "```"
+            or any("```" in line for line in lines[1:-1])
+        ):
+            return None
+        text = "\n".join(lines[1:-1]).strip()
+
     def no_duplicate_keys(pairs):
         output = {}
         for key, value in pairs:
@@ -89,7 +106,7 @@ def _strict_json_object(raw):
         return output
 
     try:
-        return json.loads(raw.strip(), object_pairs_hook=no_duplicate_keys)
+        return json.loads(text, object_pairs_hook=no_duplicate_keys)
     except (json.JSONDecodeError, ValueError):
         return None
 
@@ -102,6 +119,23 @@ def _evidence_is_quote(evidence, sources):
         min_words=3,
         max_words=12,
     )
+
+
+def _fit_evidence_in_item(item, key, sources):
+    original = item.get(key)
+    fitted, error = fit_overlong_evidence_quote(
+        original,
+        sources,
+        min_words=3,
+        max_words=12,
+    )
+    if not error and fitted != original:
+        item[key] = fitted
+        log(
+            "  [semantic-evidence] تم تقصير اقتباس حرفي زائد إلى "
+            "12 كلمة مع الاحتفاظ بالرد الخام"
+        )
+    return error
 
 
 def _individual_check_orders():
@@ -274,6 +308,9 @@ def _build_individual_prompt(
         + json.dumps(sorted(SEMANTIC_ERROR_CODES), ensure_ascii=False)
         + "\n- evidence لازم يكون اقتباسا متصلا من 3 إلى 12 كلمة "
         "من البند نفسه في field_reviews، ومن أي بند ذي صلة في cross_checks.\n"
+        "- حتى لو البند قائمة كلمات مفتاحية أو هاشتاجات: اختار منه 3 إلى 12 "
+        "كلمة متصلة فقط. ممنوع نسخ القائمة أو البند بالكامل داخل evidence.\n"
+        "- ابدأ الرد بحرف { وأنهه بحرف }؛ ممنوع ```json أو أي code fence.\n"
         "- ممنوع إضافة أو حذف أي مفتاح في مستويات JSON المحددة.\n"
         "- المثال التالي يحدد الهيكل فقط؛ استبدل الأحكام والأدلة بالقيم "
         "الحقيقية مع إبقاء كل العناصر:\n"
@@ -363,6 +400,9 @@ def _build_cross_topic_prompt(
         + "\n- relation إما DUPLICATE أو SWAPPED أو COPIED فقط.\n"
         "- evidence_a اقتباس متصل من 3 إلى 12 كلمة من field_a في الطرف الأول، "
         "وevidence_b اقتباس مستقل من 3 إلى 12 كلمة من field_b في الطرف الثاني.\n"
+        "- ممنوع نسخ حقل كامل كدليل؛ حتى القوائم اختار منها 3 إلى 12 كلمة "
+        "متصلة فقط.\n"
+        "- ابدأ الرد بحرف { وأنهه بحرف }؛ ممنوع ```json أو أي code fence.\n"
         "- reason غير فارغ، وerror_codes قائمة غير فاضية من الأكواد المسموحة فقط:\n"
         + json.dumps(sorted(SEMANTIC_ERROR_CODES), ensure_ascii=False)
         + "\n- استخدم DUPLICATION لعلاقة DUPLICATE أو COPIED، واستخدم DUPLICATION "
@@ -673,11 +713,10 @@ def _validate_cross_topic_response(
             and field_a in CROSS_TOPIC_SOURCE_FIELDS
         ):
             source_a = _topic_field_source(topics[str(topic_id_a)], field_a)
-            evidence_error = validate_evidence_quote(
-                item.get("evidence_a"),
+            evidence_error = _fit_evidence_in_item(
+                item,
+                "evidence_a",
                 [source_a],
-                min_words=3,
-                max_words=12,
             )
             if evidence_error:
                 item_errors.append(f"evidence_a: {evidence_error}")
@@ -689,11 +728,10 @@ def _validate_cross_topic_response(
             and field_b in CROSS_TOPIC_SOURCE_FIELDS
         ):
             source_b = _topic_field_source(topics[str(topic_id_b)], field_b)
-            evidence_error = validate_evidence_quote(
-                item.get("evidence_b"),
+            evidence_error = _fit_evidence_in_item(
+                item,
+                "evidence_b",
                 [source_b],
-                min_words=3,
-                max_words=12,
             )
             if evidence_error:
                 item_errors.append(f"evidence_b: {evidence_error}")
@@ -979,13 +1017,14 @@ def action_long_text_review_parse_verdicts(step, ctx):
                 "field",
                 field_key,
             )
-            if isinstance(item, dict) and not _evidence_is_quote(
-                item.get("evidence"),
-                [topic_fields.get(field_key, "")],
-            ):
-                item_errors.append(
-                    "evidence مش اقتباسا حرفيا من 3 إلى 12 كلمة من البند نفسه"
+            if isinstance(item, dict):
+                evidence_error = _fit_evidence_in_item(
+                    item, "evidence", [topic_fields.get(field_key, "")]
                 )
+                if evidence_error:
+                    item_errors.append(
+                        "evidence مش اقتباسا حرفيا من 3 إلى 12 كلمة من البند نفسه"
+                    )
             if item_errors:
                 invalid_by_topic[topic_id].extend(
                     f"{field_key}: {error}" for error in item_errors
@@ -1012,13 +1051,14 @@ def action_long_text_review_parse_verdicts(step, ctx):
                 "check",
                 expected_name,
             )
-            if isinstance(item, dict) and not _evidence_is_quote(
-                item.get("evidence"),
-                all_sources,
-            ):
-                item_errors.append(
-                    "evidence مش اقتباسا حرفيا من 3 إلى 12 كلمة من بيانات الموضوع"
+            if isinstance(item, dict):
+                evidence_error = _fit_evidence_in_item(
+                    item, "evidence", all_sources
                 )
+                if evidence_error:
+                    item_errors.append(
+                        "evidence مش اقتباسا حرفيا من 3 إلى 12 كلمة من بيانات الموضوع"
+                    )
             if item_errors:
                 invalid_by_topic[topic_id].extend(
                     f"{expected_name}: {error}" for error in item_errors

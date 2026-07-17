@@ -21,6 +21,7 @@ from long_text_semantic_reviewer import (  # noqa: E402
     INDIVIDUAL_CROSS_CHECKS,
     _cross_topic_identity,
     _evidence_is_quote,
+    _strict_json_object,
     _policy_sha256,
     _topic_review_request_id,
     action_long_text_review_build_prompts,
@@ -223,6 +224,29 @@ class GlobalSemanticReviewTests(unittest.TestCase):
         self.assertTrue(report["all_clear"])
         self.assertTrue(report["cross_topic_completed"])
         self.assertEqual([], report["regenerate_topics"])
+
+    def test_one_bare_json_fence_is_accepted_but_prose_and_nested_fences_fail(self):
+        payload = {"schema_version": 2, "value": "سليم"}
+        encoded = json.dumps(payload, ensure_ascii=False)
+        self.assertEqual(
+            payload,
+            _strict_json_object(f"```json\n{encoded}\n```"),
+        )
+        self.assertEqual(
+            payload,
+            _strict_json_object(f"```\n{encoded}\n```"),
+        )
+        self.assertIsNone(
+            _strict_json_object(f"شرح قبل الرد\n```json\n{encoded}\n```")
+        )
+        self.assertIsNone(
+            _strict_json_object(
+                f"```json\n{encoded}\n```\n```json\n{encoded}\n```"
+            )
+        )
+        self.assertIsNone(
+            _strict_json_object(f"```json\n{encoded}")
+        )
 
     def test_valid_duplicate_or_swap_regenerates_both_topics(self):
         cards = make_cards()

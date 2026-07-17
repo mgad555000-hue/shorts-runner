@@ -7,7 +7,10 @@ APP_DIR = Path(__file__).resolve().parents[1]
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from review_evidence import validate_evidence_quote  # noqa: E402
+from review_evidence import (  # noqa: E402
+    fit_overlong_evidence_quote,
+    validate_evidence_quote,
+)
 
 
 class ReviewEvidenceTests(unittest.TestCase):
@@ -82,6 +85,29 @@ class ReviewEvidenceTests(unittest.TestCase):
             "النسبة بين 1.5 و2",
             "النسبة بين 1.5 و2 تحتاج متابعة",
         )
+
+    def test_overlong_literal_quote_is_safely_shortened_to_source_prefix(self):
+        source = ", ".join(
+            f"معلومة صوديوم {number}" for number in range(1, 19)
+        )
+        fitted, error = fit_overlong_evidence_quote(source, [source])
+        self.assertEqual("", error)
+        self.assertEqual(12, len(fitted.replace(",", "").split()))
+        self.assertEqual("", validate_evidence_quote(fitted, [source]))
+
+    def test_overlong_nonliteral_quote_is_not_repaired(self):
+        source = " ".join(f"كلمة{number}" for number in range(1, 20))
+        alien = source + " عبارة دخيلة"
+        fitted, error = fit_overlong_evidence_quote(alien, [source])
+        self.assertEqual(alien, fitted)
+        self.assertTrue(error)
+
+    def test_valid_quote_is_not_changed(self):
+        source = "مراقبة وظائف الكلى تساعد على فهم المؤشرات المبكرة"
+        quote = "وظائف الكلى تساعد على فهم"
+        fitted, error = fit_overlong_evidence_quote(quote, [source])
+        self.assertEqual(quote, fitted)
+        self.assertEqual("", error)
 
 
 if __name__ == "__main__":
