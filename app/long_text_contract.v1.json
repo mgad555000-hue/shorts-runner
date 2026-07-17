@@ -1,0 +1,508 @@
+{
+  "schema_version": 1,
+  "contract_id": "mg_runner.long_text_output",
+  "contract_version": 1,
+  "token_specs": [
+    {
+      "key": "section_youtube",
+      "kind": "header",
+      "label": "القسم الأول: اليوتيوب"
+    },
+    {
+      "key": "youtube_title_1",
+      "kind": "field",
+      "label": "العنوان الأول:"
+    },
+    {
+      "key": "youtube_title_2",
+      "kind": "field",
+      "label": "العنوان الثاني:"
+    },
+    {
+      "key": "youtube_description_1",
+      "kind": "field",
+      "label": "وصف الفيديو الأول:"
+    },
+    {
+      "key": "youtube_description_2",
+      "kind": "field",
+      "label": "وصف الفيديو الثاني:"
+    },
+    {
+      "key": "youtube_thumbnail_1",
+      "kind": "field",
+      "label": "جملة الصورة المصغرة للفيديو الأول:"
+    },
+    {
+      "key": "youtube_thumbnail_2",
+      "kind": "field",
+      "label": "جملة الصورة المصغرة للفيديو الثاني:"
+    },
+    {
+      "key": "youtube_keywords",
+      "kind": "field",
+      "label": "الكلمات المفتاحية:"
+    },
+    {
+      "key": "section_tiktok",
+      "kind": "header",
+      "label": "القسم الثاني: التيكتوك"
+    },
+    {
+      "key": "tiktok_title",
+      "kind": "field",
+      "label": "العنوان:"
+    },
+    {
+      "key": "tiktok_description",
+      "kind": "field",
+      "label": "الوصف:"
+    },
+    {
+      "key": "tiktok_screen",
+      "kind": "field",
+      "label": "جملة الشاشة:"
+    },
+    {
+      "key": "section_facebook",
+      "kind": "header",
+      "label": "القسم الثالث: الفيس بوك"
+    },
+    {
+      "key": "facebook_title",
+      "kind": "field",
+      "label": "العنوان:"
+    },
+    {
+      "key": "facebook_description",
+      "kind": "field",
+      "label": "الوصف:"
+    },
+    {
+      "key": "facebook_thumbnail",
+      "kind": "field",
+      "label": "جملة الصورة المصغرة:"
+    },
+    {
+      "key": "facebook_keywords",
+      "kind": "field",
+      "label": "الكلمات المفتاحية:"
+    },
+    {
+      "key": "section_translations",
+      "kind": "header",
+      "label": "القسم الرابع: ترجمة عنوان ووصف اليوتيوب"
+    },
+    {
+      "key": "translation_en",
+      "kind": "header",
+      "label": "1- الترجمة الإنجليزية"
+    },
+    {
+      "key": "translation_en_title",
+      "kind": "field",
+      "label": "العنوان:"
+    },
+    {
+      "key": "translation_en_description",
+      "kind": "field",
+      "label": "الوصف:"
+    },
+    {
+      "key": "translation_fr",
+      "kind": "header",
+      "label": "2- الترجمة الفرنسية"
+    },
+    {
+      "key": "translation_fr_title",
+      "kind": "field",
+      "label": "العنوان:"
+    },
+    {
+      "key": "translation_fr_description",
+      "kind": "field",
+      "label": "الوصف:"
+    },
+    {
+      "key": "translation_es",
+      "kind": "header",
+      "label": "3- الترجمة الإسبانية"
+    },
+    {
+      "key": "translation_es_title",
+      "kind": "field",
+      "label": "العنوان:"
+    },
+    {
+      "key": "translation_es_description",
+      "kind": "field",
+      "label": "الوصف:"
+    },
+    {
+      "key": "translation_de",
+      "kind": "header",
+      "label": "4- الترجمة الألمانية"
+    },
+    {
+      "key": "translation_de_title",
+      "kind": "field",
+      "label": "العنوان:"
+    },
+    {
+      "key": "translation_de_description",
+      "kind": "field",
+      "label": "الوصف:"
+    }
+  ],
+  "aliases": {
+    "headers": {
+      "section_youtube": [
+        "القسم الأول: اليوتيوب",
+        "القسم الاول: اليوتيوب",
+        "القسم الأول اليوتيوب"
+      ],
+      "section_tiktok": [
+        "القسم الثاني: التيكتوك",
+        "القسم الثاني: التيك توك",
+        "القسم الثاني: تيك توك",
+        "القسم الثاني التيكتوك"
+      ],
+      "section_facebook": [
+        "القسم الثالث: الفيس بوك",
+        "القسم الثالث: الفيسبوك",
+        "القسم الثالث الفيس بوك"
+      ],
+      "section_translations": [
+        "القسم الرابع: ترجمة عنوان ووصف اليوتيوب",
+        "القسم الرابع : ترجمة عنوان ووصف اليوتيوب",
+        "القسم الرابع ترجمة عنوان ووصف اليوتيوب"
+      ],
+      "translation_en": [
+        "1- الترجمة الإنجليزية",
+        "1- الترجمة الانجليزية",
+        "1 - الترجمة الإنجليزية",
+        "1. الترجمة الإنجليزية"
+      ],
+      "translation_fr": [
+        "2- الترجمة الفرنسية",
+        "2 - الترجمة الفرنسية",
+        "2. الترجمة الفرنسية"
+      ],
+      "translation_es": [
+        "3- الترجمة الإسبانية",
+        "3- الترجمة الأسبانية",
+        "3 - الترجمة الإسبانية",
+        "3. الترجمة الإسبانية"
+      ],
+      "translation_de": [
+        "4- الترجمة الألمانية",
+        "4- الترجمة الالمانية",
+        "4 - الترجمة الألمانية",
+        "4. الترجمة الألمانية"
+      ]
+    },
+    "fields": {
+      "youtube_title_1": [
+        "العنوان الأول",
+        "عنوان الفيديو الأول",
+        "العنوان الاول"
+      ],
+      "youtube_title_2": [
+        "العنوان الثاني",
+        "عنوان الفيديو الثاني"
+      ],
+      "youtube_description_1": [
+        "وصف الفيديو الأول",
+        "الوصف الأول",
+        "وصف الفيديو الاول",
+        "الوصف الاول"
+      ],
+      "youtube_description_2": [
+        "وصف الفيديو الثاني",
+        "الوصف الثاني"
+      ],
+      "youtube_thumbnail_1": [
+        "جملة الصورة المصغرة للفيديو الأول",
+        "جملة الصورة المصغرة الأولى",
+        "جملة الصورة المصغرة للفيديو الاول"
+      ],
+      "youtube_thumbnail_2": [
+        "جملة الصورة المصغرة للفيديو الثاني",
+        "جملة الصورة المصغرة الثانية"
+      ],
+      "youtube_keywords": [
+        "الكلمات المفتاحية",
+        "كلمات مفتاحية"
+      ],
+      "tiktok_title": [
+        "العنوان",
+        "عنوان",
+        "Title"
+      ],
+      "tiktok_description": [
+        "الوصف",
+        "وصف",
+        "Description"
+      ],
+      "tiktok_screen": [
+        "جملة الشاشة",
+        "جملة شاشة"
+      ],
+      "facebook_title": [
+        "العنوان",
+        "عنوان",
+        "Title"
+      ],
+      "facebook_description": [
+        "الوصف",
+        "وصف",
+        "Description"
+      ],
+      "facebook_thumbnail": [
+        "جملة الصورة المصغرة",
+        "جملة الشاشة",
+        "جملة مصغرة"
+      ],
+      "facebook_keywords": [
+        "الكلمات المفتاحية",
+        "كلمات مفتاحية"
+      ],
+      "translation_en_title": [
+        "العنوان",
+        "عنوان",
+        "Title"
+      ],
+      "translation_en_description": [
+        "الوصف",
+        "وصف",
+        "Description"
+      ],
+      "translation_fr_title": [
+        "العنوان",
+        "عنوان",
+        "Title"
+      ],
+      "translation_fr_description": [
+        "الوصف",
+        "وصف",
+        "Description"
+      ],
+      "translation_es_title": [
+        "العنوان",
+        "عنوان",
+        "Title"
+      ],
+      "translation_es_description": [
+        "الوصف",
+        "وصف",
+        "Description"
+      ],
+      "translation_de_title": [
+        "العنوان",
+        "عنوان",
+        "Title"
+      ],
+      "translation_de_description": [
+        "الوصف",
+        "وصف",
+        "Description"
+      ]
+    }
+  },
+  "contexts": {
+    "section_youtube": [
+      "youtube_title_1",
+      "youtube_title_2",
+      "youtube_description_1",
+      "youtube_description_2",
+      "youtube_thumbnail_1",
+      "youtube_thumbnail_2",
+      "youtube_keywords"
+    ],
+    "section_tiktok": [
+      "tiktok_title",
+      "tiktok_description",
+      "tiktok_screen"
+    ],
+    "section_facebook": [
+      "facebook_title",
+      "facebook_description",
+      "facebook_thumbnail",
+      "facebook_keywords"
+    ],
+    "translation_en": [
+      "translation_en_title",
+      "translation_en_description"
+    ],
+    "translation_fr": [
+      "translation_fr_title",
+      "translation_fr_description"
+    ],
+    "translation_es": [
+      "translation_es_title",
+      "translation_es_description"
+    ],
+    "translation_de": [
+      "translation_de_title",
+      "translation_de_description"
+    ]
+  },
+  "consumer_exact": {
+    "source_file": "scripts_output.docx",
+    "thumbnail_file": "thumbnail_texts.docx",
+    "topics_file": "topics.json",
+    "review_contract_file": "review_contract.json",
+    "topic_root_preferred": "titles",
+    "topic_root_alternative": "topics",
+    "topic_id_key": "id",
+    "topic_title_key": "title",
+    "script_heading_template": "Script {id}",
+    "script_heading_style": "Heading 2",
+    "body_style": "Normal",
+    "thumbnail_extract_start_key": "youtube_thumbnail_1",
+    "thumbnail_extract_end_key": "youtube_thumbnail_2",
+    "thumbnail_extract_start_label": "جملة الصورة المصغرة للفيديو الأول:",
+    "thumbnail_extract_end_label": "جملة الصورة المصغرة للفيديو الثاني:",
+    "consumer_exact_label_keys": [
+      "youtube_thumbnail_1",
+      "youtube_thumbnail_2"
+    ],
+    "token_order_is_exact": true,
+    "topic_order_is_exact": true,
+    "thumbnail_matches_youtube_thumbnail_1_exactly": true
+  },
+  "semantic": {
+    "field_keys": [
+      "youtube_title_1",
+      "youtube_title_2",
+      "youtube_description_1",
+      "youtube_description_2",
+      "youtube_thumbnail_1",
+      "youtube_thumbnail_2",
+      "youtube_keywords",
+      "tiktok_title",
+      "tiktok_description",
+      "tiktok_screen",
+      "facebook_title",
+      "facebook_description",
+      "facebook_thumbnail",
+      "facebook_keywords",
+      "translation_en_title",
+      "translation_en_description",
+      "translation_fr_title",
+      "translation_fr_description",
+      "translation_es_title",
+      "translation_es_description",
+      "translation_de_title",
+      "translation_de_description"
+    ],
+    "cross_checks": [
+      "SECOND_TITLE_EQUIVALENT",
+      "YOUTUBE_DESCRIPTIONS_EQUIVALENT_DISTINCT",
+      "PLATFORM_CONTENT_ALIGNED",
+      "TRANSLATIONS_FAITHFUL",
+      "SCIENTIFIC_ACCURACY_AND_UNCERTAINTY",
+      "NO_INTERNAL_PLATFORM_SWAP"
+    ],
+    "error_codes": [
+      "OFF_TOPIC",
+      "MEANING_MISMATCH",
+      "SCIENTIFIC_ERROR",
+      "OVERCLAIM",
+      "UNSAFE_WORDING",
+      "FORBIDDEN_METAPHOR",
+      "WEAK_CURIOSITY",
+      "UNNATURAL_LANGUAGE",
+      "SPELLING_GRAMMAR",
+      "DUPLICATION",
+      "WRONG_LANGUAGE",
+      "BAD_TRANSLATION",
+      "PLATFORM_MISMATCH",
+      "KEYWORDS_IRRELEVANT",
+      "HASHTAGS_IRRELEVANT",
+      "DESCRIPTION_NOT_EXPLANATORY",
+      "OTHER"
+    ],
+    "statuses": [
+      "سليم",
+      "خطأ"
+    ],
+    "evidence_min_words": 3,
+    "evidence_max_words": 12,
+    "response_schema_version": 2
+  },
+  "counts": {
+    "description_hashtags": 6,
+    "youtube_shared_required_hashtags": 4,
+    "youtube_unique_hashtags_each": 2,
+    "keywords_each": 18,
+    "keywords_delimiter": ",",
+    "youtube_thumbnail_min_words": 5,
+    "youtube_thumbnail_max_words": 9,
+    "facebook_thumbnail_min_words": 5,
+    "facebook_thumbnail_max_words": 9,
+    "tiktok_screen_min_words": 5,
+    "tiktok_screen_max_words": 8,
+    "short_phrase_min_lines": 2,
+    "short_phrase_max_lines": 3,
+    "short_phrase_max_words_per_line": 3,
+    "cross_topic_exact_duplicate_min_normalized_chars": 30
+  },
+  "required_hashtags": [
+    "#صحة",
+    "#الهشاب2000",
+    "#نصائح_طبية",
+    "#ناتوريا"
+  ],
+  "banned_phrases": [
+    "سر صحتك",
+    "تهديد",
+    "رأسا على عقب",
+    "رأسا علي عقب",
+    "تحول صحتك",
+    "خطر صامت",
+    "خفي",
+    "خفية",
+    "مخفي",
+    "مخفية",
+    "صامت",
+    "سحر",
+    "كنز"
+  ],
+  "formatting": {
+    "source": {
+      "font_name": "Arial",
+      "font_size_pt": 14,
+      "line_spacing_pt": 28,
+      "paragraph_alignment": "RIGHT",
+      "paragraph_bidi": {
+        "presence_required": true,
+        "allow_word_native_zero_with_right_alignment_and_run_rtl": true
+      },
+      "run_rtl": true,
+      "run_bidi_language_prefix": "ar",
+      "run_font_slots": [
+        "ascii",
+        "hAnsi",
+        "cs"
+      ]
+    },
+    "thumbnail": {
+      "font_name": "Arial",
+      "font_size_pt": 14,
+      "line_spacing_pt": 28,
+      "paragraph_alignment": "RIGHT",
+      "paragraph_bidi": {
+        "presence_required": true,
+        "allow_word_native_zero_with_right_alignment_and_run_rtl": true
+      },
+      "run_rtl": true,
+      "run_bidi_language_prefix": "ar",
+      "run_font_slots": [
+        "ascii",
+        "hAnsi",
+        "cs"
+      ]
+    }
+  }
+}
