@@ -14,9 +14,15 @@
       "label": "قراءة العناوين"
     },
     {
+      "id": "topics_markers",
+      "action": "topics_to_markers",
+      "input": "{topics}",
+      "label": "تحويل العناوين لماركرز"
+    },
+    {
       "id": "prompt",
       "action": "template",
-      "text": "{instructions}\n\n---\n\nقائمة العناوين المطلوب إنشاء تكست لها:\n\n{topics}",
+      "text": "{instructions}\n\n---\n\nقائمة العناوين المطلوب إنشاء تكست لها:\n\n{topics_markers}",
       "label": "تجميع البرومبت"
     },
     {
@@ -29,17 +35,50 @@
       "label": "توليد التكست"
     },
     {
+      "id": "contract_check",
+      "action": "validate_long_text_contract",
+      "input": "{scripts}",
+      "topics": "{topics}",
+      "label": "بوابة الولادة النظيفة: فحص كل موضوع ضد عقد الفاحص"
+    },
+    {
+      "id": "scripts_fixed",
+      "action": "regenerate_failed_long_topics",
+      "input": "{contract_check}",
+      "failed_ref": "{contract_check_failed}",
+      "instructions": "{instructions}",
+      "topics": "{topics}",
+      "max_attempts": 2,
+      "temperature": 0.3,
+      "max_tokens": 16000,
+      "label": "إعادة توليد الفاشل والمفقود فقط بتغذية راجعة بالعيوب"
+    },
+    {
+      "id": "final_check",
+      "action": "validate_long_text_contract",
+      "input": "{scripts_fixed}",
+      "topics": "{topics}",
+      "label": "تأكيد نهائي على العقد بعد الإصلاح"
+    },
+    {
+      "id": "guard",
+      "action": "assert_no_failures",
+      "input": "{final_check}",
+      "failed_refs": ["final_check_failed", "scripts_fixed_permanently_failed"],
+      "label": "حماية: منع الحفظ الجزئي أو الناقص"
+    },
+    {
       "id": "docx",
       "action": "save_docx",
-      "input": "{scripts}",
+      "input": "{guard}",
       "save_as": "scripts_output.docx",
       "font_size": 14,
-      "label": "حفظ Word"
+      "label": "حفظ Word (كتابة ذرية)"
     },
     {
       "id": "thumbnails",
       "action": "extract_screen_text",
-      "input": "{scripts}",
+      "input": "{guard}",
       "extract_label": "جملة الصورة المصغرة للفيديو الأول:",
       "extract_end": "جملة الصورة المصغرة للفيديو الثاني:",
       "save_as": "thumbnail_texts.docx",

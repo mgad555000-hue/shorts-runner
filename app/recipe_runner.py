@@ -1619,23 +1619,28 @@ def action_save_docx(step, ctx):
         log(f"  [XX] save_docx: {msg}")
         raise RuntimeError(msg)
 
+    # كتابة ذرية: الحفظ والمعالجة على ملف مؤقت ثم استبدال القياسي دفعة واحدة —
+    # فشل جزئي مايسيبش ملفاً قياسياً قديماً/نصف مكتوب يتقرا بالغلط في وصفة تالية
+    tmp_path = filepath + ".tmp_save"
+    doc.save(tmp_path)
+
+    # ضمانة نهائية: post-process لإجبار RTL + Right Alignment على كل XML
     try:
-        doc.save(filepath)
+        _post_process_docx_force_rtl(tmp_path)
+        log(f"  تم تطبيق post-process لـ RTL/Right Alignment")
+    except Exception as e:
+        log(f"  [!] post-process فشل (الملف محفوظ بدون post-process): {e}")
+
+    try:
+        os.replace(tmp_path, filepath)
     except PermissionError:
         base, ext = os.path.splitext(filepath)
         run_suffix = os.environ.get("RUN_ID") or datetime.now().strftime("%Y%m%d_%H%M%S")
         fallback_path = f"{base}_{run_suffix[:8]}{ext}"
         log(f"  [!] ملف Word مقفول أو غير قابل للكتابة: {filepath}")
         log(f"  [!] سيتم الحفظ باسم بديل: {fallback_path}")
-        doc.save(fallback_path)
+        os.replace(tmp_path, fallback_path)
         filepath = fallback_path
-
-    # ضمانة نهائية: post-process لإجبار RTL + Right Alignment على كل XML
-    try:
-        _post_process_docx_force_rtl(filepath)
-        log(f"  تم تطبيق post-process لـ RTL/Right Alignment")
-    except Exception as e:
-        log(f"  [!] post-process فشل (الملف محفوظ بدون post-process): {e}")
 
     log(f"  تم حفظ Word: {filepath}")
     return filepath
@@ -1991,14 +1996,26 @@ def action_extract_screen_text(step, ctx):
     if not results:
         raise EngineError("لم يتم العثور على أي جمل شاشة", code="NO_SCREEN_TEXT_FOUND")
 
-    # حفظ في ملف Word جديد بتنسيق MG Ranner
+    # حفظ في ملف Word جديد بتنسيق MG Ranner — RTL كامل + كتابة ذرية
     out_doc = Document()
     for script_num, screen_text in results:
-        out_doc.add_heading(f"Script {script_num}", level=2)
-        out_doc.add_paragraph(screen_text)
+        heading = out_doc.add_heading(f"Script {script_num}", level=2)
+        heading.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        _set_paragraph_rtl(heading)
+        para = out_doc.add_paragraph()
+        para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        _set_paragraph_rtl(para)
+        run = para.add_run(screen_text)
+        _set_run_rtl(run)
 
     out_path = ctx.output_path(save_as)
-    out_doc.save(out_path)
+    tmp_path = out_path + ".tmp_save"
+    out_doc.save(tmp_path)
+    try:
+        _post_process_docx_force_rtl(tmp_path)
+    except Exception as e:
+        log(f"  [!] post-process للصور المصغرة فشل: {e}")
+    os.replace(tmp_path, out_path)
 
     log(f"  تم استخراج {len(results)} جملة شاشة → {save_as}")
     return f"تم استخراج {len(results)} جملة شاشة"
@@ -4876,6 +4893,175 @@ def action_update_memory_bank(step, ctx):
     return text
 
 
+# ========== بوابة الولادة النظيفة لوصفة إنشاء تكست لونج ==========
+# فحص كل موضوع في النص الخام ضد عقد فاحص اللونج نفسه (استيراد مباشر من
+# long_text_reviewer — بلا عقد مكرر) قبل الحفظ، وإعادة توليد الفاشل/المفقود
+# فقط مع تغذية راجعة بالعيوب. الهدف: المخرج يولد ملتزماً بدل دورة توليد-رسوب.
+
+_LONG_TOPIC_RX = re.compile(r'<<<SCRIPT_(\d+)>>>(.*?)<<<END_SCRIPT>>>', re.DOTALL)
+
+
+def _long_titles_from_ref(step, ctx, key="topics"):
+    """قراءة قاموس العناوين {id: title} من مرجع خطوة topics.json"""
+    titles = {}
+    ref = step.get(key)
+    if not ref:
+        return titles
+    raw = ctx.resolve(ref)
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, ValueError):
+        return titles
+    items = data.get("titles") if isinstance(data, dict) else data
+    for it in (items or []):
+        if isinstance(it, dict) and "id" in it:
+            try:
+                titles[str(int(it["id"]))] = str(it.get("title", "")).strip()
+            except (TypeError, ValueError):
+                continue
+    return titles
+
+
+def _long_contract_issues_for_block(topic_id, block_text, titles):
+    """تشغيل فاحص عقد اللونج (المسميات والترتيب والقيم) على نص موضوع خام.
+    أي مشكلة = فشل في بوابة الولادة (الوليد لازم يكون نظيفاً حتى من تغيّر المسميات)."""
+    import long_text_reviewer as ltr
+
+    lines = [l for l in block_text.strip().splitlines()]
+    entry = {"id": topic_id, "paragraphs": [{"index": i, "text": l} for i, l in enumerate(lines)]}
+    issues = []
+    seen = set()
+    fields, _sequence = ltr._parse_script_fields(entry, "النص المولد", issues, seen)
+    ltr._validate_field_content(fields, titles.get(topic_id, ""), titles, topic_id, "النص المولد", issues, seen)
+    return [f"{i.get('code', '?')}: {i.get('message', '')}" for i in issues]
+
+
+def _long_validate_text(text, requested_ids, titles):
+    """فحص نص لونج كامل: يرجع (failed_ids بالترتيب, قاموس عيوب كل موضوع)"""
+    blocks = {}
+    for m in _LONG_TOPIC_RX.finditer(text):
+        tid = str(int(m.group(1)))
+        if tid not in blocks:
+            blocks[tid] = m.group(2)
+    failed = []
+    details = {}
+    for tid in requested_ids:
+        if tid not in blocks:
+            failed.append(tid)
+            details[tid] = ["الموضوع مفقود بالكامل من النص المولد"]
+            continue
+        topic_issues = _long_contract_issues_for_block(tid, blocks[tid], titles)
+        if topic_issues:
+            failed.append(tid)
+            details[tid] = topic_issues
+    return failed, details, blocks
+
+
+def _long_requested_ids(step, ctx, titles, text):
+    """المطلوبون = TOPIC_IDS المختارة، وإلا كل عناوين topics.json، وإلا ماركرز النص"""
+    if ctx.topic_ids:
+        return [str(i) for i in sorted(ctx.topic_ids)]
+    if titles:
+        return sorted(titles, key=int)
+    seen_ids = []
+    for m in _LONG_TOPIC_RX.finditer(text):
+        tid = str(int(m.group(1)))
+        if tid not in seen_ids:
+            seen_ids.append(tid)
+    return seen_ids
+
+
+def action_validate_long_text_contract(step, ctx):
+    """بوابة الولادة النظيفة: فحص كل موضوع مطلوب ضد عقد فاحص اللونج قبل الحفظ.
+    الفاشلون في ctx.results[step_id+'_failed'] والعيوب في [step_id+'_issues']"""
+    text = str(ctx.resolve(step["input"]))
+    titles = _long_titles_from_ref(step, ctx)
+    requested = _long_requested_ids(step, ctx, titles, text)
+    if not requested:
+        raise EngineError("مفيش مواضيع مطلوبة لفحص عقد اللونج", code="LONG_GATE_NO_TOPICS")
+
+    failed, details, _blocks = _long_validate_text(text, requested, titles)
+    ctx.results[step["id"] + "_failed"] = failed
+    ctx.results[step["id"] + "_issues"] = details
+    log(f"  validate_long_text_contract: {len(requested)} موضوع | فاشل بالعقد: {len(failed)}")
+    for tid in failed[:5]:
+        log(f"  [!] الموضوع {tid}: " + " | ".join(details[tid][:3]))
+    return text
+
+
+def action_regenerate_failed_long_topics(step, ctx):
+    """إعادة توليد المواضيع الفاشلة/المفقودة فقط بتغذية راجعة بعيوبها، مع إعادة
+    الفحص بعد كل محاولة. الناجون بيتركبوا مكانهم بالترتيب المطلوب الكامل."""
+    text = str(ctx.resolve(step["input"]))
+    failed = list(ctx.resolve(step.get("failed_ref", "")) or [])
+    instructions = str(ctx.resolve(step.get("instructions", ""))).strip()
+    titles = _long_titles_from_ref(step, ctx)
+    requested = _long_requested_ids(step, ctx, titles, text)
+    max_attempts = int(step.get("max_attempts", 2))
+    step_model = step.get("model") or ctx.model
+    temperature = step.get("temperature", 0.3)
+    max_tokens = step.get("max_tokens", 16000)
+    thinking_budget, thinking_level = _effective_thinking(step, ctx)
+
+    # إعادة اشتقاق العيوب داخلياً (بدل مرجع خطوة) — نفس الفاحص فنفس النتيجة
+    failed_now, details, blocks = _long_validate_text(text, requested, titles)
+    if not failed:
+        failed = failed_now
+
+    permanently_failed = []
+    for tid in failed:
+        title = titles.get(tid, "")
+        prev_issues = details.get(tid, [])
+        ok = False
+        for attempt in range(1, max_attempts + 1):
+            feedback = ""
+            if prev_issues:
+                feedback = (
+                    "\n\nتنبيه: محاولة سابقة لهذا الموضوع رُفضت للأسباب الآتية — تجنبها كلها بدقة:\n- "
+                    + "\n- ".join(str(x)[:200] for x in prev_issues[:8])
+                )
+            prompt = (
+                f"{instructions}\n\n---\n\nقائمة العناوين المطلوب إنشاء تكست لها:\n\n"
+                f"<<<SCRIPT_{tid}>>>\n{title}\n<<<END_SCRIPT>>>{feedback}"
+            )
+            log(f"  → إعادة توليد الموضوع {tid} (محاولة {attempt}/{max_attempts})")
+            try:
+                r = generate(prompt=prompt, model=step_model, temperature=temperature,
+                             max_tokens=max_tokens, thinking_budget=thinking_budget,
+                             thinking_level=thinking_level)
+            except Exception as e:
+                prev_issues = [f"فشل النداء: {str(e)[:200]}"]
+                continue
+            if not (r.success and r.data):
+                prev_issues = [f"نداء فاشل: {getattr(r, 'error', 'رد فارغ')}"]
+                continue
+            ctx.record_usage(f"{step['id']}_{tid}_a{attempt}", "direct", detect_provider(step_model), step_model, r.token_usage)
+            m = _LONG_TOPIC_RX.search(str(r.data))
+            candidate = m.group(2) if m else str(r.data)
+            new_issues = _long_contract_issues_for_block(tid, candidate, titles)
+            if new_issues:
+                prev_issues = new_issues
+                log(f"  [!] الموضوع {tid} لسه فاشل بعد المحاولة {attempt}: {new_issues[0][:120]}")
+                continue
+            blocks[tid] = candidate
+            ok = True
+            log(f"  ✓ الموضوع {tid} اتولد نظيفاً بالعقد")
+            break
+        if not ok:
+            permanently_failed.append(tid)
+
+    ctx.results[step["id"] + "_permanently_failed"] = permanently_failed
+    if permanently_failed:
+        log(f"  [!!] مواضيع فشلت نهائياً بعد {max_attempts} محاولات: {permanently_failed}")
+
+    # التركيب النهائي بالترتيب المطلوب الكامل (بيصلح الترتيب والفجوات معاً)
+    combined = []
+    for tid in requested:
+        if tid in blocks:
+            combined.append(f"<<<SCRIPT_{tid}>>>\n{blocks[tid].strip()}\n<<<END_SCRIPT>>>")
+    return "\n\n".join(combined)
+
+
 # ========== أكشنز مراجعة توافق النصوص مع المقدمات ==========
 # بايثون بيجهّز «كارت» لكل موضوع (عنوان + 4 مقدمات + 4 نصوص) ويتحقق من اكتمال
 # الملفات بنيوياً قبل أي صرف API، والموديل بيحكم على التوافق الدلالي عبر الـ
@@ -6238,6 +6424,8 @@ ACTIONS = {
     "review_build_cards": action_review_build_cards,
     "review_build_prompts": action_review_build_prompts,
     "review_parse_verdicts": action_review_parse_verdicts,
+    "validate_long_text_contract": action_validate_long_text_contract,
+    "regenerate_failed_long_topics": action_regenerate_failed_long_topics,
 }
 
 # ========== REQUIRED_PARAMS ==========
@@ -6280,6 +6468,8 @@ REQUIRED_PARAMS = {
     "review_build_cards": [],
     "review_build_prompts": ["input"],
     "review_parse_verdicts": ["input", "cards"],
+    "validate_long_text_contract": ["input"],
+    "regenerate_failed_long_topics": ["input"],
 }
 
 
