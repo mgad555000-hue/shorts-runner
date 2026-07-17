@@ -33,6 +33,7 @@ Thumbs.db
 # Test files
 test_*.py
 debug_*.py
+!app/tests/test_review_recipe.py
 
 # Large local directories
 Channel_lists&videos/
