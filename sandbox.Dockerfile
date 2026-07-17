@@ -53,6 +53,11 @@ RUN pip install --no-cache-dir \
     backoff
 
 # مجلد العمل
+WORKDIR /app
+
+# كود تشغيل الوصفات داخل الـ sandbox
+COPY app /app/app
+
 WORKDIR /mnt/output
 
 # متغيرات بيئة افتراضية

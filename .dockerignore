@@ -4,6 +4,8 @@ shorts/
 .git/
 __pycache__/
 *.pyc
+app/_*/
+app/tests/
 .env
 node_modules/
 New folder/
