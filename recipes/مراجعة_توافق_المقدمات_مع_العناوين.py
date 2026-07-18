@@ -100,7 +100,11 @@ CONFIG = {
             "save_json": "review_report.json",
             "save_text": "review_report.txt",
             "fail_incomplete": True,
-            "label": "تحليل الأحكام والأدلة وبناء التقرير",
+            "retry_unjudged": True,
+            "retry_max": 3,
+            "retry_temperature": 0.4,
+            "retry_requests_file": "review_requests.json",
+            "label": "تحليل الأحكام والأدلة + إعادة محاولة فورية للمواضيع غير المحكومة وبناء التقرير",
         },
         {
             "id": "save_report",
