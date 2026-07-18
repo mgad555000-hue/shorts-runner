@@ -46,13 +46,12 @@ CONFIG = {
         {
             "id": "cards",
             "action": "title_review_build_cards",
-            "intros_file": "intros.docx",
             "topics_file": "topics.json",
             "min_words": 10,
             "require_contiguous_ids": False,
             "allow_topic_filter": True,
             "strict": True,
-            "label": "بناء الكروت + فحص اكتمال الملفات",
+            "label": "بناء الكروت من كل ملفات Word في المدخلات (بأي اسم وفي المجلدات الفرعية) + فحص الاكتمال",
         },
         {
             "id": "prompts",

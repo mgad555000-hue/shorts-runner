@@ -159,9 +159,34 @@ def _parse_single_intros(path):
     return intros, anomalies, global_issues
 
 
+def _discover_intro_files(input_dir):
+    """كل ملفات Word في مجلد المدخلات ومجلداته الفرعية، بأي اسم وبأي عدد.
+
+    يُستبعد فقط ملفات قفل Word المؤقتة (~$...) والملفات المخفية (تبدأ بنقطة).
+    الترتيب حتمي (بالمسار النسبي) حتى تكون التقارير مستقرة بين التشغيلات.
+    """
+    found = []
+    for root, dirs, files in os.walk(input_dir):
+        dirs.sort()
+        for name in sorted(files):
+            if not name.lower().endswith(".docx"):
+                continue
+            if name.startswith("~$") or name.startswith("."):
+                continue
+            full_path = os.path.join(root, name)
+            rel_path = os.path.relpath(full_path, input_dir).replace(os.sep, "/")
+            found.append((rel_path, full_path))
+    return found
+
+
 def action_title_review_build_cards(step, ctx):
-    """بناء كروت (عنوان + مقدمة) مع بوابة اكتمال صارمة قبل أي صرف API."""
-    intros_file = step.get("intros_file", "intros.docx")
+    """بناء كروت (عنوان + مقدمة) مع بوابة اكتمال صارمة قبل أي صرف API.
+
+    ملفات المقدمات: افتراضياً كل ملفات docx في مجلد المدخلات ومجلداته الفرعية
+    بأي اسم وبأي عدد (تُدمج مع منع تكرار رقم الموضوع بين الملفات). تمرير
+    intros_file صراحةً في الخطوة يحصر القراءة في هذا الملف الواحد (توافق رجعي).
+    """
+    intros_file = step.get("intros_file", "")
     topics_file = step.get("topics_file", "topics.json")
 
     def write_preflight_failure(message):
@@ -188,23 +213,35 @@ def action_title_review_build_cards(step, ctx):
 
     strict = str(step.get("strict", True)).strip().lower() not in ("false", "0", "no")
 
-    paths = {}
-    for key, filename in (("intros", intros_file), ("topics", topics_file)):
-        file_path = ctx.input_path(filename)
-        if not os.path.isfile(file_path):
-            message = f"ملف المراجعة غير موجود في input: {filename}"
-            write_preflight_failure(message)
-            raise EngineError(message, code="TITLE_REVIEW_INPUT_MISSING")
-        paths[key] = file_path
-
-    if not str(intros_file).lower().endswith(".docx"):
-        message = f"{intros_file} لازم يكون ملف Word بامتداد docx"
-        write_preflight_failure(message)
-        raise EngineError(message, code="TITLE_REVIEW_INPUT_UNSUPPORTED")
     if not str(topics_file).lower().endswith(".json"):
         message = f"{topics_file} لازم يكون ملف JSON"
         write_preflight_failure(message)
         raise EngineError(message, code="TITLE_REVIEW_INPUT_UNSUPPORTED")
+    topics_path = ctx.input_path(topics_file)
+    if not os.path.isfile(topics_path):
+        message = f"ملف المراجعة غير موجود في input: {topics_file}"
+        write_preflight_failure(message)
+        raise EngineError(message, code="TITLE_REVIEW_INPUT_MISSING")
+    paths = {"topics": topics_path}
+
+    if intros_file:
+        # وضع الملف الواحد المحدد بالاسم (توافق رجعي مع الوصفات القديمة)
+        if not str(intros_file).lower().endswith(".docx"):
+            message = f"{intros_file} لازم يكون ملف Word بامتداد docx"
+            write_preflight_failure(message)
+            raise EngineError(message, code="TITLE_REVIEW_INPUT_UNSUPPORTED")
+        single_path = ctx.input_path(intros_file)
+        if not os.path.isfile(single_path):
+            message = f"ملف المراجعة غير موجود في input: {intros_file}"
+            write_preflight_failure(message)
+            raise EngineError(message, code="TITLE_REVIEW_INPUT_MISSING")
+        intro_files = [(str(intros_file).replace(os.sep, "/"), single_path)]
+    else:
+        intro_files = _discover_intro_files(ctx.input_path(""))
+        if not intro_files:
+            message = "مفيش أي ملف Word (docx) في مجلد المدخلات أو مجلداته الفرعية"
+            write_preflight_failure(message)
+            raise EngineError(message, code="TITLE_REVIEW_INPUT_MISSING")
 
     try:
         with open(paths["topics"], "r", encoding="utf-8-sig") as topics_handle:
@@ -262,16 +299,34 @@ def action_title_review_build_cards(step, ctx):
         write_preflight_failure(message)
         raise EngineError(message, code="TITLE_REVIEW_TOPICS_EMPTY")
 
-    try:
-        intros, intro_anomalies, intro_global = _parse_single_intros(paths["intros"])
-    except EngineError as exc:
-        write_preflight_failure(str(exc))
-        raise
-    except ValueError as exc:
-        write_preflight_failure(str(exc))
-        raise EngineError(str(exc), code="TITLE_REVIEW_STRUCTURE_FAILED") from exc
-
-    global_issues.extend(f"ملف المقدمات: {issue}" for issue in intro_global)
+    multi_file = len(intro_files) > 1
+    intros = {}
+    intro_anomalies = {}
+    source_by_topic = {}
+    for rel_path, full_path in intro_files:
+        prefix = f"[{rel_path}] " if multi_file or not intros_file else ""
+        try:
+            file_intros, file_anomalies, file_global = _parse_single_intros(full_path)
+        except EngineError as exc:
+            message = f"[{rel_path}] {exc}"
+            write_preflight_failure(message)
+            raise EngineError(message, code=getattr(exc, "code", "TITLE_REVIEW_INTROS_INVALID")) from exc
+        except ValueError as exc:
+            message = f"[{rel_path}] {exc}"
+            write_preflight_failure(message)
+            raise EngineError(message, code="TITLE_REVIEW_STRUCTURE_FAILED") from exc
+        global_issues.extend(f"ملف المقدمات: {prefix}{issue}" for issue in file_global)
+        for topic_id, issues in file_anomalies.items():
+            intro_anomalies.setdefault(topic_id, []).extend(f"{prefix}{issue}" for issue in issues)
+        for topic_id, intro_text in file_intros.items():
+            if topic_id in intros:
+                intro_anomalies.setdefault(topic_id, []).append(
+                    f"رقم Script {topic_id} موجود في ملفين: "
+                    f"{source_by_topic[topic_id]} و{rel_path} — سيب نسخة واحدة بس"
+                )
+                continue
+            intros[topic_id] = intro_text
+            source_by_topic[topic_id] = rel_path
 
     allow_topic_filter = str(step.get("allow_topic_filter", True)).strip().lower() not in (
         "false", "0", "no"
@@ -337,7 +392,10 @@ def action_title_review_build_cards(step, ctx):
             duplicate_intros.setdefault(_review_norm_key(intro), []).append(topic_id)
 
         topic_card = {"title": title, "intro": intro}
+        # البصمة من العنوان والمقدمة فقط؛ حقل source وصفي ولا يدخل في الهوية
         topic_card["request_id"] = _card_request_id(topic_id, topic_card)
+        if topic_id in source_by_topic:
+            topic_card["source"] = source_by_topic[topic_id]
         topics_out[topic_id] = topic_card
 
         blocking = list(dict.fromkeys(blocking))
@@ -348,8 +406,12 @@ def action_title_review_build_cards(step, ctx):
 
     for key, places in duplicate_intros.items():
         if key and len(places) > 1:
+            labeled = [
+                f"{topic_id} (ملف {source_by_topic[topic_id]})" if topic_id in source_by_topic else topic_id
+                for topic_id in places
+            ]
             issues.append(
-                "تكرار حرفي لنفس المقدمة في المواضيع: " + "، ".join(places)
+                "تكرار حرفي لنفس المقدمة في المواضيع: " + "، ".join(labeled)
                 + " — علامة استبدال أو نسخ"
             )
     for key, places in duplicate_titles.items():
@@ -367,9 +429,13 @@ def action_title_review_build_cards(step, ctx):
         )
         issues = list(dict.fromkeys(issues))
 
+    files_note = ", ".join(rel for rel, _ in intro_files[:20])
+    if len(intro_files) > 20:
+        files_note += f" ... (+{len(intro_files) - 20})"
     report_lines = [
         f"تقرير الفحص البنيوي — {_REPORT_TITLE}",
         f"عدد المواضيع: {len(ids)} | المدى: {ids[0]} - {ids[-1]}",
+        f"ملفات المقدمات المقروءة: {len(intro_files)} — {files_note}",
         "المطلوب لكل موضوع: عنوان واحد + مقدمة واحدة",
         f"إصدار مخطط الحكم: {TITLE_REVIEW_SCHEMA_VERSION}",
         "",
@@ -411,6 +477,7 @@ def action_title_review_build_cards(step, ctx):
 
     return {
         "schema_version": TITLE_REVIEW_SCHEMA_VERSION,
+        "source_files": [rel for rel, _ in intro_files],
         "topics": topics_out,
         "issues": issues,
         "blocked": blocked,
@@ -733,15 +800,16 @@ def _judge_results(results, topics, blocked, structural_issues):
         else:
             fully_judged_topics.append(topic_id)
             if is_mismatch:
-                mismatches.append(
-                    {
-                        "topic": topic_id,
-                        "field": "intro_vs_title",
-                        "issue": "المقدمة لا تتوافق مع العنوان",
-                        "reason": reason_clean,
-                        "evidence": intro_evidence,
-                    }
-                )
+                mismatch_record = {
+                    "topic": topic_id,
+                    "field": "intro_vs_title",
+                    "issue": "المقدمة لا تتوافق مع العنوان",
+                    "reason": reason_clean,
+                    "evidence": intro_evidence,
+                }
+                if topics[topic_id].get("source"):
+                    mismatch_record["file"] = topics[topic_id]["source"]
+                mismatches.append(mismatch_record)
         detail[topic_id] = topic_detail
 
     unjudged = list(dict.fromkeys(unjudged))
@@ -926,6 +994,7 @@ def action_title_review_parse_verdicts(step, ctx):
     ids = sorted(topics, key=int)
     topic_filter = cards.get("topic_filter")
     sequence_gaps = cards.get("sequence_gaps") or {}
+    source_files = cards.get("source_files") or []
     lines = [
         f"تقرير {_REPORT_TITLE}",
         f"المواضيع المفحوصة: {len(ids)} (من {ids[0]} إلى {ids[-1]})",
@@ -933,6 +1002,8 @@ def action_title_review_parse_verdicts(step, ctx):
         f"ردود سليمة الهوية: {responses_received}/{sent_count}",
         "",
     ]
+    if len(source_files) > 1:
+        lines.insert(2, f"ملفات المقدمات: {len(source_files)}")
     if retry_summary["repaired"]:
         lines.append(
             f"🔁 إعادة محاولة فورية: أُصلح {len(retry_summary['repaired'])} موضوع كان غير محكوم "
@@ -961,7 +1032,8 @@ def action_title_review_parse_verdicts(step, ctx):
         lines.append(f"⚠️ مقدمات لا تتعلق بعناوينها ({len(mismatches)}):")
         for mismatch in mismatches:
             reason = f" — السبب: {mismatch['reason']}" if mismatch["reason"] else ""
-            lines.append(f"- الموضوع {mismatch['topic']}: {mismatch['issue']}{reason}")
+            file_note = f" (ملف {mismatch['file']})" if mismatch.get("file") else ""
+            lines.append(f"- الموضوع {mismatch['topic']}{file_note}: {mismatch['issue']}{reason}")
         lines.append("")
     if unjudged:
         unjudged_topics = sorted({entry["topic"] for entry in unjudged}, key=int)
