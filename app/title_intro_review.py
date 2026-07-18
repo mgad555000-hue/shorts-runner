@@ -49,15 +49,29 @@ _TOP_REQUIRED = {
     "reason",
 }
 
-# يُلحَق ببرومبت إعادة المحاولة: يوجّه الموديل لسبب الرفض الأكثر شيوعاً (اقتباس
-# غير حرفي بفرق حرف/تصريف) دون تغيير قواعد الحكم، فينسخ مقطعاً موجوداً كما هو.
-_RETRY_EVIDENCE_HINT = (
-    "\n\n[إعادة محاولة]: رُفض ردك السابق لأن حقل intro_evidence لم يُطابِق المقدمة "
-    "حرفياً بعد التطبيع. اختر مقطعاً من 3 إلى 12 كلمة متتالية موجوداً فعلاً داخل نص "
-    "المقدمة أعلاه، وانسخه حرفاً بحرف كما هو تماماً بلا أي تعديل إملائي أو نحوي: لا "
-    "تغيّر أحرف أي كلمة ولا تُصرّفها (مثال: لا تكتب «تخلق» بدل «يخلق»)، وتأكد أن كل "
-    "كلمة في الاقتباس مطابقة لمثيلتها في المقدمة. باقي الحقول والحكم كما هي في تعليمات الإخراج."
+# قاعدة النسخ الحرفي: تُلحَق بتلميح إعادة المحاولة لما يكون سبب الرفض متعلقاً
+# بالاقتباس (الخطأ الأكثر شيوعاً: تغيير حرف/تصريف أثناء النقل) أو الرد مفقوداً.
+_RETRY_EVIDENCE_RULE = (
+    "\n- بخصوص intro_evidence: اختر مقطعاً من 3 إلى 12 كلمة متتالية موجوداً فعلاً "
+    "داخل نص المقدمة أعلاه، وانسخه حرفاً بحرف كما هو تماماً بلا أي تعديل إملائي أو "
+    "نحوي: لا تغيّر أحرف أي كلمة ولا تُصرّفها (مثال: لا تكتب «تخلق» بدل «يخلق»)، "
+    "وتأكد أن كل كلمة في الاقتباس مطابقة لمثيلتها في المقدمة."
 )
+
+
+def _build_retry_hint(reasons):
+    """تلميح إعادة المحاولة بأسباب الرفض الفعلية لهذا الموضوع، بلا تغيير قواعد الحكم."""
+    unique = [reason for reason in dict.fromkeys(reasons) if reason]
+    lines = "\n".join(f"- {reason}" for reason in unique) or "- الرد السابق مفقود أو غير قابل للقراءة"
+    hint = (
+        "\n\n[إعادة محاولة]: رُفض ردك السابق على هذا الموضوع للأسباب التالية:\n"
+        + lines
+        + "\nأعد إخراج كائن JSON واحداً كاملاً بكل الحقول حسب تعليمات الإخراج نفسها، "
+        "مع إصلاح هذه الأسباب حصراً وعدم تغيير أي شيء آخر."
+    )
+    if not unique or any("intro_evidence" in reason for reason in unique):
+        hint += _RETRY_EVIDENCE_RULE
+    return hint
 
 
 def _extract_json_tolerant(raw):
@@ -811,6 +825,24 @@ def action_title_review_parse_verdicts(step, ctx):
         if prompt_by_topic:
             import engine
 
+            # عنصر باتش فاشل بيرجع من المحرك كنص فاضي «في مكانه» (علامة موثقة للمحاذاة).
+            # بلا استبعاده يفضل «رداً شاذاً» فيُفشل الرن حتى لو إعادة المحاولة نجحت.
+            # بنستبعد الفاضي حصراً (مش أي رد تالف) — وموضوعه يظل «غير محكوم» ويُعاد
+            # نداؤه بنداء مباشر متحقق الهوية؛ لو فشل النداء يفضل الفشل المغلق كما هو.
+            empty_placeholders = [
+                item for item in results if isinstance(item, str) and not item.strip()
+            ]
+            if empty_placeholders:
+                results[:] = [
+                    item for item in results
+                    if not (isinstance(item, str) and not item.strip())
+                ]
+                log(
+                    f"  [retry] استبعاد {len(empty_placeholders)} عنصر فاضي "
+                    "(فشل عنصر داخل الباتش) — موضوعه هيتعوض بنداء مباشر"
+                )
+                report_data = _judge_results(results, topics, blocked, structural_issues)
+
             retry_system = str(
                 step.get("retry_system_prompt")
                 or "أنت مدقق دلالي صارم. نفذ قواعد المراجعة وأخرج JSON فقط. "
@@ -825,12 +857,11 @@ def action_title_review_parse_verdicts(step, ctx):
             except (TypeError, ValueError):
                 retry_tokens = 6000
             for attempt in range(retry_max):
+                reasons_by_topic = {}
+                for entry in report_data["unjudged"]:
+                    reasons_by_topic.setdefault(entry["topic"], []).append(entry["reason"])
                 pending = sorted(
-                    dict.fromkeys(
-                        entry["topic"]
-                        for entry in report_data["unjudged"]
-                        if entry["topic"] in prompt_by_topic
-                    ),
+                    (topic_id for topic_id in reasons_by_topic if topic_id in prompt_by_topic),
                     key=int,
                 )
                 if not pending:
@@ -842,7 +873,7 @@ def action_title_review_parse_verdicts(step, ctx):
                     retry_summary["retried"].append(topic_id)
                     try:
                         result = engine.generate(
-                            prompt_by_topic[topic_id] + _RETRY_EVIDENCE_HINT,
+                            prompt_by_topic[topic_id] + _build_retry_hint(reasons_by_topic.get(topic_id, [])),
                             model=ctx.model,
                             system_prompt=retry_system,
                             temperature=retry_temp,
